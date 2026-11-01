@@ -45,9 +45,10 @@ pub enum GuestCommand {
 
 /// Versioned guest operations with an explicit deadline and a bounded body.
 ///
-/// Implementations must return by the deadline. This fake returns immediately
-/// and does not open a connection. Cancellation is an already-due deadline.
-/// An expired call does not consume a scripted reply.
+/// This fake returns immediately and does not open a connection. An
+/// already-due deadline is rejected before dispatch only. That refusal is
+/// not cancellation of an operation already in progress. An expired call
+/// does not consume a scripted reply.
 pub trait GuestChannel {
     /// Version this channel speaks. Must be [`GUEST_CHANNEL_VERSION`].
     ///
@@ -64,9 +65,16 @@ pub trait GuestChannel {
     fn bootstrap(&mut self, deadline: StageDeadline) -> Result<BoundedOutput, CallError>;
 
     /// Fixed login. The method takes no credential.
+    ///
+    /// The deadline is checked before dispatch only. It does not cancel a
+    /// login that has already started, and it does not mean the caller waits
+    /// out the cap.
     fn login(&mut self, deadline: LoginDeadline) -> Result<BoundedOutput, CallError>;
 
     /// Fixed run. The method takes no prompt.
+    ///
+    /// The deadline is checked before dispatch only. Waiting until the run
+    /// finishes is not this method's meaning.
     fn run(&mut self, deadline: RunDeadline) -> Result<BoundedOutput, CallError>;
 
     /// One lease. `seq` cannot be zero.

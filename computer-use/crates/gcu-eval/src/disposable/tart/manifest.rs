@@ -3,15 +3,12 @@
 /// SHA-256-sized digest. This module does not hash anything.
 pub const DIGEST_LEN: usize = 32;
 
-/// Why a manifest was rejected.
+/// Why a digest was rejected. A manifest does not compare its rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ManifestError {
     /// A digest of all zeros is not a measurement.
     #[error("digest is all zeros")]
     ZeroDigest,
-    /// Two rows carried the same digest.
-    #[error("manifest digests are not distinct")]
-    DuplicateDigest,
 }
 
 /// 32 data bytes. Not a path and not a signature.
@@ -48,18 +45,16 @@ pub struct InstallManifest {
 }
 
 impl InstallManifest {
-    /// Three distinct non-zero digests.
+    /// Three digests. Equal values are still only data.
     ///
-    /// Does not block and does not read the filesystem.
-    pub fn try_new(program: Digest, golden: Digest, policy: Digest) -> Result<Self, ManifestError> {
-        if program == golden || program == policy || golden == policy {
-            return Err(ManifestError::DuplicateDigest);
-        }
-        Ok(Self {
+    /// Does not block, does not read the filesystem, and does not decide
+    /// whether the program, image, and policy were measured or installed.
+    pub const fn new(program: Digest, golden: Digest, policy: Digest) -> Self {
+        Self {
             program,
             golden,
             policy,
-        })
+        }
     }
 
     /// Program digest.

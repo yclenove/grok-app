@@ -20,16 +20,18 @@ use super::policy::SoftnetFlags;
 /// There is no method that takes an argv or shell string. `clone_vm` consumes
 /// a [`ClonePermit`], which exists only after the ledger has written the row.
 /// The other methods name a [`CloneId`] and do not themselves check ownership.
-/// A future adapter must return by the deadline, including any kill and reap.
 /// This fake returns immediately, sleeps nowhere, and starts nothing.
-///
-/// Cancellation is the deadline already being due. There is no second cancel
+/// An already-due deadline is rejected before dispatch. That is not
+/// cancellation of work already in progress, and there is no second cancel
 /// channel. An expired call does not consume a scripted reply.
 pub trait TartRunner {
     /// Clone the fixed golden image to the permit's clone id.
     ///
-    /// The permit is consumed even when the call fails, so the same permit
-    /// cannot be retried. Does not accept a destination string.
+    /// The effective deadline is the earlier of `deadline` and the permit's
+    /// absolute deadline. The permit is consumed even when that instant is
+    /// already due or the call fails, so it cannot be retried. At or after
+    /// the effective deadline the call expires and does not consume a
+    /// scripted reply. Does not accept a destination string.
     fn clone_vm(
         &mut self,
         permit: ClonePermit,
@@ -70,7 +72,8 @@ pub trait TartRunner {
 }
 
 /// Fake runner. Scripted replies are consumed in order, except when the
-/// deadline is already due.
+/// enforced deadline is already due. `clone_vm` enforces the earlier of the
+/// call deadline and the permit's absolute deadline, and records that instant.
 pub struct FakeTartRunner {
     clock: FakeClock,
     script: VecDeque<ScriptedReply>,
@@ -123,11 +126,13 @@ impl TartRunner for FakeTartRunner {
         golden: GoldenImage,
         deadline: CloneDeadline,
     ) -> Result<BoundedOutput, CallError> {
+        // Taking `permit` by value consumes it on every path, including expiry.
+        let effective = deadline.at().min(permit.absolute_deadline());
         let command = TartCommand::Clone {
             golden,
             clone: permit.clone_id().clone(),
         };
-        self.record(command, deadline.at())
+        self.record(command, effective)
     }
 
     fn start(

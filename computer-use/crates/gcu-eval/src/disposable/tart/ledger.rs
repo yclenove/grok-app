@@ -40,7 +40,7 @@ pub enum LedgerError {
     Sealed,
 }
 
-/// One reservation as stored. Fields are a snapshot, not a live capability.
+/// One reservation. The fake stores this value. Fields are a snapshot, not a live capability.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reservation {
     run: RunId,
@@ -114,6 +114,38 @@ impl ClonePermit {
     }
 }
 
+// `Clone` or `Copy` on ClonePermit would let one reservation mint two clones.
+// The call below is ambiguous exactly when the bound holds (static_assertions
+// style, no extra crate).
+mod clone_permit_not_duplicated {
+    use super::ClonePermit;
+
+    trait NotIfClone<A> {
+        fn some_item() {}
+    }
+    impl<T: ?Sized> NotIfClone<()> for T {}
+    struct CloneBound;
+    impl<T: Clone> NotIfClone<CloneBound> for T {}
+
+    trait NotIfCopy<A> {
+        fn some_item() {}
+    }
+    impl<T: ?Sized> NotIfCopy<()> for T {}
+    struct CopyBound;
+    impl<T: Copy> NotIfCopy<CopyBound> for T {}
+
+    fn assert_not_clone() {
+        let _ = <ClonePermit as NotIfClone<_>>::some_item;
+    }
+
+    fn assert_not_copy() {
+        let _ = <ClonePermit as NotIfCopy<_>>::some_item;
+    }
+
+    const _: fn() = assert_not_clone;
+    const _: fn() = assert_not_copy;
+}
+
 /// Persistent reservation API.
 ///
 /// `reserve` writes the row and only then returns a [`ClonePermit`]. Query,
@@ -147,32 +179,11 @@ pub trait AttemptLedger {
     fn seal(&mut self, clone: &CloneId, call: SealDeadline) -> Result<(), LedgerError>;
 }
 
-#[derive(Debug, Clone)]
-struct Row {
-    run: RunId,
-    clone_id: CloneId,
-    absolute: MonoInstant,
-    facts: Vec<LedgerFact>,
-    sealed: bool,
-}
-
-impl Row {
-    fn view(&self) -> Reservation {
-        Reservation {
-            run: self.run.clone(),
-            clone_id: self.clone_id.clone(),
-            absolute: self.absolute,
-            facts: self.facts.clone(),
-            sealed: self.sealed,
-        }
-    }
-}
-
 /// Memory ledger. Not durable, and not evidence that a VM was reserved.
 #[derive(Debug)]
 pub struct FakeLedger {
     clock: FakeClock,
-    rows: Vec<Row>,
+    rows: Vec<Reservation>,
 }
 
 impl FakeLedger {
@@ -222,7 +233,7 @@ impl AttemptLedger for FakeLedger {
             return Err(LedgerError::DuplicateClone);
         }
         let stored = absolute.at();
-        self.rows.push(Row {
+        self.rows.push(Reservation {
             run: run.clone(),
             clone_id: clone.clone(),
             absolute: stored,
@@ -239,7 +250,7 @@ impl AttemptLedger for FakeLedger {
     fn query(&self, clone: &CloneId, call: QueryDeadline) -> Result<Reservation, LedgerError> {
         self.ensure_call(call.at())?;
         let index = self.row_index(clone)?;
-        Ok(self.rows[index].view())
+        Ok(self.rows[index].clone())
     }
 
     fn append(

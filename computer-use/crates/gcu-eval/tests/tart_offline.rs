@@ -1,7 +1,9 @@
-//! S11a offline contract. One process, no Tart binary, no sleep, no lock.
+//! S11a offline contract. No Tart binary, no sleep, no lock.
 //!
-//! The alarm is the wall-clock ceiling if a future edit blocks. ADR 0018 §8
-//! caps that ceiling at 30 seconds.
+//! The parent re-execs this binary and polls `try_wait` on a monotonic clock.
+//! Thirty seconds is the wall-clock ceiling if a check blocks (ADR 0018 §8).
+//! The parent kills and reaps that child. A child that does not return exists
+//! only so this parent can prove the kill. It is not a product flag.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -31,10 +33,36 @@ macro_rules! ok {
     };
 }
 
+#[path = "tart_offline/review_fixes.rs"]
+mod review_fixes;
+#[path = "tart_offline/watch.rs"]
+mod watch;
+
 type Check = fn() -> Result<(), String>;
 
 fn main() {
-    arm_watchdog();
+    match watch::child_mode().as_deref() {
+        Some(watch::HANG) => watch::hang(),
+        Some(watch::CHECKS) => std::process::exit(run_checks()),
+        Some(other) => panic!("unknown tart offline child mode: {other}"),
+        None => {
+            let hung = watch::supervise(watch::HANG, watch::HANG_LIMIT);
+            if !hung.killed || hung.code == 0 {
+                panic!(
+                    "watchdog did not kill the non-returning child: code {} killed {}",
+                    hung.code, hung.killed
+                );
+            }
+            let ran = watch::supervise(watch::CHECKS, watch::CHECK_LIMIT);
+            if ran.killed {
+                panic!("tart offline checks exceeded 30s");
+            }
+            std::process::exit(ran.code);
+        }
+    }
+}
+
+fn run_checks() -> i32 {
     let mut failures = Vec::new();
     let tests: &[(&str, Check)] = &[
         (
@@ -62,8 +90,8 @@ fn main() {
             output_keeps_one_mebibyte_and_drops_the_rest,
         ),
         (
-            "manifest_is_three_distinct_digests",
-            manifest_is_three_distinct_digests,
+            "manifest_stores_three_digests",
+            manifest_stores_three_digests,
         ),
         (
             "fake_clock_advances_without_sleep_or_rewind",
@@ -101,17 +129,37 @@ fn main() {
             "sources_have_no_process_launch_or_open_ended_wait",
             sources_have_no_process_launch_or_open_ended_wait,
         ),
+        (
+            "clone_at_absolute_deadline_expires_without_the_script",
+            review_fixes::clone_at_absolute_deadline_expires_without_the_script,
+        ),
+        (
+            "clone_shorter_parent_deadline_is_recorded",
+            review_fixes::clone_shorter_parent_deadline_is_recorded,
+        ),
+        (
+            "expired_guest_call_keeps_the_queued_reply",
+            review_fixes::expired_guest_call_keeps_the_queued_reply,
+        ),
+        (
+            "bounded_output_debug_hides_text_and_bytes",
+            review_fixes::bounded_output_debug_hides_text_and_bytes,
+        ),
+        (
+            "softnet_rejects_special_use_at_prefix_boundaries",
+            review_fixes::softnet_rejects_special_use_at_prefix_boundaries,
+        ),
     ];
     for (name, test) in tests {
         if let Err(err) = test() {
             failures.push(format!("{name}: {err}"));
         }
     }
-    disarm_watchdog();
     if !failures.is_empty() {
         panic!("{}", failures.join("\n"));
     }
     eprintln!("tart_offline ok: {}", tests.len());
+    0
 }
 
 fn identity_rejects_empty_overlong_path_dash_and_golden() -> Result<(), String> {
@@ -355,21 +403,21 @@ fn output_keeps_one_mebibyte_and_drops_the_rest() -> Result<(), String> {
     }
 }
 
-fn manifest_is_three_distinct_digests() -> Result<(), String> {
+fn manifest_stores_three_digests() -> Result<(), String> {
     must_err(
         Digest::try_from_bytes([0; 32]),
         ManifestError::ZeroDigest,
         "zero digest",
     )?;
     let program = ok!(Digest::try_from_bytes([1; 32]));
+    let repeated = InstallManifest::new(program, program, program);
+    if repeated.program() != program || repeated.golden() != program || repeated.policy() != program
+    {
+        return Err("equal digests were not stored".into());
+    }
     let golden = ok!(Digest::try_from_bytes([2; 32]));
     let policy = ok!(Digest::try_from_bytes([3; 32]));
-    must_err(
-        InstallManifest::try_new(program, program, policy),
-        ManifestError::DuplicateDigest,
-        "duplicate digest",
-    )?;
-    let manifest = ok!(InstallManifest::try_new(program, golden, policy));
+    let manifest = InstallManifest::new(program, golden, policy);
     if manifest.program() != program || manifest.golden() != golden || manifest.policy() != policy {
         return Err("manifest did not keep its digests".into());
     }
@@ -839,9 +887,11 @@ fn sources_have_no_process_launch_or_open_ended_wait() -> Result<(), String> {
     if files.len() < 8 {
         return Err(format!("tart sources missing: {}", files.len()));
     }
+    // Spellings only. This list does not prove every Rust alias is absent.
     let forbidden = [
         "Command::new",
         "std::process",
+        "process::Command",
         "tokio::process",
         "AdmittedLaunch",
         "std::thread",
@@ -948,22 +998,3 @@ fn must_err<T: std::fmt::Debug, E: PartialEq + std::fmt::Debug>(
         other => Err(format!("{what}: {other:?}")),
     }
 }
-
-#[cfg(unix)]
-fn arm_watchdog() {
-    // SAFETY: this test process installs no other alarm. The default SIGALRM
-    // action ends the process. 30 seconds is the ADR 0018 §8 ceiling.
-    let _ = unsafe { libc::alarm(30) };
-}
-
-#[cfg(unix)]
-fn disarm_watchdog() {
-    // SAFETY: clearing the alarm installed above. No other alarm is live.
-    let _ = unsafe { libc::alarm(0) };
-}
-
-#[cfg(not(unix))]
-fn arm_watchdog() {}
-
-#[cfg(not(unix))]
-fn disarm_watchdog() {}

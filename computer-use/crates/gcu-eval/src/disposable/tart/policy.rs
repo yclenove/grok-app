@@ -20,7 +20,8 @@ pub enum PolicyError {
         /// Offered length.
         len: usize,
     },
-    /// Private, loopback, link-local, metadata, multicast, or other non-global.
+    /// Private, loopback, link-local, documentation, benchmarking, multicast,
+    /// or another non-global or reserved address.
     #[error("address {addr} is not a public endpoint")]
     NotPublic {
         /// Rejected address.
@@ -36,6 +37,8 @@ pub enum PolicyError {
 
 /// Exact Softnet shape: block every IPv4 address, then allow up to 16 public `/32`s.
 ///
+/// Public means not in the special-use table in this module. `192.0.0.0/24`
+/// is rejected as a whole.
 /// There is no prefix-length field, no IPv6 field, and no string field. The
 /// block cannot be removed. Building this value does not install a rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +51,8 @@ impl SoftnetFlags {
     /// Build flags for `allow`, in order.
     ///
     /// Each address is one `/32`. Empty, more than 16, duplicates, and
-    /// non-global addresses are rejected. Does not block or touch the network.
+    /// non-global or reserved addresses are rejected. Does not block or touch
+    /// the network.
     pub fn try_new(allow: &[Ipv4Addr]) -> Result<Self, PolicyError> {
         if allow.is_empty() {
             return Err(PolicyError::Empty);
@@ -86,36 +90,46 @@ impl SoftnetFlags {
     }
 }
 
+/// Non-global and reserved IPv4 prefixes, as `(network, prefix length)`.
+///
+/// `192.0.0.0/24` is rejected as a whole. The few addresses in that block
+/// that IANA marks globally reachable are not treated as public endpoints.
+const NOT_PUBLIC: &[(u32, u8)] = &[
+    net(0, 0, 0, 0, 8),
+    net(10, 0, 0, 0, 8),
+    net(100, 64, 0, 0, 10),
+    net(127, 0, 0, 0, 8),
+    net(169, 254, 0, 0, 16),
+    net(172, 16, 0, 0, 12),
+    net(192, 0, 0, 0, 24),
+    net(192, 0, 2, 0, 24),
+    net(192, 88, 99, 0, 24),
+    net(192, 168, 0, 0, 16),
+    net(198, 18, 0, 0, 15),
+    net(198, 51, 100, 0, 24),
+    net(203, 0, 113, 0, 24),
+    net(224, 0, 0, 0, 4),
+    net(240, 0, 0, 0, 4),
+    net(255, 255, 255, 255, 32),
+];
+
+const fn net(a: u8, b: u8, c: u8, d: u8, bits: u8) -> (u32, u8) {
+    (u32::from_be_bytes([a, b, c, d]), bits)
+}
+
 fn is_public_endpoint(addr: Ipv4Addr) -> bool {
-    let [first, second, third, _] = addr.octets();
-    if first == 0 || first == 10 || first == 127 || first >= 224 {
-        return false;
+    let value = u32::from(addr);
+    !NOT_PUBLIC.iter().any(|&(network, bits)| {
+        let mask = prefix_mask(bits);
+        (value & mask) == (network & mask)
+    })
+}
+
+fn prefix_mask(bits: u8) -> u32 {
+    match bits {
+        // Table widths are 4..=32. Shift amount is then 28..=0.
+        1..=32 => u32::MAX << (32 - u32::from(bits)),
+        // A zero mask matches every address, so the caller rejects it.
+        _ => 0,
     }
-    if first == 172 && (second & 0xf0) == 16 {
-        return false;
-    }
-    if first == 192 && second == 168 {
-        return false;
-    }
-    if first == 169 && second == 254 {
-        return false;
-    }
-    // Carrier-grade NAT. Not a global endpoint.
-    if first == 100 && (second & 0xc0) == 64 {
-        return false;
-    }
-    // Documentation and benchmarking ranges.
-    if first == 192 && second == 0 && third == 2 {
-        return false;
-    }
-    if first == 198 && second == 51 && third == 100 {
-        return false;
-    }
-    if first == 203 && second == 0 && third == 113 {
-        return false;
-    }
-    if first == 198 && (second == 18 || second == 19) {
-        return false;
-    }
-    true
 }

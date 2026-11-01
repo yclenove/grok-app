@@ -338,6 +338,41 @@ mod tests {
         assert!(!provider_gate_allows_process(true));
     }
 
+    /// Substring guard for Tart sources. It recognizes these spellings,
+    /// including a grouped `process::Command` import. An arbitrary rename
+    /// that avoids every spelling is outside this guard.
+    fn tart_source_mentions_process(text: &str) -> bool {
+        const NEEDLES: &[&str] = &[
+            "Command::new",
+            "std::process",
+            "process::Command",
+            "tokio::process",
+            "AdmittedLaunch",
+        ];
+        NEEDLES.iter().any(|needle| text.contains(needle))
+    }
+
+    #[test]
+    fn tart_scan_hits_grouped_and_aliased_process_spellings() {
+        let hits = [
+            "use std::{ffi::OsStr, process::Command as Process};",
+            "use std::process;",
+            "process::Command",
+            "tokio::process",
+            "Command::new",
+            "std::process::Command",
+            "tokio::process::Command",
+            "AdmittedLaunch",
+        ];
+        for sample in hits {
+            assert!(
+                tart_source_mentions_process(sample),
+                "tart scan missed {sample}"
+            );
+        }
+        assert!(!tart_source_mentions_process("fn ready() -> i32 { 1 }"));
+    }
+
     #[test]
     fn command_new_is_only_in_the_admission_module() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -364,11 +399,9 @@ mod tests {
             let tart = rel.starts_with("src/disposable/tart/");
             if tart {
                 tart_files += 1;
-                if text.contains("Command::new")
-                    || text.contains("std::process::Command")
-                    || text.contains("tokio::process::Command")
-                    || text.contains("AdmittedLaunch")
-                {
+                // Spelling guard only. Grouped imports and a `Command` alias
+                // are covered. This is not a proof against an arbitrary rename.
+                if tart_source_mentions_process(text) {
                     command_hits.push(rel.clone());
                 }
             } else if !test_module

@@ -45,13 +45,10 @@ impl BoundedOutput {
 
 impl std::fmt::Debug for BoundedOutput {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let prefix = self.bytes.len().min(8);
-        write!(
-            formatter,
-            "BoundedOutput {{ len: {}, prefix: {:?} }}",
-            self.bytes.len(),
-            &self.bytes[..prefix]
-        )
+        formatter
+            .debug_struct("BoundedOutput")
+            .field("len", &self.bytes.len())
+            .finish()
     }
 }
 
@@ -90,7 +87,7 @@ pub enum ScriptOutcome {
 pub struct TraceEntry<C> {
     /// Structured command. Not an argv vector.
     pub command: C,
-    /// Deadline instant the call was given.
+    /// Deadline instant the fake enforced for this call.
     pub deadline: MonoInstant,
     /// How the fake classified the call.
     pub outcome: ScriptOutcome,
