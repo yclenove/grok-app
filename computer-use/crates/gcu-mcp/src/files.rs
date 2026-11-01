@@ -7,7 +7,7 @@ use std::sync::Condvar;
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 use tempfile::TempDir;
@@ -15,8 +15,11 @@ use tempfile::TempDir;
 const MAX_SESSION_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) struct SessionFiles {
     area: Mutex<Area>,
-    /// One invalidation task. Stays unset until a runtime can spawn it.
-    watch: AtomicBool,
+    /// Invalidation owner. Shutdown joins a synchronous thread before the area drops.
+    observer: Mutex<crate::retire::Observer>,
+    /// Test parks copied into the owner at [`SessionFiles::bind_lease`].
+    #[cfg(test)]
+    hooks: Mutex<crate::retire::DriveHooks>,
     /// Test pause installed by [`SessionFiles::arm_file_gate`]. Absent in production.
     #[cfg(test)]
     gate: Mutex<Option<Arc<FilePause>>>,
@@ -29,6 +32,8 @@ struct Area {
     bytes: usize,
     files: Vec<StoredFile>,
     lease: Option<ScopeLease>,
+    /// Set when the retire owner could not start. Commits then register nothing.
+    publish_blocked: bool,
 }
 struct StoredFile {
     path: PathBuf,
@@ -50,7 +55,13 @@ impl FileAdmission<'_> {
     }
 
     /// Memory-only, infallible registration of the batch validated by `admission`.
+    ///
+    /// When the retire owner failed to start, the batch stays unregistered and
+    /// the staged guard deletes the bytes. No timeout or cancellation.
     pub(crate) fn commit(&mut self, staged: &mut [StagedFile]) {
+        if self.area.publish_blocked {
+            return;
+        }
         let epoch = self.epoch.clone();
         for mut row in self.rows.drain(..) {
             self.area.bytes += row.len;
@@ -83,8 +94,11 @@ impl SessionFiles {
                 bytes: 0,
                 files: Vec::new(),
                 lease: None,
+                publish_blocked: false,
             }),
-            watch: AtomicBool::new(false),
+            observer: Mutex::new(crate::retire::Observer::default()),
+            #[cfg(test)]
+            hooks: Mutex::new(crate::retire::DriveHooks::default()),
             #[cfg(test)]
             gate: Mutex::new(None),
         })
@@ -194,16 +208,54 @@ impl SessionFiles {
 
     /// Remember the lease that later exports compare, and retire on invalidation.
     ///
-    /// Call before taking the area lock for a commit. The watcher starts only
-    /// when a runtime is current. No timeout or cancellation in this call. A
-    /// second bind does not start a second task.
+    /// One owner: a task on the current runtime, or a dedicated thread when
+    /// there is none. A second bind replaces the lease and does not start
+    /// another owner. If the owner cannot start, later commits register nothing.
+    /// Disk unlink stays in [`Self::release_stale`], outside both locks.
     pub(crate) fn bind_lease(self: &Arc<Self>, lease: ScopeLease) {
+        {
+            let mut area = self.area.lock().unwrap_or_else(|error| error.into_inner());
+            area.lease = Some(lease.clone());
+        }
+        let mut observer = self
+            .observer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if observer.watching() {
+            return;
+        }
+        let files = Arc::downgrade(self);
+        #[cfg(test)]
+        let hooks = self
+            .hooks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        #[cfg(not(test))]
+        let hooks = crate::retire::DriveHooks::default();
+        let next = crate::retire::start(
+            lease,
+            Arc::new(move || {
+                if let Some(files) = files.upgrade() {
+                    files.release_stale();
+                }
+            }),
+            hooks,
+        );
+        // Observer, then the area. `start` returns before the owner takes the area.
         self.area
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .lease = Some(lease.clone());
-        let files = Arc::clone(self);
-        crate::retire::arm(&self.watch, lease, move || files.release_stale());
+            .publish_blocked = !next.watching();
+        *observer = next;
+    }
+
+    /// Parks and the exit count copied by the next [`Self::bind_lease`].
+    ///
+    /// Memory only. A bind that already started keeps the hooks it copied.
+    #[cfg(test)]
+    pub(crate) fn set_retire_hooks(&self, hooks: crate::retire::DriveHooks) {
+        *self.hooks.lock().unwrap_or_else(|error| error.into_inner()) = hooks;
     }
 
     /// Remove ledger rows that are no longer visible and delete their files.
@@ -289,13 +341,34 @@ impl SessionFiles {
             })
             .collect()
     }
+    /// Join the retire owner within 5 seconds, then delete the session directory.
+    ///
+    /// The owner is signalled before the area lock. The directory is still
+    /// removed when the join fails; that error is returned when delete succeeded.
     pub(crate) fn close(&self) -> io::Result<()> {
+        let joined = self
+            .observer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .shutdown();
         let mut area = self.area.lock().unwrap_or_else(|error| error.into_inner());
         area.lock.take();
-        if let Some(directory) = area.directory.take() {
-            directory.close()?;
-        }
-        Ok(())
+        let deleted = if let Some(directory) = area.directory.take() {
+            directory.close()
+        } else {
+            Ok(())
+        };
+        deleted.and(joined)
+    }
+}
+
+impl Drop for SessionFiles {
+    fn drop(&mut self) {
+        let _ = self
+            .observer
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .shutdown();
     }
 }
 /// One-shot pause around the first session-file write in a test.

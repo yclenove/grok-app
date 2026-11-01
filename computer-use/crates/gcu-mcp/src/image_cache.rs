@@ -5,12 +5,14 @@ use gcu_core::scope::ScopeLease;
 use gcu_host_protocol::messages::Image;
 use std::{
     collections::VecDeque,
-    sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 struct Slot {
     images: VecDeque<(String, Image, Option<Epoch>)>,
     lease: Option<ScopeLease>,
+    /// Set when the retire owner could not start. Commits then register nothing.
+    publish_blocked: bool,
 }
 
 pub(crate) struct ImageCache {
@@ -18,8 +20,11 @@ pub(crate) struct ImageCache {
     /// Parks after the cache mutex is taken and before the entry is inserted.
     /// Production leaves it disarmed.
     gate: Arc<PublishGate>,
-    /// One invalidation task. Stays unset until a runtime can spawn it.
-    watch: AtomicBool,
+    /// Invalidation owner. Shutdown joins a synchronous thread before the slot drops.
+    observer: Mutex<crate::retire::Observer>,
+    /// Test parks copied into the owner at [`ImageCache::bind_lease`].
+    #[cfg(test)]
+    hooks: Mutex<crate::retire::DriveHooks>,
 }
 
 /// Cache lock and private insertion, prepared before entering the lease lock.
@@ -40,7 +45,13 @@ impl ImageAdmission<'_> {
     }
 
     /// Infallible memory registration. Retired pixels drop after the lease lock.
+    ///
+    /// When the retire owner failed to start, the pending image is left
+    /// unregistered and drops with this admission. No timeout or cancellation.
     pub(crate) fn commit(&mut self) {
+        if self.slot.publish_blocked {
+            return;
+        }
         let Some((id, image)) = self.pending.take() else {
             return;
         };
@@ -69,9 +80,12 @@ impl Default for ImageCache {
             slot: Mutex::new(Slot {
                 images: VecDeque::new(),
                 lease: None,
+                publish_blocked: false,
             }),
             gate: PublishGate::new(),
-            watch: AtomicBool::new(false),
+            observer: Mutex::new(crate::retire::Observer::default()),
+            #[cfg(test)]
+            hooks: Mutex::new(crate::retire::DriveHooks::default()),
         }
     }
 }
@@ -79,16 +93,53 @@ impl Default for ImageCache {
 impl ImageCache {
     /// Remember the lease that later `get` calls compare, and retire on invalidation.
     ///
-    /// Call before taking this cache's lock for a commit. Replaces any previous
-    /// lease. The watcher starts only when a runtime is current. No timeout or
-    /// cancellation in this call. A second bind does not start a second task.
+    /// Call before taking this cache's lock for a commit. One owner runs the
+    /// sweep: a task on the current runtime, or a dedicated thread when there
+    /// is none. A second bind replaces the lease and does not start another
+    /// owner. If that owner cannot start, later commits register nothing. This
+    /// call waits only until a synchronous thread has built its runtime.
     pub(crate) fn bind_lease(self: &Arc<Self>, lease: ScopeLease) {
+        {
+            let mut slot = self.slot.lock().unwrap_or_else(|err| err.into_inner());
+            slot.lease = Some(lease.clone());
+        }
+        let mut observer = self.observer.lock().unwrap_or_else(|err| err.into_inner());
+        if observer.watching() {
+            return;
+        }
+        let cache = Arc::downgrade(self);
+        #[cfg(test)]
+        let hooks = self
+            .hooks
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        #[cfg(not(test))]
+        let hooks = crate::retire::DriveHooks::default();
+        let next = crate::retire::start(
+            lease,
+            Arc::new(move || {
+                if let Some(cache) = cache.upgrade() {
+                    cache.release_stale();
+                }
+            }),
+            hooks,
+        );
+        // Observer, then the slot. `start` returns before the owner takes the slot.
         self.slot
             .lock()
             .unwrap_or_else(|err| err.into_inner())
-            .lease = Some(lease.clone());
-        let cache = Arc::clone(self);
-        crate::retire::arm(&self.watch, lease, move || cache.release_stale());
+            .publish_blocked = !next.watching();
+        *observer = next;
+    }
+
+    /// Install parks and the exit count for the next [`Self::bind_lease`].
+    ///
+    /// Memory only. No timeout or cancellation. A bind that already started
+    /// keeps the hooks it copied.
+    #[cfg(test)]
+    pub(crate) fn set_retire_hooks(&self, hooks: crate::retire::DriveHooks) {
+        *self.hooks.lock().unwrap_or_else(|err| err.into_inner()) = hooks;
     }
 
     /// Drop images whose epoch is no longer visible. Memory only.
@@ -166,6 +217,16 @@ impl ImageCache {
     #[cfg(test)]
     pub(crate) fn admission_gate(&self) -> Arc<PublishGate> {
         Arc::clone(&self.gate)
+    }
+}
+
+impl Drop for ImageCache {
+    fn drop(&mut self) {
+        let _ = self
+            .observer
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .shutdown();
     }
 }
 
