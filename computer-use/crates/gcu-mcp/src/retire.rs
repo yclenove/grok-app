@@ -9,7 +9,6 @@
 use gcu_core::scope::ScopeLease;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Start one invalidation task for `lease`.
 ///
