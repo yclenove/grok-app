@@ -31,3 +31,42 @@ Final round 3 of 3, independent static review at `03b569e9`, limited to the seve
 - **SAME test-helper coverage class:** `result_round6_tests.rs:572` still truncates paths at whitespace, `]`, quotes or commas, all legal in Unix filenames. A temporary parent containing those characters can make the existence check inspect an absent prefix. Compare extracted paths with the actual generated paths; the new backslash fixture fixes its targeted case, not these pre-existing delimiters.
 
 Validation: repair diff whitespace check passed; relevant unchanged files compared byte-for-byte. No cargo, compilation/clippy, Rust tests/mutations, network/SSH/model calls, personal agent-home access, or source/test edits. Only this report was written, uncommitted.
+
+## 第3轮处理
+
+评审轮数已用尽（3/3），不再补丁观察者。r3 的两个必修都是同一类「所有者生命周期」缺陷，机制整段替换为租约回调。上面的发现保留，不改写成已通过。
+
+退役由租约状态变化本身同步触发，不由会消失的所有者触发。`ScopeLease::on_invalidated` 接受 `Weak<dyn Fn() + Send + Sync>`。撤销、重绑，以及读者调用的 `expire()`，都在放下状态锁之后经 `publish` 同步调用仍存活的回调，并丢弃已死弱引用。文件账本和图像缓存在 `bind_lease` 各登记一个回调：取自己的锁，摘出本代次已失效的登记，放锁后 unlink 或释放像素。磁盘删除不在租约锁、也不在账本锁里。锁序仍是快照 → image cache → 文件账本 → 租约。登记仍只有 `commit_if_current` 里的那一个盖章闭包；撤销后该闭包不会成功。
+
+已删除，不留第二套：观察者任务、`gcu-lease-retire` 线程及其自建运行时、`watching` / `publish_blocked`、`join_bounded`、超时后被分离的 joiner。回调里的 panic 由 `catch_unwind` 接住，不传播到撤销路径。unlink 错误仍忽略，不回滚。
+
+回调先记清扫序号再 `try_lock`。序号小于等于本次在锁内读到的值，才在摘除之后标完成；读锁期间新发出的序号留到下一趟。锁被占用就返回，持锁方解锁后补扫。同一线程已持锁时不 `try_lock`。这是为了 `revoke_while_cache_admission_waits_does_not_deadlock_or_publish`：图像准入先拿缓存锁再停在测试闸门上，撤销若去等这把锁，闸门要等撤销返回，15 秒后断言失败。补扫最多八趟；序号若不再前进，剩下的票留到下一次解锁，不再空转。
+
+r3 必修 1：运行时被丢弃后不再没人退役。回调挂在租约上，不挂在运行时或专用线程上。同一个仍有效的租约再次 `bind_lease` 会重新登记，不会因为 `watching` 仍为 true 而直接返回。换新租约 bind 只把回调登记到新租约上；旧租约撤销不会删掉新租约已经登记的文件或像素。store `Drop` / `close` 丢掉强引用，随后的撤销升不起来这条弱引用，也不会 panic。
+
+r3 必修 2：不再有 5 秒 join 超时后分离、稍后 `remove_file` 别人目录的 worker。`close` 先清回调，目录名由 `Arc<TempDir>` 占住，进行中的 unlink 放下引用之后目录才消失。
+
+性质被破坏时会失败的测试（先断言路径不存在或 `resident` 为 false，再 get/export）：
+
+- `publish_runs_live_callbacks_outside_the_lock`：回调里调用 `current()`。若 `publish` 仍持有状态锁，同一线程死锁，watchdog abort。去掉 `fire` 后计数停在 0。
+- `panicking_callback_does_not_skip_the_next_or_escape`、`dropped_callback_is_not_called_and_does_not_panic`、`rebind_publishes_and_renew_does_not`：续期不增加计数；时钟越过期限后要读租约才再计一次。
+- `revoke_drops_files_and_pixels_before_export_or_get`、`rebind_drops_files_and_pixels_before_export_or_get`、`expiry_on_lease_read_drops_artifacts_before_export_or_get`：去掉登记或去掉 `fire` 后路径仍在。到期那条在读租约之前断言产物仍在。
+- `renew_does_not_retire_delivered_artifacts`。
+- `sync_bind_without_a_runtime_still_retires_before_get_or_export`：`Handle::try_current()` 为 Err。
+- `dropped_runtime_then_revoke_still_retires_before_get_or_export`：运行时里 bind 并提交，丢掉运行时，再在没有运行时的情况下 bind 同一个租约并再提交。撤销后两条路径都不在。
+- `second_bind_of_the_same_live_lease_still_retires_on_revoke`：再次 bind 时已交付的文件仍在；撤销后两条都删除。
+- `replacement_lease_bind_retires_only_on_the_new_lease`：`run-a` 与 `run-b`。bind 新租约后旧路径已不在；旧租约撤销不删新文件；新租约撤销才删。
+- `dropped_store_then_revoke_does_not_panic`：store 的 `Weak` 升不起来，撤销不 panic。
+- `ledger_lock_holder_and_callback_do_not_deadlock`：另一线程持有账本锁时撤销。回调在 `try_lock` 之前发信号，持锁线程再 `current()`，解锁后补扫。握手 8 秒 `recv_timeout`，独立 watchdog 10 秒 abort。`try_lock` 之后，这条测试不再因为「回调仍在租约状态锁内」而 abort。那个破坏由 core 的 `publish_runs_live_callbacks_outside_the_lock` 抓住（回调里直接 `current()`，watchdog abort）。
+- `delivered_image_is_unreadable_after_lease_expiry` 与 `delivered_file_is_unreadable_after_lease_expiry`：暂停钟拨过期限后、读租约前，像素和路径仍在；读过之后、get/export 之前才消失。
+
+### 仍存在的限制
+
+- 仅被动持有 store、没有任何人读租约时，到期退役延迟到下一次读租约。不为它再造定时器或线程。生产里 S3 引擎循环与 peer 复查会读租约，因此会发布到期。
+- 撤销返回时，若另一线程仍持有账本或图像缓存锁，删除要等该守卫解锁后的补扫。图像准入会在持锁后停在测试闸门上，撤销不能去等这把锁。`resident` 只观察、不补扫，避免把「回调没跑」掩盖成已退役。
+- 已经复制进响应的字节不回收。
+- unlink 错误忽略，不回滚。
+- 没有单独的测试把 unlink 停在 `remove_file` 之前再 `close`。目录名由 `Arc<TempDir>` 占住，不再交给分离的 worker。
+- A1–A4、真实 helper 启动、TCC、FD 移交、活体 SecCode 读取、真实模型仍是 not_run。
+- Stop 常量未改。无新 `Command::new`。无新依赖。S6 准入类型未动。
+
