@@ -1,1998 +1,497 @@
-#!/usr/bin/env bash
-# S11-0 model-free Softnet/Tart probe (ADR 0018 §10).
-# Run on the owner Mac mini. Never starts, modifies, or deletes the golden VM.
-# Deletes only a clone this process created whose name starts with s11-0-probe-.
-# Never prompts for or stores a passphrase. Does not change the packet filter,
-# routes, or resolver settings. Addresses in the report are role names.
-#
-# Internal entry (piped to the guest): bash s11-0-probe.sh --guest ...
-# Shell notes: keep this file compatible with bash 3.2 (macOS /bin/bash).
+#!/bin/bash
+# S11-0 fact probe, ADR 0018 §10. Bash 3.2. Own a clone only after tart list shows it. Signal that direct child only. h1_independent_of_ip=unknown.
+set -u; set -f; umask 077; export LC_ALL=C
+GOLDEN=macos-s2-eval; GUEST_USER=eval; PLACEHOLDER_IP=203.0.113.10
+PROBE_BUDGET=1500; CLEANUP_BUDGET=90; CAP=65536; GRACE=1; START_CONFIRM=1
+FINAL_EC=1; STATUS=partial; DRY=0; STAGE=all; OUT=./s11-0-out; TART_HOME_ARG=""
+SSH_KEY="${HOME}/.ssh/id_ed25519_tart"; ENDPOINT=""; ENDPOINT_SOURCE=absent; LAN_IP=""
+USAGE_REASON=""; PRECHECK_FAILED=0; ANY_COLLECTION_FAILED=0; ANY_CLEANUP_FAILED=0; ANY_CREATE_FAILED=0
+REQUEST_CLEANUP=0; IN_CLEANUP=0; FINALIZING=0; PROBE_DEADLINE=0; CLEANUP_DEADLINE=0; WORKDIR=""
+REASONS_FILE=""; OWN_NAME=""; OWN_OK=0; RUN_PID=""; RUN_LIVE=0; RUN_COMM=""
+CMD_PID=""; CMD_LIVE=0; CMD_COMM=""; RB_STATUS=0; RB_TIMED_OUT=0; RB_ABORTED=0; REAP_STATUS=0
+S_ARGV_OK=0; HELP_STATE=not-run; HELP_SUBS=""; EXEC_HELP=not-run; EXEC_OPTS=""; EXEC_RESULT=not-run
+MEASURED=""; UNMEASURED=""; RUN_ARGV=()
+S_STAGE=""; S_NAME=""; S_CREATED=no; S_LAUNCH=not-run; S_COLL=not-run
+S_SSH=not-run; S_EXEC=not-run; S_V6=not-run
 
-set -euo pipefail
-
-CLONE_PREFIX="s11-0-probe-"
-PLACEHOLDER_ENDPOINT="192.0.2.10" # RFC 5737 TEST-NET-1, not an approved endpoint
-DEFAULT_TART_HOME="/Volumes/Mini扩展/VMs/tart"
-V6_PUBLIC="2606:4700:4700::1111"
-
-# --- shared helpers ----------------------------------------------------------
-
-now_ms() {
-  local ms=""
-  if command -v perl >/dev/null 2>&1; then
-    ms=$(perl -MTime::HiRes=time -e 'printf "%d\n", int(time()*1000)' 2>/dev/null || true)
-  fi
-  if [[ -z "$ms" ]]; then
-    ms=$(( $(date +%s) * 1000 ))
-  fi
-  printf '%s\n' "$ms"
+say() { printf 's11-0-probe: %s\n' "$*" >&2; }
+add_reason() {
+  [[ -n "$REASONS_FILE" ]] || return 0
+  grep -Fqx -- "$1" "$REASONS_FILE" 2>/dev/null || printf '%s\n' "$1" >>"$REASONS_FILE"
 }
-
-is_num_0_255() {
-  local n=$1
-  case "$n" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  if [[ ${#n} -gt 1 && ${n:0:1} == 0 ]]; then
-    return 1
-  fi
-  if [[ "$n" -gt 255 ]]; then
-    return 1
-  fi
-  return 0
+cap_secs() {
+  local n="$1" b="${S11_BOUND_SEC:-}"
+  case "$b" in ""|*[!0-9]*) printf '%s\n' "$n"; return ;; esac
+  if [[ "$b" -gt 0 && "$b" -lt "$n" ]]; then printf '%s\n' "$b"; else printf '%s\n' "$n"; fi
 }
-
-is_ipv4_syntax() {
-  local ip=$1 a="" b="" c="" d=""
-  case "$ip" in
-    *.*.*.*) ;;
-    *) return 1 ;;
-  esac
-  case "$ip" in
-    *.*.*.*.*) return 1 ;;
-  esac
-  IFS=. read -r a b c d <<< "$ip"
-  is_num_0_255 "$a" || return 1
-  is_num_0_255 "$b" || return 1
-  is_num_0_255 "$c" || return 1
-  is_num_0_255 "$d" || return 1
-  return 0
+cap_file() {
+  [[ -f "$1" ]] || return 0
+  head -c "$CAP" "$1" >"$1.cap" 2>/dev/null || true
+  mv "$1.cap" "$1" 2>/dev/null || true
 }
-
-is_public_endpoint() {
-  local ip=$1 a="" b="" c="" d=""
-  is_ipv4_syntax "$ip" || return 1
-  IFS=. read -r a b c d <<< "$ip"
-  if [[ "$a" -eq 0 ]]; then return 1; fi
-  if [[ "$a" -eq 127 ]]; then return 1; fi
-  if [[ "$a" -ge 224 ]]; then return 1; fi
-  if [[ "$a" -eq 169 && "$b" -eq 254 ]]; then return 1; fi
-  if [[ "$a" -eq 10 ]]; then return 1; fi
-  if [[ "$a" -eq 192 && "$b" -eq 168 ]]; then return 1; fi
-  if [[ "$a" -eq 172 && "$b" -ge 16 && "$b" -le 31 ]]; then return 1; fi
-  if [[ "$a" -eq 100 && "$b" -ge 64 && "$b" -le 127 ]]; then return 1; fi
-  return 0
+proc_snap() { ps -p "$1" -o ppid= -o state= -o comm= 2>/dev/null | awk 'NR==1{print $1,$2,$3}'; }
+same_proc() {
+  local snap pp st got
+  [[ -n "${1:-}" && -n "${2:-}" ]] || return 1
+  snap=$(proc_snap "$1"); case "$snap" in *" "*" "*) ;; *) return 1 ;; esac
+  pp=${snap%% *}; snap=${snap#* }; st=${snap%% *}; got=${snap#* }; [[ "$st" == Z* ]] && return 1
+  [[ "$pp" == "$$" && "$got" == "$2" ]]
 }
-
-is_ipv6_syntax() {
-  local ip=$1 rest=""
-  [[ -n "$ip" && ${#ip} -le 64 ]] || return 1
-  case "$ip" in
-    *[!0-9A-Fa-f:]*) return 1 ;;
-    *:*) ;;
-    *) return 1 ;;
-  esac
-  rest=${ip#*::}
-  case "$rest" in
-    *::*) return 1 ;;
-  esac
-  return 0
+signal_owned() {
+  [[ "$4" == 1 ]] || return 0
+  same_proc "$1" "$3" || return 0
+  kill "-$2" "$1" 2>/dev/null || true
 }
-
-ensure_sbin_path() {
-  case ":${PATH}:" in
-    *:/sbin:*) ;;
-    *) PATH="${PATH}:/sbin:/usr/sbin" ;;
-  esac
-  export PATH
-}
-
-die() {
-  local code=$1
-  shift
-  printf 's11-0-probe: %s\n' "$*" >&2
-  exit "$code"
-}
-
-# --- guest (no address printed) ----------------------------------------------
-
-emit_probe() {
-  local id=$1 result=$2 start_ms=$3 detail=$4
-  local end_ms="" elapsed=0
-  end_ms=$(now_ms)
-  elapsed=$(( end_ms - start_ms ))
-  if [[ "$elapsed" -lt 0 ]]; then
-    elapsed=0
-  fi
-  case "$detail" in
-    ''|*[!A-Za-z0-9_-]*) detail="redacted" ;;
-  esac
-  printf 'PROBE %s %s %s %s\n' "$id" "$result" "$elapsed" "$detail"
-}
-
-emit_now() {
-  local id=$1 result=$2 detail=$3
-  local start=""
-  start=$(now_ms)
-  emit_probe "$id" "$result" "$start" "$detail"
-}
-
-run_class_probe() {
-  local id=$1
-  shift
-  local start="" line="" result="" detail=""
-  start=$(now_ms)
-  set +e
-  line=$("$@")
-  set -e
-  result=${line%% *}
-  detail=${line#* }
-  detail=${detail%% *}
-  case "$result" in
-    reachable|blocked|error) ;;
-    *) result="error"; detail="bad-class" ;;
-  esac
-  [[ -n "$detail" ]] || detail="none"
-  emit_probe "$id" "$result" "$start" "$detail"
-}
-
-discover_gateway() {
-  local g=""
-  set +e
-  g=$(route -n get default 2>/dev/null | awk '/gateway:/{print $2; exit}')
-  set -e
-  g=$(printf '%s' "$g" | tr -d '[:space:]')
-  if ! is_ipv4_syntax "$g"; then
-    set +e
-    g=$(netstat -rn 2>/dev/null | awk '$1=="default"{print $2; exit}')
-    set -e
-    g=$(printf '%s' "$g" | tr -d '[:space:]')
-  fi
-  if ! is_ipv4_syntax "$g"; then
-    g=""
-  fi
-  printf '%s' "$g"
-}
-
-tcp_class() {
-  local host=$1 port=$2 err="" rc=0
-  if ! command -v nc >/dev/null 2>&1; then
-    printf 'error nc-missing\n'
-    return 0
-  fi
-  if ! is_ipv4_syntax "$host"; then
-    printf 'error bad-target\n'
-    return 0
-  fi
-  set +e
-  err=$(nc -z -w 2 "$host" "$port" 2>&1)
-  rc=$?
-  set -e
-  if [[ "$rc" -eq 0 ]]; then
-    printf 'reachable connect\n'
-    return 0
-  fi
-  case "$err" in
-    *[Rr]efused*|*[Uu]nreachable*|*[Pp]rohibited*|*[Nn]o\ route*)
-      printf 'blocked explicit-reject\n'
-      ;;
-    *)
-      printf 'error timeout\n'
-      ;;
-  esac
-  return 0
-}
-
-tcp6_class() {
-  local host=$1 port=$2 err="" rc=0
-  if ! command -v nc >/dev/null 2>&1; then
-    printf 'error nc-missing\n'
-    return 0
-  fi
-  if ! is_ipv6_syntax "$host"; then
-    printf 'error bad-target\n'
-    return 0
-  fi
-  set +e
-  err=$(nc -6 -z -w 2 "$host" "$port" 2>&1)
-  rc=$?
-  set -e
-  if [[ "$rc" -eq 0 ]]; then
-    printf 'reachable connect\n'
-    return 0
-  fi
-  case "$err" in
-    *[Rr]efused*|*[Uu]nreachable*|*[Pp]rohibited*|*[Nn]o\ route*)
-      printf 'blocked explicit-reject\n'
-      ;;
-    *)
-      printf 'error timeout\n'
-      ;;
-  esac
-  return 0
-}
-
-udp_class() {
-  local host=$1 port=$2 mode=$3
-  local out="" err="" rc=0
-  if ! command -v nc >/dev/null 2>&1; then
-    printf 'error nc-missing\n'
-    return 0
-  fi
-  if ! is_ipv4_syntax "$host"; then
-    printf 'error bad-target\n'
-    return 0
-  fi
-  out=$(mktemp 2>/dev/null || true)
-  if [[ -z "$out" ]]; then
-    printf 'error mktemp-failed\n'
-    return 0
-  fi
-  set +e
-  if [[ "$mode" == "dns" ]]; then
-    err=$(printf '\022\064\001\000\000\001\000\000\000\000\000\000\007example\003com\000\000\001\000\001' \
-      | nc -u -w 2 "$host" "$port" 2>&1 >"$out")
-  else
-    err=$(printf 'probe' | nc -u -w 2 "$host" "$port" 2>&1 >"$out")
-  fi
-  rc=$?
-  set -e
-  if [[ -s "$out" ]]; then
-    rm -f "$out"
-    printf 'reachable udp-reply\n'
-    return 0
-  fi
-  rm -f "$out"
-  case "$err" in
-    *[Rr]efused*|*[Uu]nreachable*|*[Pp]rohibited*)
-      printf 'blocked explicit-reject\n'
-      ;;
-    *)
-      printf 'error timeout-no-icmp\n'
-      ;;
-  esac
-  return 0
-}
-
-icmp_class() {
-  local host=$1 out="" rc=0
-  if ! command -v ping >/dev/null 2>&1; then
-    printf 'error ping-missing\n'
-    return 0
-  fi
-  if ! is_ipv4_syntax "$host"; then
-    printf 'error bad-target\n'
-    return 0
-  fi
-  set +e
-  # macOS ping -W is milliseconds.
-  out=$(ping -c 1 -W 2000 "$host" 2>&1)
-  rc=$?
-  set -e
-  if [[ "$rc" -eq 0 ]]; then
-    printf 'reachable echo-reply\n'
-    return 0
-  fi
-  case "$out" in
-    *[Uu]nreachable*|*[Pp]rohibited*)
-      printf 'blocked explicit-reject\n'
-      ;;
-    *)
-      printf 'error timeout\n'
-      ;;
-  esac
-  return 0
-}
-
-ipv6_addr_class() {
-  local out="" kind=""
-  if ! command -v ifconfig >/dev/null 2>&1; then
-    printf 'error ifconfig-failed\n'
-    return 0
-  fi
-  set +e
-  out=$(ifconfig 2>/dev/null)
-  set -e
-  if [[ -z "$out" ]]; then
-    printf 'error ifconfig-failed\n'
-    return 0
-  fi
-  kind=$(printf '%s\n' "$out" | awk '
-    BEGIN { g=0; l=0 }
-    {
-      for (i=1; i<=NF; i++) {
-        if ($i=="inet6" && (i+1)<=NF) {
-          a=$(i+1)
-          if (a ~ /^fe80:/) l=1
-          else if (a != "::1" && a !~ /^::1\//) g=1
-        }
-      }
-    }
-    END {
-      if (g) print "global"
-      else if (l) print "linklocal"
-      else print "none"
-    }')
-  case "$kind" in
-    global) printf 'reachable address-present\n' ;;
-    linklocal) printf 'blocked only-link-local\n' ;;
-    *) printf 'blocked no-ipv6-address\n' ;;
-  esac
-  return 0
-}
-
-guest_capture_bounded() {
-  local secs=$1 dest=$2
-  shift 2
-  local pid="" i=0
-  if command -v setsid >/dev/null 2>&1; then
-    setsid "$@" >"$dest" 2>/dev/null &
-  else
-    "$@" >"$dest" 2>/dev/null &
-  fi
-  pid=$!
-  while [[ "$i" -lt "$secs" ]]; do
-    if ! kill -0 "$pid" 2>/dev/null; then
-      wait "$pid" 2>/dev/null || true
-      return 0
-    fi
-    sleep 1
-    i=$((i + 1))
-  done
-  kill -TERM "$pid" 2>/dev/null || true
-  sleep 0.2
-  kill -KILL "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-  return 1
-}
-
-scan_virt_flags() {
-  local file=$1
-  if [[ ! -s "$file" ]]; then
-    return 0
-  fi
-  if awk '{ l=tolower($0); if (l ~ /vsock/) f=1 } END { exit !f }' "$file"; then
-    GUEST_VSOCK="present"
-  fi
-  if awk '{ l=tolower($0); if (l ~ /virtio/) f=1 } END { exit !f }' "$file"; then
-    GUEST_VIRTIO="present"
-  fi
-}
-
-guest_inventory() {
-  local tmp="" devhit=0
-  GUEST_VSOCK="absent"
-  GUEST_VIRTIO="absent"
-  GUEST_SERIAL="absent"
-  umask 077
-  if [[ -d /dev ]]; then
-    if ls -1 /dev 2>/dev/null | awk '{ l=tolower($0); if (l ~ /vsock/) f=1 } END { exit !f }'; then
-      GUEST_VSOCK="present"
-    fi
-    if ls -1 /dev 2>/dev/null | awk '{ l=tolower($0); if (l ~ /^(cu\.|tty\.|ttys|ttyS|ttyAMA)/) f=1 } END { exit !f }'; then
-      GUEST_SERIAL="present"
-    fi
-    devhit=1
-  fi
-  # ioreg/system_profiler can contain hardware identifiers. Scan in a temp file
-  # and delete it. Never print the command output.
-  if command -v ioreg >/dev/null 2>&1; then
-    tmp=$(mktemp 2>/dev/null || true)
-    if [[ -n "$tmp" ]]; then
-      guest_capture_bounded 15 "$tmp" ioreg -l -w 0 || true
-      scan_virt_flags "$tmp"
-      rm -f "$tmp"
-    fi
-  fi
-  if command -v system_profiler >/dev/null 2>&1; then
-    tmp=$(mktemp 2>/dev/null || true)
-    if [[ -n "$tmp" ]]; then
-      guest_capture_bounded 15 "$tmp" system_profiler SPPCIDataType || true
-      scan_virt_flags "$tmp"
-      rm -f "$tmp"
-    fi
-  fi
-  if [[ "$GUEST_VSOCK" == "present" ]]; then
-    emit_now "guest-vsock" "reachable" "present"
-  elif [[ "$devhit" -eq 1 ]]; then
-    emit_now "guest-vsock" "blocked" "absent"
-  else
-    emit_now "guest-vsock" "error" "unchecked"
-  fi
-  if [[ "$GUEST_VIRTIO" == "present" ]]; then
-    emit_now "guest-virtio" "reachable" "present"
-  else
-    emit_now "guest-virtio" "blocked" "absent"
-  fi
-  if [[ "$GUEST_SERIAL" == "present" ]]; then
-    emit_now "guest-serial" "reachable" "present"
-  elif [[ "$devhit" -eq 1 ]]; then
-    emit_now "guest-serial" "blocked" "absent"
-  else
-    emit_now "guest-serial" "error" "unchecked"
-  fi
-  return 0
-}
-
-guest_ports_loop() {
-  local gw=$1 ports=$2
-  local oldifs="" p=""
-  oldifs=$IFS
-  IFS=','
-  # shellcheck disable=SC2086
-  set -- $ports
-  IFS=$oldifs
-  for p in "$@"; do
-    if is_ipv4_syntax "$gw"; then
-      run_class_probe "gateway-tcp-${p}" tcp_class "$gw" "$p"
-    else
-      emit_now "gateway-tcp-${p}" "error" "gateway-unknown"
-    fi
+reap_owned() {
+  local n=0; REAP_STATUS=0
+  while [[ "$n" -lt 8 ]]; do
+    n=$((n + 1)); wait "$1"; REAP_STATUS=$?
+    same_proc "$1" "$2" || return 0
+    kill -KILL "$1" 2>/dev/null || true
   done
 }
-
-guest_net() {
-  local ep=$1 pub=$2 lan=$3 ports=$4
-  local gw=""
-  gw=$(discover_gateway)
-  if is_ipv4_syntax "$gw"; then
-    run_class_probe "gateway-icmp" icmp_class "$gw"
-  else
-    emit_now "gateway-icmp" "error" "gateway-unknown"
-  fi
-  guest_ports_loop "$gw" "$ports"
-  if is_ipv4_syntax "$gw"; then
-    run_class_probe "dns-udp-gateway" udp_class "$gw" 53 dns
-  else
-    emit_now "dns-udp-gateway" "error" "gateway-unknown"
-  fi
-  if is_public_endpoint "$pub"; then
-    run_class_probe "dns-udp-public" udp_class "$pub" 53 dns
-  else
-    emit_now "dns-udp-public" "error" "bad-target"
-  fi
-  run_class_probe "ipv6-addr" ipv6_addr_class
-  run_class_probe "ipv6-tcp-public" tcp6_class "$V6_PUBLIC" 443
-  if is_public_endpoint "$ep"; then
-    run_class_probe "endpoint-tcp-443" tcp_class "$ep" 443
-    run_class_probe "endpoint-udp-443" udp_class "$ep" 443 quic
-  else
-    emit_now "endpoint-tcp-443" "error" "bad-target"
-    emit_now "endpoint-udp-443" "error" "bad-target"
-  fi
-  if is_ipv4_syntax "$lan"; then
-    run_class_probe "lan-icmp" icmp_class "$lan"
-    run_class_probe "lan-tcp-443" tcp_class "$lan" 443
-  else
-    emit_now "lan-icmp" "error" "lan-unavailable"
-    emit_now "lan-tcp-443" "error" "lan-unavailable"
-  fi
-  run_class_probe "metadata-icmp" icmp_class "169.254.169.254"
-  run_class_probe "metadata-tcp-80" tcp_class "169.254.169.254" 80
-  run_class_probe "metadata-tcp-443" tcp_class "169.254.169.254" 443
-  return 0
-}
-
-guest_main() {
-  local stage="A" ep="" pub="" lan="" ports="22,53,80,443" inventory=0
-  shift
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --stage)
-        [[ $# -ge 2 ]] || return 1
-        stage=$2
-        shift 2
-        ;;
-      --ep)
-        [[ $# -ge 2 ]] || return 1
-        ep=$2
-        shift 2
-        ;;
-      --pub)
-        [[ $# -ge 2 ]] || return 1
-        pub=$2
-        shift 2
-        ;;
-      --lan)
-        [[ $# -ge 2 ]] || return 1
-        lan=$2
-        shift 2
-        ;;
-      --ports)
-        [[ $# -ge 2 ]] || return 1
-        ports=$2
-        shift 2
-        ;;
-      --inventory)
-        inventory=1
-        shift
-        ;;
-      *)
-        shift
-        ;;
-    esac
+grace_kill() {
+  local pid="$1" comm="$2" g=$SECONDS
+  signal_owned "$pid" TERM "$comm" 1
+  while [[ "$SECONDS" -lt $((g + GRACE)) ]]; do
+    same_proc "$pid" "$comm" || return 0
+    sleep 0.05
   done
-  ensure_sbin_path
-  if [[ "$inventory" -eq 1 ]]; then
-    guest_inventory
-    return 0
-  fi
-  guest_net "$ep" "$pub" "$lan" "$ports"
-  return 0
+  same_proc "$pid" "$comm" && signal_owned "$pid" KILL "$comm" 1
 }
-
-# --- host --------------------------------------------------------------------
-
-usage() {
-  cat <<'EOF'
-s11-0-probe.sh — model-free Softnet/Tart egress probe (ADR 0018 §10)
-
-Runs on the owner Mac mini. Clones the golden VM, probes, then stop+delete.
-Only a clone named s11-0-probe-<suffix> created by this process is deleted.
-The golden VM is never started, modified, or deleted.
-
-Options:
-  --dry-run                 Print the command list and exit
-  --stage A|B|C|all         Default: all
-  --endpoint-ip <ipv4>      Public /32 to allow in stage B
-  --ports <csv>             Gateway TCP ports (default 22,53,80,443)
-  --out <dir>               Report directory (default ./s11-0-<utc>/)
-  --golden <name>           Default: macos-s2-eval
-  --tart-home <dir>         Default: external volume used by the owner
-  --softnet <path>          softnet binary (default: PATH, then common prefixes)
-  --guest-user <name>       Default: eval
-  --ssh-key <path>          Default: ~/.ssh/id_ed25519_tart
-  --clone-name <name>       Must start with s11-0-probe- (tests / reruns)
-  --lan-ip <ipv4>           Single host-LAN address to probe (role lan-redacted)
-  --public-resolver <ipv4>  Default: 1.1.1.1
-  --min-free-gb <n>         Default: 10
-  --overall-timeout <sec>   Default: 2400
-  --boot-timeout <sec>      Default: 300
-  --clone-timeout <sec>     Default: 600
-  --ssh-wait <sec>          Default: 90
-  --probe-timeout <sec>     Default: 180
-  --stop-timeout <sec>      Default: 60
-  --delete-timeout <sec>    Default: 120
-  --help
-
-Exit codes: 0 finished, 1 usage, 2 precheck, 4 partial probes, 5 cleanup failed.
-Timeouts are recorded as error, not blocked.
-EOF
-}
-
-sanitize() {
-  local s=$1
-  s=$(printf '%s' "$s" | tr $'\t\r\n' '   ')
-  s=$(printf '%s' "$s" | sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/ip-redacted/g')
-  # Hyphen is last so tr treats it as a literal, not a range.
-  s=$(printf '%s' "$s" | tr -c 'A-Za-z0-9._,:=+ -' '_')
-  printf '%.160s' "$s"
-}
-
-record_probe() {
-  local id=$1 stage=$2 target=$3 result=$4 elapsed=$5 detail=$6
-  case "$id" in
-    ''|*[!A-Za-z0-9_-]*) id="bad-id" ;;
-  esac
-  case "$stage" in
-    ''|*[!A-Za-z0-9_-]*) stage="bad" ;;
-  esac
-  case "$target" in
-    ''|*[!A-Za-z0-9_-]*) target="host" ;;
-  esac
-  case "$result" in
-    reachable|blocked|error) ;;
-    *) result="error"; detail="bad-result" ;;
-  esac
-  case "$elapsed" in
-    ''|*[!0-9]*) elapsed=0 ;;
-  esac
-  detail=$(sanitize "$detail")
-  [[ -n "$detail" ]] || detail="none"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$id" "$stage" "$target" "$result" "$elapsed" "$detail" >> "$PROBE_TSV"
-}
-
-target_for() {
-  case "$1" in
-    gateway-*|dns-udp-gateway) printf 'gateway' ;;
-    dns-udp-public|ipv6-*) printf 'public' ;;
-    endpoint-*) printf 'endpoint' ;;
-    lan-*) printf 'lan-redacted' ;;
-    metadata-*) printf 'metadata' ;;
-    guest-*) printf 'guest' ;;
-    *) printf 'host' ;;
-  esac
-}
-
-have_probe() {
-  local id=$1 stage=$2
-  [[ -f "$PROBE_TSV" ]] || return 1
-  awk -F '\t' -v id="$id" -v st="$stage" '
-    $1==id && $2==st { found=1 }
-    END { exit !found }
-  ' "$PROBE_TSV"
-}
-
-note() {
-  printf 's11-0-probe: %s\n' "$*" >&2
-}
-
-require_int() {
-  local n=$1
-  case "$n" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  return 0
-}
-
-normalize_ports() {
-  local raw=$1
-  local IFS=','
-  local p="" out="" count=0
-  local -a parts=()
-  read -r -a parts <<< "$raw"
-  if [[ ${#parts[@]} -eq 0 || ${#parts[@]} -gt 16 ]]; then
-    return 1
-  fi
-  for p in "${parts[@]}"; do
-    case "$p" in
-      ''|*[!0-9]*) return 1 ;;
-    esac
-    if [[ ${#p} -gt 1 && ${p:0:1} == 0 ]]; then
-      return 1
-    fi
-    if [[ "$p" -lt 1 || "$p" -gt 65535 ]]; then
-      return 1
-    fi
-    count=$((count + 1))
-    if [[ -z "$out" ]]; then
-      out=$p
-    else
-      out="${out},${p}"
-    fi
-  done
-  if [[ "$count" -lt 1 ]]; then
-    return 1
-  fi
-  PORTS_CSV=$out
-  return 0
-}
-
-valid_clone_name() {
-  local n=$1 suf=""
-  case "$n" in
-    ${CLONE_PREFIX}*) ;;
-    *) return 1 ;;
-  esac
-  suf=${n#"$CLONE_PREFIX"}
-  [[ -n "$suf" ]] || return 1
-  case "$suf" in
-    *[!A-Za-z0-9_-]*) return 1 ;;
-  esac
-  if [[ ${#suf} -gt 40 ]]; then
-    return 1
-  fi
-  return 0
-}
-
-make_clone_name() {
-  local rand=""
-  rand=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null || true)
-  rand=$(printf '%s' "$rand" | tr -d '[:space:]')
-  case "$rand" in
-    *[!0-9a-f]*|'') return 1 ;;
-  esac
-  printf '%s%s\n' "$CLONE_PREFIX" "$rand"
-}
-
-disposable_ok() {
-  local name=$1
-  valid_clone_name "$name" || return 1
-  if [[ "$name" == "$GOLDEN" ]]; then
-    return 1
-  fi
-  return 0
-}
-
-kill_recorded() {
-  local pid=${1:-}
-  local pgid="" i=0
-  case "$pid" in
-    ''|*[!0-9]*) return 0 ;;
-  esac
-  if [[ "$pid" -le 1 ]]; then
-    return 0
-  fi
-  if ! kill -0 "$pid" 2>/dev/null; then
-    return 0
-  fi
-  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)
-  if [[ -n "$pgid" && "$pgid" == "$pid" ]]; then
-    kill -TERM -- "-$pid" 2>/dev/null || true
-  else
-    kill -TERM -- "$pid" 2>/dev/null || true
-  fi
-  while [[ "$i" -lt 25 ]]; do
-    if ! kill -0 "$pid" 2>/dev/null; then
-      return 0
-    fi
-    sleep 0.2
-    i=$((i + 1))
-  done
-  if [[ -n "$pgid" && "$pgid" == "$pid" ]]; then
-    kill -KILL -- "-$pid" 2>/dev/null || true
-  else
-    kill -KILL -- "$pid" 2>/dev/null || true
-  fi
-  return 0
-}
-
-restore_errexit() {
-  if [[ "${1:-0}" -eq 1 ]]; then
-    set -e
-  else
-    set +e
-  fi
-}
-
 run_bounded() {
-  local secs=$1
-  shift
-  local pid="" start=0 now=0 rc=0 errexit=0
-  case $- in
-    *e*) errexit=1 ;;
-  esac
-  set +e
-  if command -v setsid >/dev/null 2>&1; then
-    setsid "$@" &
-  else
-    perl -MPOSIX=setsid -e 'setsid(); exec @ARGV or die $!' -- "$@" &
+  local secs="$1" out="$2" err="$3" infile="$4" start sz ez pid comm snap left
+  shift 4
+  [[ "${1:-}" == -- ]] && shift
+  secs=$(cap_secs "$secs"); : >"$out"; : >"$err"
+  [[ "$infile" == - ]] && infile=/dev/null
+  RB_TIMED_OUT=0; RB_ABORTED=0; RB_STATUS=0
+  if [[ "$IN_CLEANUP" == 1 ]]; then
+    [[ "$SECONDS" -ge "$CLEANUP_DEADLINE" ]] && { RB_TIMED_OUT=1; RB_STATUS=124; return 124; }
+    left=$((CLEANUP_DEADLINE - SECONDS)); [[ "$left" -lt 1 ]] && left=1
+    [[ "$secs" -gt "$left" ]] && secs=$left
+  elif [[ "$SECONDS" -ge "$PROBE_DEADLINE" ]]; then
+    RB_TIMED_OUT=1; RB_STATUS=124; REQUEST_CLEANUP=1; return 124
   fi
-  pid=$!
-  CURRENT_CHILD_PID=$pid
-  start=$(date +%s)
-  while kill -0 "$pid" 2>/dev/null; do
-    now=$(date +%s)
-    if [[ $((now - start)) -ge "$secs" || "$now" -ge "$DEADLINE" ]]; then
-      kill_recorded "$pid"
-      CURRENT_CHILD_PID=""
-      restore_errexit "$errexit"
-      return 124
-    fi
-    sleep 0.2
+  "$@" <"$infile" >"$out" 2>"$err" &
+  CMD_PID=$!; CMD_LIVE=1; snap=$(proc_snap "$CMD_PID"); CMD_COMM=${snap##* }; start=$SECONDS
+  while same_proc "$CMD_PID" "$CMD_COMM"; do
+    if [[ "$SECONDS" -ge $((start + secs)) ]]; then RB_TIMED_OUT=1; grace_kill "$CMD_PID" "$CMD_COMM"; break; fi
+    if [[ "$IN_CLEANUP" != 1 && "$REQUEST_CLEANUP" == 1 ]]; then RB_ABORTED=1; signal_owned "$CMD_PID" TERM "$CMD_COMM" 1; break; fi
+    sz=$(wc -c <"$out" 2>/dev/null | tr -d ' '); ez=$(wc -c <"$err" 2>/dev/null | tr -d ' ')
+    [[ "${sz:-0}" -gt "$CAP" || "${ez:-0}" -gt "$CAP" ]] && { signal_owned "$CMD_PID" TERM "$CMD_COMM" 1; break; }
+    sleep 0.05
   done
-  wait "$pid"
-  rc=$?
-  CURRENT_CHILD_PID=""
-  restore_errexit "$errexit"
-  return "$rc"
+  pid=$CMD_PID; comm=$CMD_COMM; CMD_LIVE=0; CMD_PID=""; CMD_COMM=""
+  reap_owned "$pid" "$comm"
+  cap_file "$out"; cap_file "$err"
+  if [[ "$RB_TIMED_OUT" == 1 ]]; then RB_STATUS=124
+  elif [[ "$RB_ABORTED" == 1 ]]; then RB_STATUS=130
+  else RB_STATUS=$REAP_STATUS; fi
+  return "$RB_STATUS"
 }
-
-# Explicit stdin/stdout on the child. A background job would otherwise read
-# /dev/null, which drops the guest script passed to ssh.
-run_bounded_io() {
-  local secs=$1 infile=$2 outfile=$3
-  shift 3
-  local pid="" start=0 now=0 rc=0 errexit=0
-  case $- in
-    *e*) errexit=1 ;;
-  esac
-  set +e
-  if command -v setsid >/dev/null 2>&1; then
-    setsid "$@" <"$infile" >"$outfile" 2>/dev/null &
-  else
-    perl -MPOSIX=setsid -e 'setsid(); open(STDIN, "<", shift @ARGV) or die $!; my $out = shift @ARGV; open(STDOUT, ">", $out) or die $!; open(STDERR, ">", "/dev/null"); exec @ARGV or die $!' -- "$infile" "$outfile" "$@" &
-  fi
-  pid=$!
-  CURRENT_CHILD_PID=$pid
-  start=$(date +%s)
-  while kill -0 "$pid" 2>/dev/null; do
-    now=$(date +%s)
-    if [[ $((now - start)) -ge "$secs" || "$now" -ge "$DEADLINE" ]]; then
-      kill_recorded "$pid"
-      CURRENT_CHILD_PID=""
-      restore_errexit "$errexit"
-      return 124
-    fi
-    sleep 0.2
-  done
-  wait "$pid"
-  rc=$?
-  CURRENT_CHILD_PID=""
-  restore_errexit "$errexit"
-  return "$rc"
-}
-
-capture_bounded() {
-  local secs=$1 outfile=$2
+start_run() {
+  local out="$1" err="$2" pid snap comm confirm start
   shift 2
-  local pid="" start=0 now=0 rc=0 errexit=0
-  case $- in
-    *e*) errexit=1 ;;
-  esac
-  set +e
-  if command -v setsid >/dev/null 2>&1; then
-    setsid "$@" >"$outfile" 2>&1 &
-  else
-    perl -MPOSIX=setsid -e 'setsid(); my $out = shift @ARGV; open(STDOUT, ">", $out) or die $!; open(STDERR, ">&STDOUT"); exec @ARGV or die $!' -- "$outfile" "$@" &
-  fi
-  pid=$!
-  CURRENT_CHILD_PID=$pid
-  start=$(date +%s)
-  while kill -0 "$pid" 2>/dev/null; do
-    now=$(date +%s)
-    if [[ $((now - start)) -ge "$secs" || "$now" -ge "$DEADLINE" ]]; then
-      kill_recorded "$pid"
-      CURRENT_CHILD_PID=""
-      restore_errexit "$errexit"
-      return 124
-    fi
-    sleep 0.2
+  : >"$out"; : >"$err"
+  "$@" </dev/null >"$out" 2>"$err" &
+  pid=$!; snap=$(proc_snap "$pid"); comm=${snap##* }
+  confirm=$(cap_secs "$START_CONFIRM")
+  case "${S11_START_SEC:-}" in ""|*[!0-9]*) ;; *) [[ "$S11_START_SEC" -lt "$confirm" ]] && confirm=$S11_START_SEC ;; esac
+  start=$SECONDS
+  while true; do
+    if ! same_proc "$pid" "$comm"; then reap_owned "$pid" "$comm"; cap_file "$out"; cap_file "$err"; return 1; fi
+    [[ "$SECONDS" -ge $((start + confirm)) ]] && { RUN_PID=$pid; RUN_LIVE=1; RUN_COMM=$comm; return 0; }
+    sleep 0.05
   done
-  wait "$pid"
-  rc=$?
-  CURRENT_CHILD_PID=""
-  restore_errexit "$errexit"
-  return "$rc"
 }
-
-run_bounded_simple() {
-  local secs=$1
-  shift
-  local pid="" start=0 now=0 rc=0 errexit=0
-  case $- in
-    *e*) errexit=1 ;;
-  esac
-  set +e
-  if command -v setsid >/dev/null 2>&1; then
-    setsid "$@" >/dev/null 2>&1 &
-  else
-    perl -MPOSIX=setsid -e 'setsid(); exec @ARGV or die $!' -- "$@" >/dev/null 2>&1 &
-  fi
-  pid=$!
-  CURRENT_CHILD_PID=$pid
-  start=$(date +%s)
-  while kill -0 "$pid" 2>/dev/null; do
-    now=$(date +%s)
-    if [[ $((now - start)) -ge "$secs" ]]; then
-      kill_recorded "$pid"
-      CURRENT_CHILD_PID=""
-      restore_errexit "$errexit"
-      return 124
-    fi
-    sleep 0.2
-  done
-  wait "$pid"
-  rc=$?
-  CURRENT_CHILD_PID=""
-  restore_errexit "$errexit"
-  return "$rc"
+stop_run_proc() {
+  [[ "$RUN_LIVE" == 1 && -n "$RUN_PID" ]] || return 0
+  local pid=$RUN_PID comm=$RUN_COMM
+  same_proc "$pid" "$comm" && grace_kill "$pid" "$comm"
+  RUN_LIVE=0; RUN_PID=""; RUN_COMM=""
+  reap_owned "$pid" "$comm" || true
+  cap_file "$WORKDIR/run.out"; cap_file "$WORKDIR/run.err"
 }
-
-spawn_tart_run() {
-  local log=""
-  log=$(mktemp)
-  TART_LOG=$log
-  if command -v setsid >/dev/null 2>&1; then
-    setsid "$@" >"$log" 2>&1 &
-  else
-    perl -MPOSIX=setsid -e 'setsid(); exec @ARGV or die $!' -- "$@" >"$log" 2>&1 &
-  fi
-  TART_RUN_PID=$!
+name_is_safe() {
+  local n="$1" tail pid rand
+  [[ "$n" != "$GOLDEN" ]] || return 1
+  case "$n" in s11-0-probe-A-*) tail=${n#s11-0-probe-A-} ;; s11-0-probe-B-*) tail=${n#s11-0-probe-B-} ;; *) return 1 ;; esac
+  pid=${tail%%-*}; rand=${tail#*-}
+  case "$pid" in ""|*[!0-9]*) return 1 ;; esac
+  case "$rand" in ""|*[!0-9a-f]*|*-*) return 1 ;; esac
+  [[ "$pid" != "$tail" ]]
 }
-
-destroy_owned() {
-  local name="" pid=""
-  name=${OWNED_CLONE:-}
-  pid=${TART_RUN_PID:-}
-  if [[ -z "$name" && -z "$pid" ]]; then
-    return 0
+make_name() {
+  local stage="$1" rand
+  if [[ -n "${S11_FORCE_NAME:-}" ]]; then
+    case "$S11_FORCE_NAME" in s11-0-probe-"$stage"-*) name_is_safe "$S11_FORCE_NAME" && { printf '%s\n' "$S11_FORCE_NAME"; return 0; }; return 1 ;; esac
   fi
-  if [[ -n "$pid" ]]; then
-    kill_recorded "$pid"
-    TART_RUN_PID=""
-  fi
-  if [[ -n "${TART_LOG:-}" ]]; then
-    rm -f "$TART_LOG"
-    TART_LOG=""
-  fi
-  if [[ -z "$name" ]]; then
-    return 0
-  fi
-  if ! disposable_ok "$name"; then
-    PREFIX_OK=false
-    CLEANUP_DELETE="refused"
-    OWNED_CLONE=""
-    note "refusing to mutate a VM outside the disposable prefix"
-    return 1
-  fi
-  PREFIX_OK=true
-  # Re-check the local name immediately before stop and delete.
-  if ! disposable_ok "$name"; then
-    PREFIX_OK=false
-    CLEANUP_DELETE="refused"
-    OWNED_CLONE=""
-    return 1
-  fi
-  if run_bounded_simple "$STOP_TIMEOUT" tart stop "$name"; then
-    CLEANUP_STOP="ok"
-  else
-    CLEANUP_STOP="failed"
-  fi
-  if ! disposable_ok "$name"; then
-    PREFIX_OK=false
-    CLEANUP_DELETE="refused"
-    OWNED_CLONE=""
-    return 1
-  fi
-  if run_bounded_simple "$DELETE_TIMEOUT" tart delete "$name"; then
-    CLEANUP_DELETE="ok"
-    OWNED_CLONE=""
-    return 0
-  fi
-  CLEANUP_DELETE="failed"
-  return 1
+  rand=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' | tr 'ABCDEF' 'abcdef')
+  case "$rand" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) return 1 ;; esac
+  printf 's11-0-probe-%s-%s-%s\n' "$stage" "$$" "$rand"
 }
-
-json_bool() {
-  if [[ "$1" == "true" ]]; then
-    printf 'true'
-  else
-    printf 'false'
-  fi
+is_ipv4() {
+  local ip="$1" rest a b c d o
+  case "$ip" in *.*.*.*) ;; *) return 1 ;; esac
+  a=${ip%%.*}; rest=${ip#*.}; b=${rest%%.*}; rest=${rest#*.}; c=${rest%%.*}; d=${rest#*.}
+  [[ "${a}.${b}.${c}.${d}" == "$ip" ]] || return 1
+  for o in "$a" "$b" "$c" "$d"; do case "$o" in ""|*[!0-9]*|0?*) return 1 ;; esac; [[ "$((10#$o))" -le 255 ]] || return 1; done
 }
-
-write_reports() {
-  local tmp="" first=1 id="" stage="" target="" result="" elapsed="" detail=""
-  local ra=0 rb=0 re=0 ba=0 bb=0 be=0 ea=0 eb=0 ee=0
-  local line="" safe_name=""
-  [[ "${DO_REPORT:-0}" -eq 1 ]] || return 0
-  [[ -n "${OUT:-}" ]] || return 0
-  mkdir -p "$OUT" 2>/dev/null || return 0
-  FINISHED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  tmp=$(mktemp)
-  {
-    printf '{\n'
-    printf '  "schema": "s11-0-probe/v1",\n'
-    printf '  "status": "%s",\n' "$(sanitize "$STATUS")"
-    printf '  "started_utc": "%s",\n' "$(sanitize "$STARTED_UTC")"
-    printf '  "finished_utc": "%s",\n' "$(sanitize "$FINISHED_UTC")"
-    printf '  "host_name": "%s",\n' "$(sanitize "$HOST_NAME")"
-    printf '  "tart_version": "%s",\n' "$(sanitize "$TART_VERSION")"
-    printf '  "stage_requested": "%s",\n' "$(sanitize "$STAGE")"
-    printf '  "stages_run": "%s",\n' "$(sanitize "$STAGES_RUN")"
-    printf '  "endpoint_source": "%s",\n' "$(sanitize "$ENDPOINT_SOURCE")"
-    printf '  "endpoint_cidr": "/32",\n'
-    if [[ "$ENDPOINT_SOURCE" == "placeholder" ]]; then
-      printf '  "placeholder_note": "rfc5737-documentation-not-an-approved-model-endpoint",\n'
-    else
-      printf '  "placeholder_note": "",\n'
-    fi
-    printf '  "stage_a_policy": "softnet-default",\n'
-    printf '  "stage_b_block": "0.0.0.0/0",\n'
-    printf '  "stage_b_allow": "endpoint/32",\n'
-    printf '  "stage_b_ran": %s,\n' "$(json_bool "$STAGE_B_RAN")"
-    printf '  "interrupted": %s,\n' "$(json_bool "$INTERRUPTED")"
-    printf '  "result_legend": "timeout-is-error-not-blocked",\n'
-    printf '  "clone_names": ['
-    first=1
-    for safe_name in $CLONE_NAMES; do
-      case "$safe_name" in
-        ${CLONE_PREFIX}*) ;;
-        *) continue ;;
-      esac
-      if [[ "$first" -eq 0 ]]; then
-        printf ', '
-      fi
-      first=0
-      printf '"%s"' "$(sanitize "$safe_name")"
-    done
-    printf '],\n'
-    printf '  "probes": [\n'
-    first=1
-    if [[ -f "$PROBE_TSV" ]]; then
-      while IFS=$'\t' read -r id stage target result elapsed detail; do
-        [[ -n "$id" ]] || continue
-        if [[ "$first" -eq 0 ]]; then
-          printf ',\n'
-        fi
-        first=0
-        printf '    {"probe_id":"%s","stage":"%s","target":"%s","result":"%s","elapsed_ms":%s,"detail":"%s"}' \
-          "$(sanitize "$id")" "$(sanitize "$stage")" "$(sanitize "$target")" \
-          "$(sanitize "$result")" "${elapsed:-0}" "$(sanitize "$detail")"
-      done < "$PROBE_TSV"
-      if [[ "$first" -eq 0 ]]; then
-        printf '\n'
-      fi
-    fi
-    printf '  ],\n'
-    printf '  "cleanup": {"clone_prefix_checked": %s, "stop": "%s", "delete": "%s"}\n' \
-      "$(json_bool "$PREFIX_OK")" "$(sanitize "$CLEANUP_STOP")" "$(sanitize "$CLEANUP_DELETE")"
-    printf '}\n'
-  } > "$tmp"
-  mv -f "$tmp" "$OUT/report.json"
-
-  ra=0; rb=0; re=0; ba=0; bb=0; be=0; ea=0; eb=0; ee=0
-  if [[ -f "$PROBE_TSV" ]]; then
-    while IFS=$'\t' read -r id stage target result elapsed detail; do
-      case "$result:$stage" in
-        reachable:A) ra=$((ra + 1)) ;;
-        blocked:A) ba=$((ba + 1)) ;;
-        error:A) ea=$((ea + 1)) ;;
-        reachable:B) rb=$((rb + 1)) ;;
-        blocked:B) bb=$((bb + 1)) ;;
-        error:B) eb=$((eb + 1)) ;;
-        reachable:C) re=$((re + 1)) ;;
-        blocked:C) be=$((be + 1)) ;;
-        error:C) ee=$((ee + 1)) ;;
-      esac
-    done < "$PROBE_TSV"
-  fi
-  {
-    printf '# S11-0 无模型探针\n\n'
-    printf -- '- status: %s\n' "$(sanitize "$STATUS")"
-    printf -- '- started_utc: %s\n' "$(sanitize "$STARTED_UTC")"
-    printf -- '- finished_utc: %s\n' "$(sanitize "$FINISHED_UTC")"
-    printf -- '- host_name: %s\n' "$(sanitize "$HOST_NAME")"
-    printf -- '- tart_version: %s\n' "$(sanitize "$TART_VERSION")"
-    printf -- '- stage_requested: %s\n' "$(sanitize "$STAGE")"
-    printf -- '- stages_run: %s\n' "$(sanitize "$STAGES_RUN")"
-    printf -- '- endpoint: role=endpoint cidr=/32 source=%s\n' "$(sanitize "$ENDPOINT_SOURCE")"
-    if [[ "$ENDPOINT_SOURCE" == "placeholder" ]]; then
-      printf -- '- placeholder_note: rfc5737-documentation-not-an-approved-model-endpoint\n'
-    fi
-    printf -- '- stage_a_policy: softnet-default\n'
-    printf -- '- stage_b_block: 0.0.0.0/0\n'
-    printf -- '- stage_b_allow: endpoint/32\n'
-    printf -- '- result_legend: reachable=明确连通或明确出现; blocked=明确拒绝或明确缺失; error=超时、工具失败或无法观察。超时不是 blocked。\n\n'
-    printf '## 计数\n\n'
-    printf '| stage | reachable | blocked | error |\n| --- | --- | --- | --- |\n'
-    printf '| A | %s | %s | %s |\n' "$ra" "$ba" "$ea"
-    printf '| B | %s | %s | %s |\n' "$rb" "$bb" "$eb"
-    printf '| C | %s | %s | %s |\n\n' "$re" "$be" "$ee"
-    printf '## 探针\n\n'
-    printf '| probe_id | stage | target | result | elapsed_ms | detail |\n'
-    printf '| --- | --- | --- | --- | --- | --- |\n'
-    if [[ -f "$PROBE_TSV" ]]; then
-      while IFS=$'\t' read -r id stage target result elapsed detail; do
-        [[ -n "$id" ]] || continue
-        printf '| %s | %s | %s | %s | %s | %s |\n' \
-          "$(sanitize "$id")" "$(sanitize "$stage")" "$(sanitize "$target")" \
-          "$(sanitize "$result")" "${elapsed:-0}" "$(sanitize "$detail")"
-      done < "$PROBE_TSV"
-    fi
-    printf '\n## 清理\n\n'
-    printf -- '- clone_prefix_checked: %s\n' "$PREFIX_OK"
-    printf -- '- stop: %s\n' "$(sanitize "$CLEANUP_STOP")"
-    printf -- '- delete: %s\n\n' "$(sanitize "$CLEANUP_DELETE")"
-    printf '本文件只列观测。地址只写角色名（gateway / lan-redacted / metadata / public / endpoint）和策略 CIDR。是否满足 ADR 0018 §5 的拒绝类别，由人按 ADR 0018 §10 判断。\n'
-  } > "$OUT/report.md"
-  note "report: ${OUT}/report.json"
-}
-
-on_term() {
-  INTERRUPTED=true
-  exit 130
-}
-
-cleanup() {
-  local rc=$?
-  set +e
-  trap - EXIT INT TERM
-  kill_recorded "${WATCHDOG_PID:-}"
-  WATCHDOG_PID=""
-  kill_recorded "${CURRENT_CHILD_PID:-}"
-  CURRENT_CHILD_PID=""
-  destroy_owned || {
-    rc=5
-    if [[ "$STATUS" == "complete" ]]; then
-      STATUS="partial"
-    fi
-  }
-  if [[ "$INTERRUPTED" == "true" && "$rc" -eq 0 ]]; then
-    rc=130
-  fi
-  write_reports
-  if [[ -n "${KNOWN_HOSTS:-}" ]]; then
-    rm -f "$KNOWN_HOSTS"
-  fi
-  if [[ -n "${TART_LOG:-}" ]]; then
-    rm -f "$TART_LOG"
-  fi
-  exit "$rc"
-}
-
-append_stage() {
-  local s=$1
-  if [[ -z "$STAGES_RUN" ]]; then
-    STAGES_RUN=$s
-  else
-    case ",${STAGES_RUN}," in
-      *",${s},"*) ;;
-      *) STAGES_RUN="${STAGES_RUN},${s}" ;;
-    esac
-  fi
-}
-
-remember_clone() {
-  local n=$1
-  case " ${CLONE_NAMES} " in
-    *" ${n} "*) ;;
-    *) CLONE_NAMES="${CLONE_NAMES} ${n}" ;;
-  esac
-}
-
-find_softnet() {
-  local c="" cand=""
-  if [[ -n "$SOFTNET_PATH" ]]; then
-    printf '%s\n' "$SOFTNET_PATH"
-    return 0
-  fi
-  c=$(command -v softnet 2>/dev/null || true)
-  if [[ -n "$c" ]]; then
-    printf '%s\n' "$c"
-    return 0
-  fi
-  for cand in /opt/homebrew/bin/softnet /usr/local/bin/softnet /usr/local/sbin/softnet; do
-    if [[ -e "$cand" ]]; then
-      printf '%s\n' "$cand"
-      return 0
-    fi
-  done
-  return 1
-}
-
-softnet_suid_ok() {
-  local path=$1 line="" mode="" owner="" flag=""
-  line=$(ls -l "$path" 2>/dev/null | awk 'NR==1 {print}') || return 1
-  [[ -n "$line" ]] || return 1
-  mode=$(printf '%s\n' "$line" | awk '{print $1}')
-  owner=$(printf '%s\n' "$line" | awk '{print $3}')
-  flag=${mode:3:1}
-  [[ "$owner" == "root" ]] || return 1
-  [[ "$flag" == "s" || "$flag" == "S" ]] || return 1
+is_public_ip() {
+  local ip="$1" a b rest
+  is_ipv4 "$ip" || return 1
+  a=${ip%%.*}; rest=${ip#*.}; b=${rest%%.*}; a=$((10#$a)); b=$((10#$b))
+  [[ "$a" -eq 0 || "$a" -eq 10 || "$a" -eq 127 || "$a" -ge 224 ]] && return 1
+  [[ "$a" -eq 169 && "$b" -eq 254 ]] && return 1; [[ "$a" -eq 192 && "$b" -eq 168 ]] && return 1
+  [[ "$a" -eq 172 && "$b" -ge 16 && "$b" -le 31 ]] && return 1; [[ "$a" -eq 100 && "$b" -ge 64 && "$b" -le 127 ]] && return 1
   return 0
 }
-
-golden_state_from_list() {
-  local list=$1 name=$2
-  printf '%s\n' "$list" | tr ',{}[]":' ' ' | awk -v name="$name" '
-    BEGIN { state="missing" }
-    {
-      hit=0
-      st=""
-      for (i=1; i<=NF; i++) {
-        if ($i==name) hit=1
-        if ($i=="stopped" || $i=="Stopped" || $i=="stop") st="stopped"
-        if ($i=="running" || $i=="Running") st="running"
-      }
-      if (hit) {
-        if (st=="") state="unknown"
-        else state=st
-      }
-    }
-    END { printf "%s", state }
-  '
-}
-
-tart_version_only() {
-  local raw=$1 v=""
-  v=$(printf '%s\n' "$raw" | awk 'NF{print; exit}' | tr -c '0-9.' ' ' | awk '{print $1}')
-  case "$v" in
-    [0-9]*) printf '%s' "$v" ;;
-    *) printf 'unknown' ;;
-  esac
-}
-
-precheck() {
-  local ok=1 ver_raw="" ver_rc=0 sn="" list_raw="" list_rc=0 st="" avail="" df_raw=""
-  local euid=""
-  euid=$(id -u 2>/dev/null || echo unknown)
-  if [[ "$euid" == "0" ]]; then
-    record_probe "precheck-root" "precheck" "host" "error" 0 "euid-0"
-    ok=0
-  else
-    record_probe "precheck-root" "precheck" "host" "reachable" 0 "not-root"
-  fi
-  if ! command -v tart >/dev/null 2>&1; then
-    if [[ -d "${HOME}/bin" ]]; then
-      PATH="${HOME}/bin:${PATH}"
-      export PATH
-    fi
-  fi
-  set +e
-  ver_raw=$(tart --version 2>&1)
-  ver_rc=$?
-  set -e
-  if [[ "$ver_rc" -eq 0 ]]; then
-    TART_VERSION=$(tart_version_only "$ver_raw")
-    record_probe "precheck-tart" "precheck" "host" "reachable" 0 "version-ok"
-  else
-    record_probe "precheck-tart" "precheck" "host" "error" 0 "not-found"
-    ok=0
-  fi
-  sn=$(find_softnet || true)
-  if [[ -z "$sn" || ! -e "$sn" ]]; then
-    record_probe "precheck-softnet" "precheck" "host" "error" 0 "not-found"
-    ok=0
-  elif softnet_suid_ok "$sn"; then
-    record_probe "precheck-softnet" "precheck" "host" "reachable" 0 "suid-root"
-  else
-    record_probe "precheck-softnet" "precheck" "host" "error" 0 "not-suid"
-    ok=0
-  fi
-  if [[ "$ver_rc" -ne 0 ]]; then
-    record_probe "precheck-golden" "precheck" "host" "error" 0 "list-failed"
-    ok=0
-  else
-    set +e
-    list_raw=$(tart list 2>&1)
-    list_rc=$?
-    set -e
-    if [[ "$list_rc" -ne 0 ]]; then
-      record_probe "precheck-golden" "precheck" "host" "error" 0 "list-failed"
-      ok=0
-    else
-      st=$(golden_state_from_list "$list_raw" "$GOLDEN")
-      case "$st" in
-        stopped)
-          record_probe "precheck-golden" "precheck" "host" "reachable" 0 "stopped"
-          ;;
-        running)
-          record_probe "precheck-golden" "precheck" "host" "error" 0 "running"
-          ok=0
-          ;;
-        missing)
-          record_probe "precheck-golden" "precheck" "host" "error" 0 "missing"
-          ok=0
-          ;;
-        *)
-          record_probe "precheck-golden" "precheck" "host" "error" 0 "unknown"
-          ok=0
-          ;;
-      esac
-    fi
-  fi
-  if [[ ! -d "$TART_HOME" ]]; then
-    record_probe "precheck-disk" "precheck" "host" "error" 0 "tart-home-missing"
-    ok=0
-  else
-    set +e
-    df_raw=$(df -kP "$TART_HOME" 2>/dev/null)
-    set -e
-    avail=$(printf '%s\n' "$df_raw" | awk 'NR==2 {print $4}')
-    case "$avail" in
-      ''|*[!0-9]*)
-        record_probe "precheck-disk" "precheck" "host" "error" 0 "disk-unparsed"
-        ok=0
-        ;;
-      *)
-        if [[ "$avail" -lt $((MIN_FREE_GB * 1024 * 1024)) ]]; then
-          record_probe "precheck-disk" "precheck" "host" "error" 0 "low"
-          ok=0
-        else
-          record_probe "precheck-disk" "precheck" "host" "reachable" 0 "enough"
-        fi
-        ;;
-    esac
-  fi
-  if [[ ! -f "$SSH_KEY" || ! -r "$SSH_KEY" ]]; then
-    record_probe "precheck-ssh-key" "precheck" "host" "error" 0 "unreadable"
-    ok=0
-  else
-    record_probe "precheck-ssh-key" "precheck" "host" "reachable" 0 "readable"
-  fi
-  if [[ "$ok" -eq 1 ]]; then
-    return 0
-  fi
-  return 1
-}
-
-wait_for_ip() {
-  local deadline=0 now=0 ip="" rc=0
-  disposable_ok "$OWNED_CLONE" || return 1
-  deadline=$(( $(date +%s) + BOOT_TIMEOUT ))
-  while true; do
-    now=$(date +%s)
-    if [[ "$now" -ge "$deadline" || "$now" -ge "$DEADLINE" ]]; then
-      return 124
-    fi
-    if [[ -n "$TART_RUN_PID" ]] && ! kill -0 "$TART_RUN_PID" 2>/dev/null; then
-      return 125
-    fi
-    set +e
-    ip=$(tart ip "$OWNED_CLONE" 2>/dev/null | awk 'NF{print; exit}')
-    rc=$?
-    set -e
-    ip=$(printf '%s' "$ip" | tr -d '[:space:]')
-    if [[ "$rc" -eq 0 ]] && is_ipv4_syntax "$ip"; then
-      GUEST_IP=$ip
-      return 0
-    fi
-    sleep 1
+check_softnet() {
+  local p t i=0 owner mode bit bad=0
+  p=$(command -v softnet 2>/dev/null || true)
+  [[ -n "$p" ]] || { add_reason softnet-missing; return 1; }
+  while [[ -L "$p" ]]; do
+    i=$((i + 1)); [[ "$i" -le 16 ]] || { add_reason softnet-symlink-loop; return 1; }
+    t=$(readlink "$p" 2>/dev/null) || { add_reason softnet-missing; return 1; }
+    case "$t" in /*) p=$t ;; *) p=$(dirname "$p")/$t ;; esac
   done
+  [[ -e "$p" ]] || { add_reason softnet-missing; return 1; }
+  run_bounded 10 "$WORKDIR/stat.out" "$WORKDIR/stat.err" - -- stat -f '%Su %Sp' "$p" || true
+  [[ "$RB_TIMED_OUT" == 1 || "$RB_STATUS" -ne 0 ]] && { add_reason softnet-stat-failed; return 1; }
+  read -r owner mode <"$WORKDIR/stat.out" || { add_reason softnet-stat-failed; return 1; }
+  case "$mode" in ??????????) ;; *) add_reason softnet-stat-failed; return 1 ;; esac
+  bit=$(printf '%s' "$mode" | cut -c 4); [[ "$owner" == root ]] || { add_reason softnet-not-root; bad=1; }
+  case "$bit" in s|S) ;; *) add_reason softnet-not-suid; bad=1 ;; esac; [[ "$bad" -eq 0 ]]
 }
-
-ssh_opts_init() {
-  KNOWN_HOSTS=$(mktemp)
-  SSH_OPTS=(
-    -i "$SSH_KEY"
-    -o BatchMode=yes
-    -o IdentitiesOnly=yes
-    -o PreferredAuthentications=publickey
-    -o StrictHostKeyChecking=accept-new
-    -o "UserKnownHostsFile=${KNOWN_HOSTS}"
-    -o GlobalKnownHostsFile=/dev/null
-    -o ConnectTimeout=8
-    -o LogLevel=ERROR
-    -o CheckHostIP=no
-  )
+refresh_list() {
+  run_bounded 10 "$WORKDIR/list.out" "$WORKDIR/list.err" - -- tart list || true
+  cp "$WORKDIR/list.out" "$WORKDIR/list.last" 2>/dev/null || true
+  [[ "$RB_TIMED_OUT" == 1 ]] && { add_reason list-timeout; return 1; }
+  [[ "$RB_STATUS" -eq 0 ]] || { add_reason list-failed; return 1; }
 }
-
-ssh_up() {
-  local deadline=0 now=0 rc=0
-  deadline=$(( $(date +%s) + SSH_WAIT ))
-  while true; do
-    now=$(date +%s)
-    if [[ "$now" -ge "$deadline" || "$now" -ge "$DEADLINE" ]]; then
-      return 1
-    fi
-    set +e
-    ssh "${SSH_OPTS[@]}" "${GUEST_USER}@${GUEST_IP}" -- /usr/bin/true </dev/null >/dev/null 2>&1
-    rc=$?
-    set -e
-    if [[ "$rc" -eq 0 ]]; then
-      return 0
-    fi
-    sleep 1
-  done
+vm_status() {
+  [[ -f "$WORKDIR/list.last" ]] || return 1
+  awk -v n="$1" '$1==n {print $2; found=1; exit} END{exit !found}' "$WORKDIR/list.last"
 }
-
-guest_ids_for_stage() {
-  local p="" oldifs=""
-  printf '%s\n' "gateway-icmp"
-  oldifs=$IFS
-  IFS=','
-  # shellcheck disable=SC2086
-  set -- $PORTS_CSV
-  IFS=$oldifs
-  for p in "$@"; do
-    printf 'gateway-tcp-%s\n' "$p"
-  done
-  printf '%s\n' \
-    "dns-udp-gateway" \
-    "dns-udp-public" \
-    "ipv6-addr" \
-    "ipv6-tcp-public" \
-    "endpoint-tcp-443" \
-    "endpoint-udp-443" \
-    "lan-icmp" \
-    "lan-tcp-443" \
-    "metadata-icmp" \
-    "metadata-tcp-80" \
-    "metadata-tcp-443"
+build_argv() {
+  RUN_ARGV=(tart run "$1" --no-graphics --net-softnet); S_ARGV_OK=1
+  [[ "$2" == B ]] && RUN_ARGV+=(--net-softnet-block=0.0.0.0/0 "--net-softnet-allow=${3}/32")
 }
-
-ingest_guest_output() {
-  local file=$1 stage=$2
-  local line="" id="" result="" elapsed="" detail=""
-  while IFS= read -r line; do
-    case "$line" in
-      PROBE\ *) ;;
-      *) continue ;;
-    esac
-    set -f
-    # shellcheck disable=SC2086
-    set -- $line
-    set +f
-    id=${2:-}
-    result=${3:-}
-    elapsed=${4:-0}
-    detail=${5:-none}
-    case "$id" in
-      *[!A-Za-z0-9_-]*|'') continue ;;
-    esac
-    case "$result" in
-      reachable|blocked|error) ;;
-      *) continue ;;
-    esac
-    record_probe "$id" "$stage" "$(target_for "$id")" "$result" "$elapsed" "$detail"
-  done < "$file"
-}
-
-fill_missing_guest() {
-  local stage=$1 id=""
-  while IFS= read -r id; do
-    [[ -n "$id" ]] || continue
-    if ! have_probe "$id" "$stage"; then
-      record_probe "$id" "$stage" "$(target_for "$id")" "error" 0 "no-observation"
-    fi
-  done <<EOF
-$(guest_ids_for_stage)
+print_argv() { local x line=argv:; for x in "${RUN_ARGV[@]}"; do line="$line $x"; done; printf '%s\n' "$line"; }
+write_guest() {
+  cat >"$WORKDIR/guest.sh" <<'EOF'
+set -u; export LC_ALL=C
+obs(){ printf 'obs %s %s %s\n' "$1" "$2" "$3"; }
+classify(){ local e; [[ "$1" -eq 127 ]] && { printf tool-error; return; }
+  e=$(head -c 300 "$2" 2>/dev/null || true)
+  case "$e" in
+    *[Cc]onnection\ refused*) printf refused;;
+    *[Nn]o\ route*|*[Nn]etwork\ is\ unreachable*|*[Hh]ost\ is\ unreachable*) printf no-route;;
+    *[Oo]peration\ timed\ out*|*[Tt]imed\ out*|*[Tt]imeout*) printf timeout;;
+    *) printf tool-error;; esac; }
+run_tool(){ local ef st t=$SECONDS
+  ef=$(mktemp "${TMPDIR:-/tmp}/s11e.XXXXXX") || { obs "$1" tool-error 0; return; }
+  if [[ "$2" == tcp ]]; then command -v nc >/dev/null 2>&1 || { rm -f "$ef"; obs "$1" tool-error 0; return; }
+    nc -z -G 2 -w 2 "$3" "$4" 2>"$ef"; st=$?
+  elif command -v dig >/dev/null 2>&1; then dig +time=2 +tries=1 @"$3" example.com A >"$ef" 2>&1; st=$?
+  elif command -v host >/dev/null 2>&1; then host -W 2 example.com "$3" >"$ef" 2>&1; st=$?
+  elif command -v nslookup >/dev/null 2>&1; then nslookup -timeout=2 example.com "$3" >"$ef" 2>&1; st=$?
+  else rm -f "$ef"; obs "$1" tool-error 0; return; fi
+  if [[ "$st" -eq 0 ]]; then obs "$1" connected $((SECONDS - t))
+  elif [[ "$2" != tcp && "$st" -eq 9 ]]; then obs "$1" timeout $((SECONDS - t))
+  else obs "$1" "$(classify "$st" "$ef")" $((SECONDS - t)); fi; rm -f "$ef"; }
+gw=""; command -v route >/dev/null 2>&1 && gw=$(route -n get default 2>/dev/null | awk '$1=="gateway:"{print $2; exit}')
+case "$gw" in [0-9]*.[0-9]*.[0-9]*.[0-9]*) ;; *) gw="";; esac
+if [[ -z "$gw" ]]; then obs gw22 no-address 0; obs gw53 no-address 0; obs gw80 no-address 0; obs gw443 no-address 0; obs dns-gw no-address 0
+else run_tool gw22 tcp "$gw" 22; run_tool gw53 tcp "$gw" 53; run_tool gw80 tcp "$gw" 80; run_tool gw443 tcp "$gw" 443; run_tool dns-gw dns "$gw"; fi
+run_tool dns-pub dns 1.1.1.1; run_tool meta80 tcp 169.254.169.254 80
+if command -v ifconfig >/dev/null 2>&1; then
+  v6=$(ifconfig 2>/dev/null | awk 'BEGIN{f="no"} $1=="inet6"{a=$2; sub(/%.*/,"",a); if(a~/^fe80:/||a=="::1"||a~/^fc/||a~/^fd/||a~/^ff/) next; if(a~/:/) f="yes"} END{print f}')
+  if [[ "$v6" == yes ]]; then obs v6addr yes 0; else obs v6addr no-address 0; fi
+else obs v6addr tool-error 0; fi
+run_tool v6tcp tcp 2606:4700:4700::1111 443
+[[ -n "${S11_LAN:-}" ]] && run_tool lan443 tcp "$S11_LAN" 443
+[[ -n "${S11_EP:-}" ]] && run_tool ep443 tcp "$S11_EP" 443
+exit 0
 EOF
 }
-
-run_guest_net() {
-  local stage=$1
-  local out="" rc=0 args=()
-  out=$(mktemp)
-  args=(--guest --stage "$stage" --ep "$ENDPOINT_IP" --pub "$PUBLIC_RESOLVER" --ports "$PORTS_CSV")
-  if [[ -n "$LAN_IP" ]]; then
-    args+=(--lan "$LAN_IP")
-  fi
-  set +e
-  run_bounded_io "$PROBE_TIMEOUT" "$SCRIPT_SELF" "$out" \
-    ssh "${SSH_OPTS[@]}" "${GUEST_USER}@${GUEST_IP}" -- bash -s -- "${args[@]}"
-  rc=$?
-  set -e
-  ingest_guest_output "$out" "$stage"
-  rm -f "$out"
-  fill_missing_guest "$stage"
-  return "$rc"
+role_id() {
+  case "$1" in
+    gw22) printf tcp-gateway-22;; gw53) printf tcp-gateway-53;; gw80) printf tcp-gateway-80;; gw443) printf tcp-gateway-443;;
+    dns-gw) printf dns-udp-gateway;; dns-pub) printf dns-udp-public;; meta80) printf tcp-metadata-80;;
+    v6addr) printf ipv6-global-address;; v6tcp) printf tcp-ipv6-public;; lan443) printf tcp-lan-443;; ep443) printf tcp-endpoint-443;;
+    *) return 1;;
+  esac
 }
-
-begin_clone() {
-  local name=$1
-  disposable_ok "$name" || return 1
-  OWNED_CLONE=$name
-  remember_clone "$name"
-  if ! run_bounded "$CLONE_TIMEOUT" tart clone "$GOLDEN" "$name"; then
-    return 1
-  fi
-  return 0
+take_obs() {
+  local line tag role result sec id src=$1 dst=$2
+  : >"$dst"
+  while IFS= read -r line; do
+    set -- $line; tag=${1:-}; role=${2:-}; result=${3:-}; sec=${4:-}
+    [[ "$tag" == obs ]] || continue
+    case "$result" in connected|refused|no-route|no-address|timeout|tool-error|yes) ;; *) continue ;; esac
+    [[ "$result" == yes && "$role" != v6addr ]] && continue
+    id=$(role_id "$role") || continue; case "$sec" in ""|*[!0-9]*) sec=0 ;; esac
+    printf '%s %s %s\n' "$id" "$result" "$sec" >>"$dst"
+  done <"$src"
 }
-
-detect_lan() {
-  local iface="" ip=""
-  if [[ -n "$LAN_IP_ARG" ]]; then
-    LAN_IP=$LAN_IP_ARG
-    return 0
-  fi
-  LAN_IP=""
-  if [[ "$(uname -s)" != "Darwin" ]]; then
-    return 0
-  fi
-  set +e
-  iface=$(route -n get default 2>/dev/null | awk '/interface:/{print $2; exit}')
-  if [[ -n "$iface" ]]; then
-    ip=$(ipconfig getifaddr "$iface" 2>/dev/null || true)
-  fi
-  set -e
-  ip=$(printf '%s' "$ip" | tr -d '[:space:]')
-  if is_ipv4_syntax "$ip"; then
-    LAN_IP=$ip
-  fi
+ssh_guest() {
+  local kh=$WORKDIR/known_hosts inner remote
+  : >"$kh"
+  inner='f=$(mktemp "${TMPDIR:-/tmp}/s11g.XXXXXX") || exit 127; cat >"$f" || exit 127; bash "$f"; st=$?; rm -f "$f"; exit $st'
+  remote="S11_EP=${2} S11_LAN=${3} bash -c '${inner}'"
+  run_bounded 50 "$WORKDIR/ssh.out" "$WORKDIR/ssh.err" "$WORKDIR/guest.sh" -- \
+    ssh -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
+    -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=${kh}" \
+    -i "$SSH_KEY" "${GUEST_USER}@${1}" "$remote" || true
 }
-
-run_net_stage() {
-  local stage=$1 name=$2 policy=$3
-  local start_ms="" rc=0
-  append_stage "$stage"
-  if [[ "$stage" == "B" ]]; then
-    STAGE_B_RAN=true
-  fi
-  note "stage ${stage}"
-  if ! begin_clone "$name"; then
-    record_probe "clone" "$stage" "host" "error" 0 "clone-failed"
-    record_probe "host-tart-ip" "$stage" "host" "error" 0 "not-attempted"
-    record_probe "host-ssh-channel" "$stage" "host" "error" 0 "not-attempted"
-    fill_missing_guest "$stage"
-    return 1
-  fi
-  if [[ "$policy" == "block" ]]; then
-    spawn_tart_run tart run "$name" --no-graphics --net-softnet \
-      --net-softnet-block=0.0.0.0/0 \
-      --net-softnet-allow="${ENDPOINT_IP}/32"
-  else
-    spawn_tart_run tart run "$name" --no-graphics --net-softnet
-  fi
-  start_ms=$(now_ms)
-  # `if ! cmd` resets $? to 0, so keep the raw wait status.
-  rc=0
-  wait_for_ip || rc=$?
-  if [[ "$rc" -ne 0 ]]; then
-    if [[ "$rc" -eq 125 ]]; then
-      record_probe "host-tart-ip" "$stage" "host" "error" 0 "tart-run-exited"
-    else
-      record_probe "host-tart-ip" "$stage" "host" "error" 0 "ip-unavailable"
-    fi
-    record_probe "host-ssh-channel" "$stage" "host" "error" 0 "not-attempted"
-    fill_missing_guest "$stage"
-    return 1
-  fi
-  record_probe "host-tart-ip" "$stage" "host" "reachable" "$(( $(now_ms) - start_ms ))" "ipv4-assigned"
-  start_ms=$(now_ms)
-  if ! ssh_up; then
-    record_probe "host-ssh-channel" "$stage" "host" "error" "$(( $(now_ms) - start_ms ))" "ssh-session-failed"
-    fill_missing_guest "$stage"
-    return 1
-  fi
-  record_probe "host-ssh-channel" "$stage" "host" "reachable" "$(( $(now_ms) - start_ms ))" "ssh-session-exit-0"
-  run_guest_net "$stage" || true
-  return 0
+cleanup_owned() {
+  [[ "$IN_CLEANUP" == 1 ]] && return 0
+  IN_CLEANUP=1; trap '' INT TERM HUP
+  CLEANUP_DEADLINE=$((SECONDS + CLEANUP_BUDGET))
+  case "${S11_CLEANUP_BUDGET:-}" in
+    ""|*[!0-9]*) ;;
+    *) [[ "$S11_CLEANUP_BUDGET" -gt 0 && "$S11_CLEANUP_BUDGET" -lt "$CLEANUP_BUDGET" ]] && CLEANUP_DEADLINE=$((SECONDS + S11_CLEANUP_BUDGET)) ;;
+  esac
+  local stop=not-run del=not-run absent=not-run
+  if [[ "$OWN_OK" == 1 ]] && name_is_safe "$OWN_NAME"; then
+    run_bounded 30 "$WORKDIR/c.out" "$WORKDIR/c.err" - -- tart stop "$OWN_NAME" || true
+    if [[ "$RB_TIMED_OUT" == 1 ]]; then stop=timeout; add_reason stop-timeout; ANY_CLEANUP_FAILED=1
+    elif [[ "$RB_STATUS" -ne 0 ]]; then stop=fail; add_reason stop-failed; ANY_CLEANUP_FAILED=1; else stop=ok; fi
+    stop_run_proc
+    run_bounded 30 "$WORKDIR/c.out" "$WORKDIR/c.err" - -- tart delete "$OWN_NAME" || true
+    if [[ "$RB_TIMED_OUT" == 1 ]]; then del=timeout; add_reason delete-timeout; ANY_CLEANUP_FAILED=1
+    elif [[ "$RB_STATUS" -ne 0 ]]; then del=fail; add_reason delete-failed; ANY_CLEANUP_FAILED=1; else del=ok; fi
+    if refresh_list; then
+      if vm_status "$OWN_NAME" >/dev/null; then absent=no; add_reason still-present; ANY_CLEANUP_FAILED=1; else absent=yes; OWN_OK=0; OWN_NAME=""; fi
+    else absent=unknown; add_reason absent-unknown; ANY_CLEANUP_FAILED=1; fi
+    printf '%s %s %s\n' "$stop" "$del" "$absent" >"$WORKDIR/cleanup.last"
+  else stop_run_proc; fi
+  IN_CLEANUP=0
+  [[ "$FINALIZING" == 1 ]] || trap 'REQUEST_CLEANUP=1' INT TERM HUP
 }
-
-help_keywords() {
-  local file=$1 word="" found=""
-  for word in exec softnet vsock serial agent; do
-    if grep -q -w "$word" "$file" 2>/dev/null; then
-      found="${found}${found:+,}${word}=yes"
-    else
-      found="${found}${found:+,}${word}=no"
-    fi
+note_help() {
+  if [[ "$RB_TIMED_OUT" == 1 ]]; then HELP_NOTE=timeout; elif [[ "$RB_STATUS" -ne 0 ]]; then HELP_NOTE=tool-error; else HELP_NOTE=ok; fi
+}
+collect_help() {
+  local w tok n=0
+  run_bounded 10 "$WORKDIR/help.out" "$WORKDIR/help.err" - -- tart --help || true
+  note_help; HELP_STATE=$HELP_NOTE; HELP_SUBS=""
+  for w in clone list run stop delete ip exec; do
+    grep -w -q -- "$w" "$WORKDIR/help.out" 2>/dev/null && HELP_SUBS="$HELP_SUBS $w"
   done
-  printf '%s' "$found"
+  run_bounded 10 "$WORKDIR/help.out" "$WORKDIR/help.err" - -- tart exec --help || true
+  note_help; EXEC_HELP=$HELP_NOTE; EXEC_OPTS=""
+  while IFS= read -r w; do
+    for tok in $w; do
+      case "$tok" in --[A-Za-z]*) tok=${tok%%[!A-Za-z0-9-]*} ;; *) continue ;; esac
+      case "$tok" in --[A-Za-z0-9-]*) ;; *) continue ;; esac
+      case " $EXEC_OPTS " in *" $tok "*) ;; *) EXEC_OPTS="$EXEC_OPTS $tok"; n=$((n + 1)) ;; esac
+      [[ "$n" -ge 12 ]] && break
+    done
+    [[ "$n" -ge 12 ]] && break
+  done <"$WORKDIR/help.out"
 }
-
-help_subcommands() {
-  local file=$1 n="" found=""
-  for n in clone create delete exec get ip list login logout prune pull push rename run set stop suspend version; do
-    if grep -q -w "$n" "$file" 2>/dev/null; then
-      found="${found}${found:+,}${n}"
-    fi
+do_exec() {
+  run_bounded 20 "$WORKDIR/exec.out" "$WORKDIR/exec.err" - -- tart exec "$1" /usr/bin/true || true
+  if [[ "$RB_TIMED_OUT" == 1 ]]; then EXEC_RESULT=timeout; elif [[ "$RB_STATUS" -eq 0 ]]; then EXEC_RESULT=ok; else EXEC_RESULT=fail; fi
+}
+begin_stage() {
+  S_STAGE=$1; S_NAME=""; S_CREATED=no; S_LAUNCH=not-run; S_COLL=not-run; S_SSH=not-run; S_EXEC=not-run; S_V6=not-run; S_ARGV_OK=0
+  : >"$WORKDIR/obs.$1"; printf 'not-run not-run not-run\n' >"$WORKDIR/cleanup.last"
+}
+run_stage() {
+  local stage=$1 name cst cto ep="" lan=$LAN_IP boot guest_ip nobs
+  begin_stage "$stage"
+  [[ "$stage" == B ]] && ep=$ENDPOINT
+  name=$(make_name "$stage") || { add_reason name-failed; ANY_CREATE_FAILED=1; return 1; }
+  S_NAME=$name; refresh_list || { ANY_CREATE_FAILED=1; return 1; }
+  if vm_status "$name" >/dev/null; then add_reason name-in-use; ANY_CREATE_FAILED=1; return 1; fi
+  run_bounded 180 "$WORKDIR/clone.out" "$WORKDIR/clone.err" - -- tart clone "$GOLDEN" "$name" || true
+  cst=$RB_STATUS; cto=$RB_TIMED_OUT
+  if ! refresh_list; then add_reason clone-unconfirmed; ANY_CREATE_FAILED=1; return 1; fi
+  if ! vm_status "$name" >/dev/null; then
+    if [[ "$cto" == 1 || "$cst" -ne 0 ]]; then add_reason clone-failed; else add_reason clone-unconfirmed; fi
+    ANY_CREATE_FAILED=1; return 1
+  fi
+  OWN_NAME=$name; OWN_OK=1; S_CREATED=yes
+  if [[ "$cto" == 1 || "$cst" -ne 0 ]]; then
+    add_reason clone-failed; ANY_COLLECTION_FAILED=1; S_COLL=failed; cleanup_owned; return 1
+  fi
+  build_argv "$name" "$stage" "$ep"; print_argv
+  if ! start_run "$WORKDIR/run.out" "$WORKDIR/run.err" "${RUN_ARGV[@]}"; then
+    S_LAUNCH=tool-error; add_reason launch-failed; ANY_COLLECTION_FAILED=1; S_COLL=failed
+    do_exec "$name"; S_EXEC=$EXEC_RESULT; cleanup_owned; return 1
+  fi
+  S_LAUNCH=started; do_exec "$name"; S_EXEC=$EXEC_RESULT
+  boot=$((SECONDS + $(cap_secs 240))); S_SSH=no-address
+  while [[ "$SECONDS" -lt "$boot" && "$REQUEST_CLEANUP" != 1 ]]; do
+    run_bounded 10 "$WORKDIR/ip.out" "$WORKDIR/ip.err" - -- tart ip "$name" || true
+    [[ "$RB_TIMED_OUT" == 1 ]] && { S_SSH=timeout; break; }
+    guest_ip=$(awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/){print $i; exit}}' "$WORKDIR/ip.out")
+    is_ipv4 "$guest_ip" && { S_SSH=pending; break; }
+    [[ "$RB_STATUS" -ne 0 ]] && { S_SSH=tool-error; break; }
+    S_SSH=no-address; sleep 1
   done
-  printf '%s' "$found"
+  if [[ "$S_SSH" == pending && "$REQUEST_CLEANUP" != 1 ]]; then
+    ssh_guest "$guest_ip" "$ep" "$lan"
+    take_obs "$WORKDIR/ssh.out" "$WORKDIR/obs.$stage"
+    nobs=$(wc -l <"$WORKDIR/obs.$stage" | tr -d ' ')
+    if [[ "$RB_TIMED_OUT" == 1 ]]; then S_SSH=timeout; S_COLL=failed
+    elif [[ "$RB_STATUS" -eq 0 && "${nobs:-0}" -gt 0 ]]; then S_SSH=connected; S_COLL=ok
+    else S_COLL=failed; if [[ "${nobs:-0}" -gt 0 ]]; then S_SSH=connected; else S_SSH=tool-error; fi; fi
+  else S_COLL=failed; fi
+  [[ "$S_COLL" == ok ]] || { ANY_COLLECTION_FAILED=1; add_reason collection-failed; }
+  S_V6=$(awk '$1=="ipv6-global-address"{print $2; exit}' "$WORKDIR/obs.$stage" 2>/dev/null || true)
+  [[ -n "$S_V6" ]] || S_V6=not-run
+  cleanup_owned
 }
-
-boot_for_exec() {
-  local name=$1 start_ms="" rc=0
-  if ! begin_clone "$name"; then
-    record_probe "clone" "C" "host" "error" 0 "clone-failed"
-    record_probe "host-tart-ip" "C" "host" "error" 0 "not-attempted"
-    record_probe "host-ssh-channel" "C" "host" "error" 0 "not-attempted"
-    return 1
-  fi
-  spawn_tart_run tart run "$name" --no-graphics --net-softnet
-  start_ms=$(now_ms)
-  rc=0
-  wait_for_ip || rc=$?
-  if [[ "$rc" -ne 0 ]]; then
-    if [[ "$rc" -eq 125 ]]; then
-      record_probe "host-tart-ip" "C" "host" "error" 0 "tart-run-exited"
-    else
-      record_probe "host-tart-ip" "C" "host" "error" 0 "ip-unavailable"
+json_list() {
+  local first=1 w
+  printf '['
+  for w in "$@"; do
+    case "$w" in ""|*[!A-Za-z0-9_./=-]*) continue ;; esac
+    [[ "$first" -eq 1 ]] && first=0 || printf ','
+    printf '"%s"' "$w"
+  done
+  printf ']'
+}
+save_stage() {
+  [[ -n "$S_STAGE" ]] || return 0
+  local cu stop del abs id result sec first=1
+  cu=$(cat "$WORKDIR/cleanup.last" 2>/dev/null || echo "not-run not-run not-run")
+  set -- $cu; stop=${1:-not-run}; del=${2:-not-run}; abs=${3:-not-run}
+  {
+    printf '{"stage":"%s","clone":"%s","created":"%s","argv":' "$S_STAGE" "$S_NAME" "$S_CREATED"
+    if [[ "$S_ARGV_OK" == 1 ]]; then json_list "${RUN_ARGV[@]}"; else printf '[]'; fi
+    printf ',"launch":"%s","collection":"%s","ssh":"%s","tart_exec":"%s","ipv6_global":"%s","observations":[' \
+      "$S_LAUNCH" "$S_COLL" "$S_SSH" "$S_EXEC" "$S_V6"
+    if [[ -f "$WORKDIR/obs.$S_STAGE" ]]; then
+      while read -r id result sec; do
+        [[ -n "$id" ]] || continue
+        [[ "$first" -eq 1 ]] && first=0 || printf ','
+        printf '{"id":"%s","result":"%s","elapsed_sec":%s}' "$id" "$result" "${sec:-0}"
+      done <"$WORKDIR/obs.$S_STAGE"
     fi
-    record_probe "host-ssh-channel" "C" "host" "error" 0 "not-attempted"
-    return 1
-  fi
-  record_probe "host-tart-ip" "C" "host" "reachable" "$(( $(now_ms) - start_ms ))" "ipv4-assigned"
-  start_ms=$(now_ms)
-  if ! ssh_up; then
-    record_probe "host-ssh-channel" "C" "host" "error" "$(( $(now_ms) - start_ms ))" "ssh-session-failed"
-    return 1
-  fi
-  record_probe "host-ssh-channel" "C" "host" "reachable" "$(( $(now_ms) - start_ms ))" "ssh-session-exit-0"
-  return 0
+    printf '],"cleanup":{"stop":"%s","delete":"%s","absent":"%s"}}\n' "$stop" "$del" "$abs"
+  } >"$WORKDIR/stage-$S_STAGE.json"
 }
-
-run_stage_c() {
-  local help_main="" help_exec="" help_run="" combined="" rc=0 subs="" keys=""
-  local out=""
-  append_stage "C"
-  note "stage C"
-  help_main=$(mktemp)
-  help_exec=$(mktemp)
-  help_run=$(mktemp)
-  combined=$(mktemp)
-  set +e
-  capture_bounded 30 "$help_main" tart --help
-  rc=$?
-  set -e
-  if [[ "$rc" -ne 0 ]]; then
-    record_probe "tart-help-subcommands" "C" "host" "error" 0 "exit-${rc}"
-  else
-    subs=$(help_subcommands "$help_main")
-    [[ -n "$subs" ]] || subs="none"
-    record_probe "tart-help-subcommands" "C" "host" "reachable" 0 "subcommands=${subs}"
-  fi
-  set +e
-  capture_bounded 30 "$help_exec" tart exec --help
-  rc=$?
-  set -e
-  if [[ "$rc" -eq 0 ]]; then
-    record_probe "tart-exec-help" "C" "host" "reachable" 0 "exit-0"
-  elif [[ "$rc" -eq 124 ]]; then
-    record_probe "tart-exec-help" "C" "host" "error" 0 "timeout"
-  else
-    record_probe "tart-exec-help" "C" "host" "error" 0 "exit-${rc}"
-  fi
-  set +e
-  capture_bounded 30 "$help_run" tart run --help
-  set -e
-  cat "$help_main" "$help_exec" "$help_run" > "$combined" 2>/dev/null || true
-  keys=$(help_keywords "$combined")
-  [[ -n "$keys" ]] || keys="none"
-  record_probe "tart-help-keywords" "C" "host" "reachable" 0 "${keys}"
-  rm -f "$help_main" "$help_exec" "$help_run" "$combined"
-  if [[ -z "${OWNED_CLONE:-}" ]] || ! disposable_ok "$OWNED_CLONE"; then
-    record_probe "tart-exec-true" "C" "host" "error" 0 "no-clone"
-    record_probe "guest-vsock" "C" "guest" "error" 0 "no-clone"
-    record_probe "guest-virtio" "C" "guest" "error" 0 "no-clone"
-    record_probe "guest-serial" "C" "guest" "error" 0 "no-clone"
-    return 1
-  fi
-  set +e
-  run_bounded 30 tart exec "$OWNED_CLONE" /usr/bin/true >/dev/null 2>&1
-  rc=$?
-  set -e
-  if [[ "$rc" -eq 0 ]]; then
-    record_probe "tart-exec-true" "C" "host" "reachable" 0 "exit-0"
-  elif [[ "$rc" -eq 124 ]]; then
-    record_probe "tart-exec-true" "C" "host" "error" 0 "timeout"
-  else
-    record_probe "tart-exec-true" "C" "host" "error" 0 "exit-${rc}"
-  fi
-  if [[ -z "${GUEST_IP:-}" ]]; then
-    record_probe "guest-vsock" "C" "guest" "error" 0 "no-ssh"
-    record_probe "guest-virtio" "C" "guest" "error" 0 "no-ssh"
-    record_probe "guest-serial" "C" "guest" "error" 0 "no-ssh"
-    return 1
-  fi
-  out=$(mktemp)
-  set +e
-  run_bounded_io "$PROBE_TIMEOUT" "$SCRIPT_SELF" "$out" \
-    ssh "${SSH_OPTS[@]}" "${GUEST_USER}@${GUEST_IP}" -- bash -s -- --guest --inventory
-  rc=$?
-  set -e
-  ingest_guest_output "$out" "C"
-  rm -f "$out"
-  if ! have_probe "guest-vsock" "C"; then
-    record_probe "guest-vsock" "C" "guest" "error" 0 "no-observation"
-  fi
-  if ! have_probe "guest-virtio" "C"; then
-    record_probe "guest-virtio" "C" "guest" "error" 0 "no-observation"
-  fi
-  if ! have_probe "guest-serial" "C"; then
-    record_probe "guest-serial" "C" "guest" "error" 0 "no-observation"
-  fi
-  if [[ "$rc" -ne 0 && "$rc" -ne 124 ]]; then
-    return 1
-  fi
-  if [[ "$rc" -eq 124 ]]; then
-    return 1
-  fi
-  return 0
+write_report() {
+  local tmp=$OUT/report.json.tmp rs="" r first=1 st f
+  mkdir -p "$OUT" 2>/dev/null || return 1
+  [[ -f "$REASONS_FILE" ]] && while IFS= read -r r; do rs="$rs $r"; done <"$REASONS_FILE"
+  {
+    printf '{"schema":"s11-0-probe/v2","status":"%s","endpoint_source":"%s","h1_independent_of_ip":"unknown",' "$STATUS" "$ENDPOINT_SOURCE"
+    printf '"probe_budget_sec":%s,"cleanup_budget_sec":%s,"elapsed_sec":%s,' "$PROBE_BUDGET" "$CLEANUP_BUDGET" "$SECONDS"
+    printf '"measured":%s,"unmeasured":%s,"reasons":%s,' "$(json_list $MEASURED)" "$(json_list $UNMEASURED)" "$(json_list $rs)"
+    printf '"tart_help":"%s","tart_help_subcommands":%s,"tart_exec_help":"%s","tart_exec_options":%s,"stages":[' \
+      "$HELP_STATE" "$(json_list $HELP_SUBS)" "$EXEC_HELP" "$(json_list $EXEC_OPTS)"
+    for st in A B C; do
+      f=$WORKDIR/stage-$st.json; [[ -f "$f" ]] || continue
+      [[ "$first" -eq 1 ]] && first=0 || printf ','; cat "$f"
+    done
+    printf ']}\n'
+  } >"$tmp" && mv "$tmp" "$OUT/report.json"
 }
-
-print_dry_run() {
-  local name_a=$1 name_b=$2
-  printf 's11-0-probe: dry-run; no command will be executed\n'
-  printf '# endpoint source: %s\n' "$ENDPOINT_SOURCE"
-  if [[ "$ENDPOINT_SOURCE" == "placeholder" ]]; then
-    printf '# placeholder is RFC5737 documentation space, not an approved model endpoint\n'
-  fi
-  printf '# delete is limited to the s11-0-probe- clone this process creates\n'
-  printf 'tart --version\n'
-  printf 'ls -l <softnet>\n'
-  printf 'tart list\n'
-  printf 'df -kP <tart-home>\n'
-  if [[ "$STAGE" == "A" || "$STAGE" == "all" ]]; then
-    printf 'tart clone %s %s\n' "$GOLDEN" "$name_a"
-    printf 'tart run %s --no-graphics --net-softnet\n' "$name_a"
-    printf 'tart ip %s\n' "$name_a"
-    printf 'ssh -i <ssh-key> -o BatchMode=yes -o PreferredAuthentications=publickey %s@<guest-ip> -- /usr/bin/true\n' "$GUEST_USER"
-    printf 'ssh -i <ssh-key> -o BatchMode=yes %s@<guest-ip> -- bash -s -- --guest --stage A\n' "$GUEST_USER"
-    printf 'tart stop %s\n' "$name_a"
-    printf 'tart delete %s\n' "$name_a"
-  fi
-  if [[ "$STAGE" == "B" || "$STAGE" == "all" ]]; then
-    printf 'tart clone %s %s\n' "$GOLDEN" "$name_b"
-    printf 'tart run %s --no-graphics --net-softnet --net-softnet-block=0.0.0.0/0 --net-softnet-allow=%s/32\n' \
-      "$name_b" "$ENDPOINT_IP"
-    printf 'tart ip %s\n' "$name_b"
-    printf 'ssh -i <ssh-key> -o BatchMode=yes %s@<guest-ip> -- bash -s -- --guest --stage B\n' "$GUEST_USER"
-  fi
-  if [[ "$STAGE" == "C" || "$STAGE" == "all" ]]; then
-    if [[ "$STAGE" == "C" ]]; then
-      printf 'tart clone %s %s\n' "$GOLDEN" "$name_a"
-      printf 'tart run %s --no-graphics --net-softnet\n' "$name_a"
-    fi
-    printf 'tart --help\n'
-    printf 'tart exec --help\n'
-    printf 'tart run --help\n'
-    if [[ "$STAGE" == "C" ]]; then
-      printf 'tart exec %s /usr/bin/true\n' "$name_a"
-    else
-      printf 'tart exec %s /usr/bin/true\n' "$name_b"
-    fi
-  fi
-  if [[ "$STAGE" == "B" || "$STAGE" == "all" ]]; then
-    printf 'tart stop %s\n' "$name_b"
-    printf 'tart delete %s\n' "$name_b"
-  elif [[ "$STAGE" == "C" ]]; then
-    printf 'tart stop %s\n' "$name_a"
-    printf 'tart delete %s\n' "$name_a"
-  fi
+set_coverage() {
+  local base="udp-443 quic ipv6-gateway ipv6-ula ipv6-link-local ipv6-udp dot-853 doh tcp-53-public"
+  local net="tcp-gateway-22 tcp-gateway-53 tcp-gateway-80 tcp-gateway-443 dns-udp-gateway dns-udp-public tcp-metadata-80 ipv6-global-address tcp-ipv6-public tart-exec"
+  case "$STAGE" in
+    A) MEASURED=$net; UNMEASURED="$base tcp-endpoint-443" ;;
+    B|all) MEASURED="$net tcp-endpoint-443"; UNMEASURED=$base ;;
+    *) MEASURED="tart-help tart-exec-help"; UNMEASURED="$base $net tcp-endpoint-443 lan"; return ;;
+  esac
+  if [[ -n "$LAN_IP" ]]; then MEASURED="$MEASURED tcp-lan-443"; else UNMEASURED="$UNMEASURED lan"; fi
 }
-
-seconds_left() {
-  local now=0
-  now=$(date +%s)
-  printf '%s\n' $((DEADLINE - now))
-}
-
-host_main() {
-  local euid="" name_a="" name_b="" hn=""
-  DRY_RUN=0
-  STAGE="all"
-  ENDPOINT_IP=""
-  ENDPOINT_SOURCE="placeholder"
-  PORTS_CSV="22,53,80,443"
-  OUT=""
-  GOLDEN="macos-s2-eval"
-  TART_HOME="$DEFAULT_TART_HOME"
-  SOFTNET_PATH=""
-  GUEST_USER="eval"
-  SSH_KEY="${HOME}/.ssh/id_ed25519_tart"
-  CLONE_NAME_ARG=""
-  MIN_FREE_GB=10
-  BOOT_TIMEOUT=300
-  OVERALL_TIMEOUT=2400
-  CLONE_TIMEOUT=600
-  SSH_WAIT=90
-  PROBE_TIMEOUT=180
-  STOP_TIMEOUT=60
-  DELETE_TIMEOUT=120
-  PUBLIC_RESOLVER="1.1.1.1"
-  LAN_IP_ARG=""
-  LAN_IP=""
+need_arg() { [[ $# -ge 2 ]] || { USAGE_REASON=usage; return 1; }; }
+parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --help|-h) usage; exit 0 ;;
-      --dry-run) DRY_RUN=1; shift ;;
-      --stage)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        STAGE=$2; shift 2 ;;
-      --endpoint-ip)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        ENDPOINT_IP=$2; shift 2 ;;
-      --ports)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        PORTS_CSV=$2; shift 2 ;;
-      --out)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        OUT=$2; shift 2 ;;
-      --golden)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        GOLDEN=$2; shift 2 ;;
-      --tart-home)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        TART_HOME=$2; shift 2 ;;
-      --softnet)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        SOFTNET_PATH=$2; shift 2 ;;
-      --guest-user)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        GUEST_USER=$2; shift 2 ;;
-      --ssh-key)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        SSH_KEY=$2; shift 2 ;;
-      --clone-name)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        CLONE_NAME_ARG=$2; shift 2 ;;
-      --lan-ip)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        LAN_IP_ARG=$2; shift 2 ;;
-      --public-resolver)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        PUBLIC_RESOLVER=$2; shift 2 ;;
-      --min-free-gb)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        MIN_FREE_GB=$2; shift 2 ;;
-      --overall-timeout)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        OVERALL_TIMEOUT=$2; shift 2 ;;
-      --boot-timeout)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        BOOT_TIMEOUT=$2; shift 2 ;;
-      --clone-timeout)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        CLONE_TIMEOUT=$2; shift 2 ;;
-      --ssh-wait)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        SSH_WAIT=$2; shift 2 ;;
-      --probe-timeout)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        PROBE_TIMEOUT=$2; shift 2 ;;
-      --stop-timeout)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        STOP_TIMEOUT=$2; shift 2 ;;
-      --delete-timeout)
-        [[ $# -ge 2 ]] || die 1 "missing value"
-        DELETE_TIMEOUT=$2; shift 2 ;;
-      *)
-        die 1 "unknown argument"
-        ;;
+      --stage) need_arg "$@" || return; case "$2" in A|B|C|all) STAGE=$2 ;; *) USAGE_REASON=usage; return ;; esac; shift 2 ;;
+      --out) need_arg "$@" || return; OUT=$2; shift 2 ;;
+      --tart-home) need_arg "$@" || return; TART_HOME_ARG=$2; shift 2 ;;
+      --ssh-key) need_arg "$@" || return; SSH_KEY=$2; shift 2 ;;
+      --endpoint-ip) need_arg "$@" || return; ENDPOINT=$2; shift 2 ;;
+      --endpoint-placeholder) ENDPOINT_SOURCE=placeholder; shift ;;
+      --lan-ip) need_arg "$@" || return; LAN_IP=$2; shift 2 ;;
+      --dry-run) DRY=1; shift ;;
+      -h|--help) USAGE_REASON=help; return ;;
+      *) USAGE_REASON=usage; return ;;
     esac
   done
-
-  case "$STAGE" in
-    A|B|C|all) ;;
-    *) die 1 "bad stage" ;;
+  [[ -n "$ENDPOINT" && "$ENDPOINT_SOURCE" == placeholder ]] && { USAGE_REASON=usage; ENDPOINT=""; ENDPOINT_SOURCE=absent; return; }
+  if [[ -n "$ENDPOINT" ]]; then is_public_ip "$ENDPOINT" && ENDPOINT_SOURCE=argument || { USAGE_REASON=endpoint-invalid; ENDPOINT=""; return; }; fi
+  [[ "$ENDPOINT_SOURCE" == placeholder ]] && ENDPOINT=$PLACEHOLDER_IP
+  case "$STAGE" in B|all) [[ -n "$ENDPOINT" ]] || USAGE_REASON=endpoint-required ;; esac
+  if [[ -n "$LAN_IP" ]] && ! is_ipv4 "$LAN_IP"; then USAGE_REASON=usage; LAN_IP=""; fi
+  [[ -n "${S11_FORCE_NAME:-}" ]] && { name_is_safe "$S11_FORCE_NAME" || USAGE_REASON=usage; }
+}
+precheck() {
+  local gst
+  [[ "$(id -u)" == 0 ]] && { add_reason root; return 1; }
+  check_softnet || return 1
+  [[ -f "$SSH_KEY" && -r "$SSH_KEY" ]] || { add_reason ssh-key-unreadable; return 1; }
+  if [[ -n "$TART_HOME_ARG" ]]; then [[ -d "$TART_HOME_ARG" ]] || { add_reason tart-home-missing; return 1; }; export TART_HOME="$TART_HOME_ARG"; fi
+  command -v tart >/dev/null 2>&1 || { add_reason tart-missing; return 1; }
+  run_bounded 10 "$WORKDIR/ver.out" "$WORKDIR/ver.err" - -- tart --version || true
+  [[ "$RB_TIMED_OUT" == 1 ]] && { add_reason tart-timeout; return 1; }
+  [[ "$RB_STATUS" -eq 0 ]] || { add_reason tart-missing; return 1; }
+  refresh_list || return 1
+  gst=$(vm_status "$GOLDEN") || { add_reason golden-missing; return 1; }
+  case "$gst" in
+    stopped|Stopped|STOPPED) ;;
+    running|Running|RUNNING) add_reason golden-not-stopped; return 1 ;;
+    *) add_reason golden-unknown; return 1 ;;
   esac
-  case "$GOLDEN" in
-    ''|*[!A-Za-z0-9._-]*) die 1 "bad golden name" ;;
-  esac
-  case "$GUEST_USER" in
-    ''|*[!A-Za-z0-9._-]*) die 1 "bad guest user" ;;
-  esac
-  if ! normalize_ports "$PORTS_CSV"; then
-    die 1 "bad ports"
+}
+decide() {
+  if [[ "$DRY" == 1 ]]; then STATUS=not-run; FINAL_EC=0; return; fi
+  if [[ "$PRECHECK_FAILED" == 1 ]]; then STATUS=precheck-failed; FINAL_EC=2; return; fi
+  if [[ "$ANY_COLLECTION_FAILED" == 1 ]]; then STATUS=partial; FINAL_EC=4; return; fi
+  if [[ "$ANY_CLEANUP_FAILED" == 1 ]]; then STATUS=partial; FINAL_EC=5; return; fi
+  if [[ "$ANY_CREATE_FAILED" == 1 ]]; then STATUS=partial; FINAL_EC=3; return; fi
+  STATUS=complete; FINAL_EC=0
+}
+on_exit() {
+  trap '' INT TERM HUP EXIT
+  FINALIZING=1; cleanup_owned || true; decide
+  write_report || { say report-write-failed; [[ "$FINAL_EC" -eq 0 ]] && FINAL_EC=2; }
+  printf 'status=%s\nreport=%s/report.json\n' "$STATUS" "$OUT"
+  case "$WORKDIR" in /tmp/s11-0.*|/private/tmp/s11-0.*|/var/folders/*|*/s11-0.*) [[ ! -L "$WORKDIR" && -d "$WORKDIR" ]] && rm -rf "$WORKDIR" ;; esac
+  exit "$FINAL_EC"
+}
+dry_stages() {
+  local st nm ep
+  for st in A B; do
+    case "$STAGE" in all|"$st") ;; *) continue ;; esac
+    nm=$(make_name "$st") || nm="s11-0-probe-${st}-dry-00000000"
+    ep=""; [[ "$st" == B ]] && ep=$ENDPOINT
+    begin_stage "$st"; S_NAME=$nm; build_argv "$nm" "$st" "$ep"; print_argv; save_stage
+  done
+}
+main() {
+  parse_args "$@"
+  case "${S11_PROBE_BUDGET:-}" in ""|*[!0-9]*) ;; *) [[ "$S11_PROBE_BUDGET" -gt 0 && "$S11_PROBE_BUDGET" -lt "$PROBE_BUDGET" ]] && PROBE_BUDGET=$S11_PROBE_BUDGET ;; esac
+  case "${S11_CLEANUP_BUDGET:-}" in ""|*[!0-9]*) ;; *) [[ "$S11_CLEANUP_BUDGET" -gt 0 && "$S11_CLEANUP_BUDGET" -lt "$CLEANUP_BUDGET" ]] && CLEANUP_BUDGET=$S11_CLEANUP_BUDGET ;; esac
+  PROBE_DEADLINE=$((SECONDS + PROBE_BUDGET))
+  WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/s11-0.XXXXXX") || { say report-dir; exit 2; }
+  REASONS_FILE=$WORKDIR/reasons; : >"$REASONS_FILE"
+  printf 'not-run not-run not-run\n' >"$WORKDIR/cleanup.last"
+  trap on_exit EXIT
+  trap 'REQUEST_CLEANUP=1' INT TERM HUP
+  set_coverage
+  if [[ -n "$USAGE_REASON" ]]; then
+    [[ "$USAGE_REASON" == help ]] && say 'usage: s11-0-probe.sh [--dry-run] [--stage A|B|C|all] [--endpoint-ip A.B.C.D|--endpoint-placeholder] [--lan-ip A.B.C.D] [--ssh-key FILE] [--tart-home DIR] [--out DIR]'
+    add_reason "$USAGE_REASON"; PRECHECK_FAILED=1; exit 2
   fi
-  require_int "$MIN_FREE_GB" || die 1 "bad integer"
-  require_int "$OVERALL_TIMEOUT" || die 1 "bad integer"
-  require_int "$BOOT_TIMEOUT" || die 1 "bad integer"
-  require_int "$CLONE_TIMEOUT" || die 1 "bad integer"
-  require_int "$SSH_WAIT" || die 1 "bad integer"
-  require_int "$PROBE_TIMEOUT" || die 1 "bad integer"
-  require_int "$STOP_TIMEOUT" || die 1 "bad integer"
-  require_int "$DELETE_TIMEOUT" || die 1 "bad integer"
-  if [[ "$OVERALL_TIMEOUT" -lt 30 || "$BOOT_TIMEOUT" -lt 1 ]]; then
-    die 1 "bad integer"
-  fi
-  if [[ -z "$ENDPOINT_IP" ]]; then
-    ENDPOINT_IP=$PLACEHOLDER_ENDPOINT
-    ENDPOINT_SOURCE="placeholder"
-  else
-    ENDPOINT_SOURCE="argument"
-  fi
-  if ! is_public_endpoint "$ENDPOINT_IP"; then
-    die 1 "endpoint ip is not a public ipv4"
-  fi
-  if ! is_public_endpoint "$PUBLIC_RESOLVER"; then
-    die 1 "public resolver is not a public ipv4"
-  fi
-  if [[ -n "$LAN_IP_ARG" ]] && ! is_ipv4_syntax "$LAN_IP_ARG"; then
-    die 1 "lan ip is not an ipv4 address"
-  fi
-  if [[ -n "$CLONE_NAME_ARG" ]]; then
-    if ! valid_clone_name "$CLONE_NAME_ARG"; then
-      die 1 "clone name must use the disposable prefix"
-    fi
-    name_a=$CLONE_NAME_ARG
-    name_b="${CLONE_NAME_ARG}b"
-    if ! valid_clone_name "$name_b"; then
-      die 1 "clone name must use the disposable prefix"
-    fi
-  else
-    name_a=$(make_clone_name) || die 1 "could not mint a clone name"
-    name_b=$(make_clone_name) || die 1 "could not mint a clone name"
-  fi
-  if [[ "$GOLDEN" == "$name_a" || "$GOLDEN" == "$name_b" ]]; then
-    die 1 "refusing golden and clone with the same name"
-  fi
-  case "$GOLDEN" in
-    ${CLONE_PREFIX}*)
-      die 1 "refusing golden name that uses the disposable clone prefix"
-      ;;
-  esac
-  if [[ "$name_a" == "$name_b" ]]; then
-    die 1 "refusing golden and clone with the same name"
-  fi
-
-  euid=$(id -u 2>/dev/null || echo unknown)
-  if [[ "$euid" == "0" ]]; then
-    printf 's11-0-probe: refusing to run as root\n' >&2
-    exit 2
-  fi
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    print_dry_run "$name_a" "$name_b"
-    exit 0
-  fi
-
-  export TART_HOME
-  ensure_sbin_path
-  if ! command -v tart >/dev/null 2>&1; then
-    PATH="${HOME}/bin:${PATH}"
-    export PATH
-  fi
-
-  STATUS="partial"
-  DO_REPORT=0
-  PREFIX_OK=true
-  INTERRUPTED=false
-  STAGE_B_RAN=false
-  STAGES_RUN=""
-  CLONE_NAMES=""
-  OWNED_CLONE=""
-  TART_RUN_PID=""
-  CURRENT_CHILD_PID=""
-  WATCHDOG_PID=""
-  TART_LOG=""
-  KNOWN_HOSTS=""
-  GUEST_IP=""
-  CLEANUP_STOP="skipped"
-  CLEANUP_DELETE="skipped"
-  TART_VERSION="unknown"
-  HOST_NAME="unknown"
-  STARTED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  FINISHED_UTC=""
-  START_EPOCH=$(date +%s)
-  DEADLINE=$((START_EPOCH + OVERALL_TIMEOUT))
-  PROBE_TSV=$(mktemp)
-  SCRIPT_SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
-  if [[ -z "$OUT" ]]; then
-    OUT="./s11-0-$(date -u +%Y%m%dT%H%M%SZ)"
-  fi
-  hn=$(hostname -s 2>/dev/null || hostname 2>/dev/null || true)
-  hn=$(printf '%s' "$hn" | tr -c 'A-Za-z0-9._-' '_')
-  hn=$(printf '%.40s' "$hn")
-  [[ -n "$hn" ]] && HOST_NAME=$hn
-
-  trap on_term INT TERM
-  trap cleanup EXIT
-  umask 077
-  mkdir -p "$OUT"
-  chmod 700 "$OUT" 2>/dev/null || true
-  DO_REPORT=1
-  ssh_opts_init
-  if command -v setsid >/dev/null 2>&1; then
-    setsid bash -c 'sleep "$1"; kill -TERM "$2"' _ "$OVERALL_TIMEOUT" "$$" >/dev/null 2>&1 &
-  else
-    bash -c 'sleep "$1"; kill -TERM "$2"' _ "$OVERALL_TIMEOUT" "$$" >/dev/null 2>&1 &
-  fi
-  WATCHDOG_PID=$!
-
-  if ! precheck; then
-    STATUS="precheck-failed"
-    note "precheck failed"
-    exit 2
-  fi
-  note "precheck ok"
-  detect_lan
-
-  case "$STAGE" in
-    A)
-      if ! run_net_stage "A" "$name_a" "default"; then
-        exit 4
-      fi
-      ;;
-    B)
-      if ! run_net_stage "B" "$name_b" "block"; then
-        exit 4
-      fi
-      ;;
-    C)
-      # Boot a disposable clone so tart exec and guest device reads have a
-      # target. Do not run the egress sweep in this stage.
-      boot_for_exec "$name_a" || true
-      run_stage_c || exit 4
-      ;;
-    all)
-      if ! run_net_stage "A" "$name_a" "default"; then
-        exit 4
-      fi
-      if ! destroy_owned; then
-        exit 5
-      fi
-      if [[ "$(seconds_left)" -lt 120 ]]; then
-        exit 4
-      fi
-      if ! run_net_stage "B" "$name_b" "block"; then
-        exit 4
-      fi
-      if ! run_stage_c; then
-        exit 4
-      fi
-      ;;
-  esac
-  STATUS="complete"
+  mkdir -p "$OUT" || { add_reason report-dir; PRECHECK_FAILED=1; exit 2; }
+  precheck || { PRECHECK_FAILED=1; exit 2; }
+  write_guest
+  if [[ "$DRY" == 1 ]]; then dry_stages; exit 0; fi
+  collect_help
+  case "$STAGE" in A|all) run_stage A || true; save_stage ;; esac
+  if [[ "$REQUEST_CLEANUP" != 1 ]]; then case "$STAGE" in B|all) run_stage B || true; save_stage ;; esac; fi
   exit 0
 }
-
-if [[ "${1:-}" == "--guest" ]]; then
-  guest_main "$@"
-else
-  host_main "$@"
-fi
+main "$@"
