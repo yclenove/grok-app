@@ -24,7 +24,7 @@ Final round 3 of 3, independent static review at `03b569e9`, limited to the seve
 - **SAME registration/locking contract, preserved:** `scope/commit.rs` and `result_commit.rs` are byte-identical to round 2. Snapshot → image cache → file ledger → lease order and the single stamp/register closure remain. `take_stale` releases ledger/lease locks before unlink. A first synchronous bind starts an `enable_time` current-thread runtime; thread/runtime startup failure sets `publish_blocked`, and both admission commits register nothing. Staged files/pending pixels then drop. That explicit failure path has no injection test; finding 1 concerns an owner disappearing after successful startup.
 - **SAME test gaps from round 2, addressed:** `scope/data_tests.rs:86` leaves generation 1 admitted while the lease is generation 2; removing both `admit_data` generation comparisons makes its refusal assertion fail. It does not independently detect removal of either redundant comparison. `helper/scope_link_tests.rs:873` requires the observed uppercase cdhash in the ACK body; substituting the lowercase expected copy fails. Admission, live-code checks, post-flush checks and generation gating are unchanged. `auth.rs:476` accepts only 40/64 ASCII hex characters and lowercases them; different hash bytes cannot become equal through this normalization.
 - **SAME portability/boundary checks, preserved:** JSON is decoded before path extraction; a Windows drive path is rejected as relative on Unix, while a literal Unix backslash survives unescaping. Test atomics and Unix-only imports retain matching cfgs; no new Linux/Windows unused-code defect found by inspection. No added `Command::new` anywhere in the repair diff; the thread builder is not a process launch. Stop constants remain **100 ms / 500 ms / 5 s / 4750 ms**.
-- **SAME accepted limitations:** copied response bytes and ignored unlink errors remain; A1–A4 and accepted S1/S3 (b) residuals were not reopened. Real helper launch/TCC/FD inheritance/live SecCode reads/real-model runs remain **NOT_RUN by design**. Real-host code observations still fail closed with `None`.
+- **SAME accepted limitations:** copied response bytes and ignored unlink errors remain; A1–A4 and accepted S1/S3 (b) residuals were not reopened. Real helper launch, TCC, FD inheritance, and real-model runs remain **NOT_RUN by design**. S12 reads live code identity by pid; real admission depends on that read and still fails closed when it returns `None`. Multi-process guest reads and a Developer ID team id remain not_run.
 
 **Nice-to-have**
 
@@ -67,6 +67,6 @@ r3 必修 2：不再有 5 秒 join 超时后分离、稍后 `remove_file` 别人
 - 已经复制进响应的字节不回收。
 - unlink 错误忽略，不回滚。
 - 没有单独的测试把 unlink 停在 `remove_file` 之前再 `close`。目录名由 `Arc<TempDir>` 占住，不再交给分离的 worker。
-- A1–A4、真实 helper 启动、TCC、FD 移交、活体 SecCode 读取、真实模型仍是 not_run。
+- A1–A4、真实 helper 启动、TCC、FD 移交、真实模型仍是 not_run。活体 SecCode 读取已由 S12 实现；真实准入依赖该读取，读失败仍 fail-closed。真实 guest 内多进程与 Developer ID team id 仍 not_run。
 - Stop 常量未改。无新 `Command::new`。无新依赖。S6 准入类型未动。
 

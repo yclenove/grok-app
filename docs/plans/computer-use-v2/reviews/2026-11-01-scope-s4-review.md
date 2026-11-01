@@ -63,7 +63,7 @@ Round-1 repairs on `cu2/scope-s4` after this review. Findings above are unchange
 
 ### 原则一 — 当前代码身份来自事实，不是声称
 
-`ProcessFacts::code_identity`（`gcu-driver-macos` 的 `scope_os/facts.rs`）在 admit、ACK 编码、ACK 校验和每次 recheck 读出该进程实例当前的 identifier、team、cdhash，并与期望比较。`None` 或读失败一律拒绝。真实访客 SecCode/codesign 读取 **not_run**：实现返回 `None`（文档写明缺失即拒绝），不用路径上的 `SecStaticCode` 伪造成功。`ScriptedFacts` 可以在握手之后改代码或丢掉代码读取。
+`ProcessFacts::code_identity`（`gcu-driver-macos` 的 `scope_os/facts.rs`）在 admit、ACK 编码、ACK 校验和每次 recheck 读出该进程实例当前的 identifier、team、cdhash，并与期望比较。`None` 或读失败一律拒绝。真实访客 SecCode 读取由 S12 的 `LiveOsFacts` 按 pid 实现。真实准入依赖该读取；读失败仍返回 `None` 并拒绝，不用路径上的 `SecStaticCode` 伪造成功。真实 guest 内多进程与 Developer ID team id 仍 **not_run**。`ScriptedFacts` 可以在握手之后改代码或丢掉代码读取。
 
 性质被破坏时会失败的测试：`unchanged_wire_live_code_is_refused_at_admit_ack_and_recheck`（线上声称不变，事实里的 cdhash、team、identifier 变化或读取失败，在 admit、ACK 待写、recheck 三处撤权并 `release_all_input`）；`unchanged_ack_wire_is_refused_when_live_code_changes`。原有只改 wire cdhash 的断言留在 `old_generation_replay_and_code_mismatch_revoke`。若把缺失观察当成通过，或只比较 wire，这些测试失败。
 
@@ -93,7 +93,7 @@ Round-1 repairs on `cu2/scope-s4` after this review. Findings above are unchange
 
 ### 仍是已知窗口
 
-- 真实访客 SecCode/codesign 读取 not_run，返回 `None`，缺失即拒绝。
+- 真实准入依赖 S12 的活体 SecCode 读取；读失败仍 fail-closed。真实 guest 内多进程与已签名 Developer ID 应用的 team id 仍 not_run。
 - Tart 内真实 helper 启动、TCC、真实 FD 移交与 ACK、真实模型评测仍 not_run。A1–A4 未做。
 - 已经复制进响应的字节不回收。unlink 错误被忽略。撤销前已经放行的读仍可能做完（评审残余，未扩大）。
 - 源码扫描不覆盖 `scope/data.rs`，也不覆盖 scoped MCP 的 loopback `TcpListener::bind`。

@@ -32,7 +32,7 @@ No new `Command::new` reference was added anywhere in the repair diff; productio
 
 - **SAME CLASS as round-1 mutation-coverage gaps:** deleting suspend or opening before flush fails the rebind barriers; bypassing the fresh-accept call fails the source assertion. However, deleting only `admit_data`'s generation comparisons can survive because those barriers observe an already-suspended plane. Add a direct admitted-generation-1/current-generation-2 case. Likewise, copying expected code into the ACK body while retaining all surrounding live checks can survive existing tests; they prove refusal on bad facts more strongly than the body's provenance. Neither is a demonstrated implementation defect.
 
-Validation: repair diff whitespace check passed; read-only guard inspection plus 72 in-memory forbidden-string additions detected every listed mutation. No cargo, Rust tests, network/SSH/model calls, personal agent-home access, or source/test edits. Real helper launch/TCC/FD inheritance/live SecCode reads/real-model runs remain **NOT_RUN by design**, not findings. Only this report was written, uncommitted.
+Validation: repair diff whitespace check passed; read-only guard inspection plus 72 in-memory forbidden-string additions detected every listed mutation. No cargo, Rust tests, network/SSH/model calls, personal agent-home access, or source/test edits. Real helper launch/TCC/FD inheritance/real-model runs remain **NOT_RUN by design**, not findings. S12's pid read was not executed in this review; a failed read still fails closed, and guest multi-process plus Developer ID team id remain not_run. Only this report was written, uncommitted.
 
 ## 第 2 轮修复记录
 
@@ -65,7 +65,7 @@ Round-2 repairs on `cu2/scope-s4`. Findings above are unchanged. Commits: `8b280
 ### 仍是已知窗口
 
 - 已经复制进响应的字节不回收。unlink 错误仍被忽略。
-- 真实 SecCode / helper 启动 / TCC / FD 移交 not_run。A1–A4 未做。
+- 真实准入依赖 S12 的活体 SecCode 读取；读失败仍 fail-closed。真实 guest 内多进程与 Developer ID team id、helper 启动、TCC、FD 移交 not_run。A1–A4 未做。
 - 源码隔离守卫未改，仍不覆盖 `scope/data.rs`。
 - 线程或运行时起不来时不登记；这条失败路径没有注入测试，无运行时且线程成功启动的路径有测试。
 - owner 一旦因终态退出，`watching` 仍为 true，同 store 上再次 `bind_lease` 不会再起线程。会话在撤销后不再 `commit_if_current` 成功，rebind 发生在租约仍活跃、owner 仍在循环里的时候。
