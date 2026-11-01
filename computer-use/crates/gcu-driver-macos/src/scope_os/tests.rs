@@ -645,6 +645,30 @@ async fn closed_evidence_app_instance_is_none_until_facts_are_installed() {
     assert!(downs(&events.calls()) >= 1);
 }
 
+#[test]
+fn scripted_code_identity_returns_the_injection_and_closed_facts_stay_absent() {
+    use super::facts::{ClosedFacts, CodeIdentity, ProcessFacts, ScriptedFacts};
+    let closed = ClosedFacts;
+    assert!(ProcessFacts::code_identity(&closed, 1).is_none());
+    let scripted = ScriptedFacts::new();
+    assert!(OsFacts::code_identity(&scripted, 7).is_none());
+    scripted.set_code(
+        7,
+        CodeIdentity {
+            identifier: "app".to_owned(),
+            team_id: None,
+            cdhash: "ab".repeat(20),
+        },
+    );
+    let read = ProcessFacts::code_identity(&scripted, 7).expect("injected");
+    assert_eq!(read.identifier, "app");
+    assert!(read.team_id.is_none());
+    assert_eq!(read.cdhash.len(), 40);
+    scripted.drop_code(7);
+    assert!(OsFacts::code_identity(&scripted, 7).is_none());
+    assert!(ProcessFacts::code_identity(&scripted, 7).is_none());
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn own_process_start_is_stable_and_plausible() {
@@ -660,6 +684,104 @@ fn own_process_start_is_stable_and_plausible() {
     assert!(boot.len() <= 256);
     let path = facts.executable_path(pid).expect("path");
     assert!(path.starts_with('/'));
+}
+
+/// First `u32` that does not fit in a positive `pid_t`. Casting it to `i32`
+/// would wrap. The reader must return `None` without wrapping.
+#[cfg(target_os = "macos")]
+const PID_PAST_PID_T: u32 = (i32::MAX as u32).saturating_add(1);
+
+/// Inside `pid_t` and above macOS `PID_MAX` (99999). No such process.
+#[cfg(target_os = "macos")]
+const PID_ABSENT: u32 = 1_000_000_001;
+
+#[cfg(target_os = "macos")]
+fn assert_cdhash(cdhash: &str) {
+    assert!(cdhash.len() >= 40, "cdhash {cdhash}");
+    assert!(
+        cdhash
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
+        "cdhash {cdhash}"
+    );
+}
+
+/// Smoke test: self lookup, rejection and concurrency only. It does not prove
+/// freshness or a live-image read (a cache would pass). Cargo's test binary is
+/// ad-hoc signed and has a cdhash. No fixture app. A controlled child with a
+/// replaced pathname is NOT_RUN until a Mac is available.
+#[cfg(target_os = "macos")]
+#[test]
+fn own_process_code_identity_smoke() {
+    use super::live::LiveOsFacts;
+    let pid = std::process::id();
+    let first_facts = LiveOsFacts::process_only();
+    let second_facts = LiveOsFacts::process_only();
+    let first = first_facts.code_identity(pid).expect("ad-hoc signed self");
+    assert!(!first.identifier.is_empty());
+    assert_cdhash(&first.cdhash);
+    if let Some(team) = &first.team_id {
+        assert!(!team.is_empty());
+    }
+    assert!(first_facts.code_identity(0).is_none());
+    assert!(second_facts.code_identity(PID_PAST_PID_T).is_none());
+    assert!(first_facts.code_identity(PID_ABSENT).is_none());
+    let again = second_facts.code_identity(pid).expect("reread");
+    assert_eq!(first, again);
+    assert!(second_facts.code_identity(0).is_none());
+
+    std::thread::scope(|scope| {
+        let left = scope.spawn(|| LiveOsFacts::process_only().code_identity(pid));
+        let right = scope.spawn(|| {
+            let facts = LiveOsFacts::process_only();
+            assert!(facts.code_identity(0).is_none());
+            assert!(facts.code_identity(PID_ABSENT).is_none());
+            facts.code_identity(pid)
+        });
+        let left = left.join().expect("left read");
+        let right = right.join().expect("right read");
+        assert_eq!(left, right);
+        assert_eq!(left, Some(first));
+    });
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn missing_pid_code_identity_is_none() {
+    use super::live::LiveOsFacts;
+    let facts = LiveOsFacts::process_only();
+    assert!(facts.code_identity(0).is_none());
+    assert!(facts.code_identity(PID_PAST_PID_T).is_none());
+    assert!(facts.code_identity(u32::MAX).is_none());
+    assert!(facts.code_identity(PID_ABSENT).is_none());
+}
+
+/// `ProcessFacts` for `LiveOsFacts` is the blanket impl. It must forward.
+#[cfg(target_os = "macos")]
+#[test]
+fn live_os_facts_as_process_facts_forwards_to_the_live_read() {
+    use super::facts::{OsFacts, ProcessFacts};
+    use super::live::LiveOsFacts;
+
+    fn forward<T: OsFacts + ProcessFacts>(
+        facts: &T,
+        pid: u32,
+    ) -> Option<super::facts::CodeIdentity> {
+        let via_os = <T as OsFacts>::code_identity(facts, pid);
+        let via_process = <T as ProcessFacts>::code_identity(facts, pid);
+        assert_eq!(via_os, via_process);
+        via_process
+    }
+
+    let facts = LiveOsFacts::process_only();
+    let pid = std::process::id();
+    let forwarded = forward(&facts, pid).expect("live read");
+    assert!(!forwarded.identifier.is_empty());
+    assert_cdhash(&forwarded.cdhash);
+    let erased: &dyn ProcessFacts = &facts;
+    assert_eq!(erased.code_identity(pid), Some(forwarded));
+    assert!(erased.code_identity(0).is_none());
+    assert!(erased.code_identity(PID_PAST_PID_T).is_none());
 }
 
 /// Real window proof. Run later in a Tart guest:

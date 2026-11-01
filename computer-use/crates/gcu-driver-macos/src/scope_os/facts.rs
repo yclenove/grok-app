@@ -113,10 +113,13 @@ pub trait OsFacts: Send + Sync {
     }
     /// Current code identity of `pid`.
     ///
-    /// Real macOS guest observation is not wired: 真实读取 not_run，缺失即拒绝.
-    /// The default is `None`. Callers refuse. A static signature read of an
-    /// executable path is not a substitute and must not be reported as success.
-    /// Memory only. No timeout or cancellation.
+    /// The default is `None`. The macOS live source overrides this and re-reads
+    /// the guest on every call. A missing pid, a failed read, a missing
+    /// identifier, or a missing cdhash is `None`. Callers refuse. Real admission
+    /// depends on that read; a failed read stays fail-closed. A static signature
+    /// of an executable path is not a substitute. The live read blocks the caller
+    /// in Security.framework. It does not add a thread, a timeout, cancellation,
+    /// or a cache, and it does not check validity online.
     fn code_identity(&self, _pid: u32) -> Option<CodeIdentity> {
         None
     }
@@ -150,9 +153,11 @@ pub trait ProcessFacts: Send + Sync {
     fn process_start_us(&self, pid: u32) -> Option<u64>;
     /// Current code identity of `pid`, or `None` when it cannot be read.
     ///
-    /// Real macOS guest observation is not wired: 真实读取 not_run，缺失即拒绝.
-    /// A live source returns `None`. Callers refuse. This does not report a
-    /// pathname's static signature as a successful read.
+    /// The blanket implementation forwards to [`OsFacts::code_identity`]. On
+    /// macOS the live source re-reads the guest. Real admission depends on that
+    /// read. A failed read is `None` and callers refuse. This does not report a
+    /// pathname's static signature as a successful read. No timeout,
+    /// cancellation, or cache.
     fn code_identity(&self, pid: u32) -> Option<CodeIdentity>;
 }
 

@@ -4,10 +4,14 @@
 //! The information flag `kSecCSSigningInformation` (`1 << 1`) is not the same
 //! bit as the validation flags that reuse low bits. Validity uses flag 0 and a
 //! null requirement so the OS does not show UI or fetch trust over the network
-//! beyond its local check.
+//! beyond its local check. The live guest read passes `kSecCSDefaultFlags` (0)
+//! and does not call `SecCodeCheckValidity`.
 
 use crate::identity::SignatureState;
+use crate::scope_os::CodeIdentity;
 use core_foundation::base::CFRelease;
+use core_foundation::dictionary::CFDictionary;
+use core_foundation::number::CFNumber;
 use core_foundation::{
     array::{CFArray, CFArrayRef},
     base::{CFType, CFTypeRef, TCFType},
@@ -18,7 +22,9 @@ use core_foundation::{
 use gcu_core::driver::{DriverError, Result};
 use security_framework::certificate::SecCertificate;
 use security_framework::os::macos::code_signing::{Flags, SecStaticCode};
-use security_framework_sys::code_signing::SecStaticCodeRef;
+use security_framework_sys::code_signing::{
+    kSecGuestAttributePid, SecCodeCopyGuestWithAttributes, SecCodeRef, SecStaticCodeRef,
+};
 use std::{ffi::c_void, path::Path, ptr};
 
 /// `errSecSuccess`.
@@ -27,6 +33,8 @@ const ERR_SEC_SUCCESS: i32 = 0;
 const ERR_SEC_CS_UNSIGNED: i32 = -67_062;
 /// `kSecCSSigningInformation`. Information flags, not validation flags.
 const SIGNING_INFORMATION: u32 = 1 << 1;
+/// `kSecCSDefaultFlags`. Guest lookup only. Not a validity or network flag.
+const DEFAULT_FLAGS: u32 = 0;
 
 #[link(name = "Security", kind = "framework")]
 extern "C" {
@@ -248,6 +256,96 @@ fn empty(state: SignatureState) -> RawSigning {
 
 fn empty_unsigned() -> RawSigning {
     empty(SignatureState::Unsigned)
+}
+
+/// Live code identity of `pid`.
+///
+/// Calls `SecCodeCopyGuestWithAttributes` with `kSecGuestAttributePid` and
+/// `kSecCSDefaultFlags`, then `SecCodeCopySigningInformation` with
+/// `kSecCSSigningInformation`. Each call reads again. There is no cache.
+///
+/// Blocks the caller inside Security.framework. No thread, timeout, or
+/// cancellation. Does not call `SecCodeCheckValidity`, show UI, or fetch
+/// trust. This code has no application-level path-based fallback. Process
+/// instance binding and rechecks are the caller's job: this function does not
+/// read the process start time. The cdhash is the first `kSecCodeInfoCdHashes`
+/// entry (else `kSecCodeInfoUnique`), the same choice `cdhash_of` makes for
+/// expected identities. The result is guest-derived signing metadata, not an
+/// attested memory image.
+///
+/// Returns `None` when `pid` is `0`, does not fit in a positive `pid_t`,
+/// does not exist, the call fails, or the identifier or cdhash is missing.
+/// Team id may be absent. A partial identity is not returned.
+pub(crate) fn guest_code_identity(pid: u32) -> Option<CodeIdentity> {
+    let pid = i32::try_from(pid).ok().filter(|value| *value > 0)?;
+    let code = copy_guest(pid)?;
+    let (dict, dict_owner) = copy_guest_info(&code)?;
+    // SAFETY: both keys are process-lifetime Security.framework constants.
+    let (identifier_key, team_key) =
+        unsafe { (kSecCodeInfoIdentifier, kSecCodeInfoTeamIdentifier) };
+    let identifier = dict_string(dict, identifier_key)?;
+    let team_id = dict_string(dict, team_key);
+    let cdhash = cdhash_of(dict)?;
+    drop(dict_owner);
+    drop(code);
+    Some(CodeIdentity {
+        identifier,
+        team_id,
+        cdhash,
+    })
+}
+
+fn copy_guest(pid: i32) -> Option<CFType> {
+    // SAFETY: `kSecGuestAttributePid` is a process-lifetime CFString constant.
+    // wrap_under_get_rule retains it. Drop releases that retain.
+    let key = unsafe { CFString::wrap_under_get_rule(kSecGuestAttributePid) };
+    let attributes = CFDictionary::from_CFType_pairs(&[(key, CFNumber::from(pid))]);
+    let mut guest: SecCodeRef = ptr::null_mut();
+    // SAFETY: `attributes` is a live dictionary and is not retained by the call.
+    // A null host selects the system code-signing root of trust. `guest` is a
+    // writable out-parameter. `DEFAULT_FLAGS` is `kSecCSDefaultFlags`: no UI and
+    // no network trust fetch. Only a successful call transfers a +1 `guest`.
+    let status = unsafe {
+        SecCodeCopyGuestWithAttributes(
+            ptr::null_mut(),
+            attributes.as_concrete_TypeRef(),
+            DEFAULT_FLAGS,
+            &mut guest,
+        )
+    };
+    if status != ERR_SEC_SUCCESS {
+        return None;
+    }
+    own_created(guest as CFTypeRef)
+}
+
+fn copy_guest_info(code: &CFType) -> Option<(CFDictionaryRef, CFType)> {
+    let mut dict: CFDictionaryRef = ptr::null_mut();
+    // SAFETY: `code` is a live SecCode. The API accepts a dynamic code reference
+    // for its static-code parameter. `SIGNING_INFORMATION` requests the info
+    // dictionary only. It is not `SecCodeCheckValidity`. Only a successful call
+    // transfers a +1 `dict`; a failed call's out-parameter is not adopted.
+    let status = unsafe {
+        SecCodeCopySigningInformation(
+            code.as_CFTypeRef() as SecStaticCodeRef,
+            SIGNING_INFORMATION,
+            &mut dict,
+        )
+    };
+    if status != ERR_SEC_SUCCESS {
+        return None;
+    }
+    let owner = own_created(dict as CFTypeRef)?;
+    Some((dict, owner))
+}
+
+/// Own a +1 CF object. Null is absence.
+fn own_created(reference: CFTypeRef) -> Option<CFType> {
+    if reference.is_null() {
+        return None;
+    }
+    // SAFETY: `reference` is a non-null +1 CF object. Drop releases it.
+    Some(unsafe { CFType::wrap_under_create_rule(reference) })
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]

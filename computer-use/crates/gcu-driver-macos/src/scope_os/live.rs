@@ -1,4 +1,5 @@
 //! Live `OsFacts`. Process identity comes from `libproc` and `sysctl`.
+//! Code identity is the guest `SecCode` for that pid, read again on every call.
 //! Window rows come from `CGWindowList`. Continuity tokens come from the
 //! accessibility thread. A failed read is `None`.
 
@@ -58,6 +59,10 @@ impl OsFacts for LiveOsFacts {
 
     fn executable_path(&self, pid: u32) -> Option<String> {
         executable_path(pid)
+    }
+
+    fn code_identity(&self, pid: u32) -> Option<super::facts::CodeIdentity> {
+        crate::ffi::guest_code_identity(pid)
     }
 
     fn windows(&self) -> Option<Vec<OsWindow>> {
