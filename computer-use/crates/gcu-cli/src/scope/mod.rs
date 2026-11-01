@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
+#[cfg(test)]
 pub(crate) use data::admit_data;
 pub(crate) use plane::DataPlane;
 
@@ -94,6 +95,7 @@ pub(crate) async fn run(
     .await
 }
 
+#[cfg(test)]
 async fn run_controlled<C, F, D>(
     control: BoxStream,
     driver: gcu_driver_fake::FakeDriver,

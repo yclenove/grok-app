@@ -111,7 +111,7 @@ pub(crate) fn admit_data(
         return Err(closed());
     }
     let mut authority = lease.arm_attempt().ok_or_else(closed)?;
-    if !authority.confirm(&lease) || !plane.allows(authority.scope().generation()) {
+    if !authority.confirm(lease) || !plane.allows(authority.scope().generation()) {
         return Err(closed());
     }
     plane.request().map_err(|_| closed())?;
