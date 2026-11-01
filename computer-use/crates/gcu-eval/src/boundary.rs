@@ -344,6 +344,7 @@ mod tests {
         let mut command_hits = Vec::new();
         let mut lifecycle_hits = Vec::new();
         let mut fixture_hits = Vec::new();
+        let mut tart_files = 0u32;
         let mut visit = |path: &Path, text: &str| {
             let rel = path
                 .strip_prefix(&root)
@@ -358,7 +359,19 @@ mod tests {
                 .unwrap_or("");
             let test_module = name == "tests.rs" || name.ends_with("_tests.rs");
             let admission = rel.ends_with("src/boundary.rs");
-            if !test_module
+            // S11a lives under src/ and must stay inside this scan, including
+            // any later test module. It cannot mint a launch or build a process.
+            let tart = rel.starts_with("src/disposable/tart/");
+            if tart {
+                tart_files += 1;
+                if text.contains("Command::new")
+                    || text.contains("std::process::Command")
+                    || text.contains("tokio::process::Command")
+                    || text.contains("AdmittedLaunch")
+                {
+                    command_hits.push(rel.clone());
+                }
+            } else if !test_module
                 && !admission
                 && !rel.starts_with("tests/")
                 && text.contains("Command::new")
@@ -386,8 +399,9 @@ mod tests {
         walk(&root.join("tests"), &mut visit);
         assert!(
             command_hits.is_empty(),
-            "Command::new outside the admission module: {command_hits:?}"
+            "process launch outside the admission module: {command_hits:?}"
         );
+        assert!(tart_files > 0, "tart interface module was not scanned");
         assert!(
             lifecycle_hits.is_empty(),
             "lifecycle mint escaped its test: {lifecycle_hits:?}"

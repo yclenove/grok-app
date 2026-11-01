@@ -211,3 +211,26 @@ H1/H2 的具体组件若需另造通道或包过滤器，先拆独立设计卡�
 决策规则：若实测显示 Softnet 单独已满足 §5 的拒绝类别，则 §5 第 3 点的“宿主网络 guard”不进入范围；若不满足，**先把具体 guard 方案（影响范围、回滚、是否只作用于该 Tart/Softnet 实例）提交 owner 审阅，批准前不安装任何网络规则**。若 H1 无可用通道，暂停 S11 并回到 owner，不为凑通道开放 gateway 上的 IP 服务。
 
 另：S11a–g 工作量较大。首个可验收目标是 **S11f（无模型的真实 clone / 探针 / 身份 / Stop / 清理）**；S11g（真实模型）在其回执齐全并经 owner 审阅前不排期。每一步评审最多三轮，超限按单一原则简化（本项目在 S4 退役机制上刚经历过一次：观察者 / 线程 / 所有者生命周期类机制优先改成同步、调用方持有、有界的做法）。
+
+## 11. S11a 离线接口状态
+
+状态：接口与 fake 已落地（2026-11-01）。这不是 provider，不改变 S6 门禁，不批准真实运行。
+
+已定义（`gcu-eval/src/disposable/tart/`，每个构建都编译；没有 `tart-disposable` feature，没有 env/CLI/config 启门）：
+
+- `TartCommand`、`RunId`、`CloneId`、`GoldenImage`、`SoftnetFlags`：固定操作。身份拒绝空、超长、路径、`--` 和 golden 名前缀。Softnet 只有固定 block `0.0.0.0/0` 加最多 16 个公网 IPv4 `/32`，没有自由字符串。
+- `TartRunner`：`clone`/`start`/`stop`/`delete`/`list`/`status`。每个调用带有上限的 deadline，返回至多 1MiB。`clone` 消费 `ClonePermit`。
+- `HostClock`、`FakeClock`：单调钟注入。fake 前进不睡眠。
+- `AttemptLedger`、`FakeLedger`：`reserve` 先写入 run id、clone id、绝对截止，才返回一次性 permit。`query`/`append`/`seal` 按完整 id 精确匹配，没有前缀查找。
+- `GuestChannel`、`FakeGuestChannel`：版本 1 的 inventory/probe/bootstrap/login/run/lease/revoke。没有地址、路径、套接字或密钥字段。
+- `InstallManifest`：程序、golden、策略三份互异的 32 字节摘要，只是数据。
+- `FakeTartRunner` 记录结构化命令，并可注入成功、失败、超时、畸形、超长。不调用系统 `tart`，不创建进程。
+
+未决，本卡不选择：
+
+- **H1**：宿主到 guest 的具体通道未定。接口不假设 SSH、virtio、共享盘或网关端口。取决于 **S11-0**。
+- **H2**：宿主出站 guard 是否需要、以及哪一个实现，取决于 **S11-0**。`SoftnetFlags` 只描述 §5 的字段形状，不证明策略生效。
+- 状态机（S11b）、真实适配器、网络探针（S11c）都没有实现。
+- `accepting_provider_linked` / `scoped_provider_ack` 仍恒拒绝。本模块不铸造 `AdmittedLaunch`。
+
+S11b 在 S11-0 给出通道事实之前只应接这些 fake，不得选定真实传输。fake 通过不改变矩阵的 native 状态。
