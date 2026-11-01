@@ -515,8 +515,6 @@ pub(super) struct LeaseShared {
     pub(super) commit_before: std::sync::Arc<crate::action::PublishGate>,
     pub(super) commit_during: std::sync::Arc<crate::action::PublishGate>,
     pub(super) commit_after: std::sync::Arc<crate::action::PublishGate>,
-    /// Invalidation callbacks. Fired by [`publish`] after the state lock drops.
-    pub(super) invalidation: super::invalidation::Invalidation,
 }
 
 /// Shared scope generation. Clones share the record. The lock is never held
@@ -550,27 +548,8 @@ impl ScopeLease {
                 commit_before: crate::action::PublishGate::new(),
                 commit_during: crate::action::PublishGate::new(),
                 commit_after: crate::action::PublishGate::new(),
-                invalidation: super::invalidation::Invalidation::new(),
             }),
         }
-    }
-
-    /// Register a weak callback for later revoke, rebind, or expiry.
-    ///
-    /// The lease stores only the weak handle. Dropping the `Arc` retires the
-    /// callback on the next publish. Publish runs survivors on the publishing
-    /// thread after the state lock is released, and drops dead handles. A
-    /// panic inside a callback is caught and does not escape revoke, rebind,
-    /// or expiry. Renewal does not publish.
-    ///
-    /// Expiry publishes only when a reader calls `expire` (`current`,
-    /// `remaining`, `commit_if_current`, `rebind`, or `renew`). There is no
-    /// deadline thread. A lease nobody reads stays active until that read.
-    ///
-    /// Blocking: the callback-list mutex. Timeout: none. Cancellation: none.
-    /// The callback itself runs inline on a later publish and is not cancelled.
-    pub fn on_invalidated(&self, callback: std::sync::Weak<dyn Fn() + Send + Sync>) {
-        self.shared.invalidation.push(callback);
     }
 
     /// Clone the active scope, or `None` when it was revoked.
@@ -721,12 +700,4 @@ pub(super) fn publish(shared: &LeaseShared, generation: u64) {
     for waker in waiters {
         waker.wake();
     }
-    // The caller has already released the state lock. Callbacks may read the
-    // lease. They must not run while this function holds that lock: a callback
-    // that calls `current` would deadlock on the same thread.
-    shared.invalidation.fire();
 }
-
-#[cfg(test)]
-#[path = "invalidation_tests.rs"]
-mod invalidation_tests;

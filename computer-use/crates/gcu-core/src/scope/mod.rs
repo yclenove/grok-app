@@ -13,7 +13,6 @@ mod deadline;
 mod driver;
 mod events;
 mod guard;
-mod invalidation;
 mod model;
 
 pub use authority::AttemptAuthority;
