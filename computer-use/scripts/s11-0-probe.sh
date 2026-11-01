@@ -1,10 +1,10 @@
 #!/bin/bash
 # S11-0 fact probe, ADR 0018 §10. Bash 3.2.
 # Own a clone only when tart clone exits 0 and a trusted tart list then shows that name.
-# Header-driven inventory: Name plus State or Running. Offsets, not whitespace (Disk Size contains spaces).
-# Column labels from a trusted header are reported as inventory_columns.
+# Header-driven inventory: Name and State. Offsets, not whitespace (Disk Size contains spaces).
+# Header labels that pass the whitelist are reported as inventory_columns, even if State is absent.
 # No SIGKILL handler: a killed run may leave no report. Output directory must not already exist.
-# Signal only the direct child (PPID is this script). h1_independent_of_ip=unknown.
+# Signal a background job only while the shell job table still lists it. h1_independent_of_ip=unknown.
 set -u; set -f; umask 077; export LC_ALL=C
 GOLDEN=macos-s2-eval; GUEST_USER=eval; PLACEHOLDER_IP=203.0.113.10
 PROBE_BUDGET=1500; CLEANUP_BUDGET=90; CAP=65536; GRACE=1; START_CONFIRM=1
@@ -13,7 +13,7 @@ SSH_KEY="${HOME}/.ssh/id_ed25519_tart"; ENDPOINT=""; ENDPOINT_SOURCE=absent; LAN
 USAGE_REASON=""; PRECHECK_FAILED=0; ANY_COLLECTION_FAILED=0; ANY_CLEANUP_FAILED=0; ANY_CREATE_FAILED=0
 ANY_AMBIGUOUS=0; OUT_READY=0; DIG_MISSING=0
 REQUEST_CLEANUP=0; IN_CLEANUP=0; FINALIZING=0; PROBE_DEADLINE=0; CLEANUP_LEFT=90; WORKDIR=""
-REASONS_FILE=""; OWN_NAME=""; OWN_OK=0; RUN_PID=""; RUN_LIVE=0; CMD_PID=""
+REASONS_FILE=""; OWN_NAME=""; OWN_OK=0; RUN_PID=""; RUN_LIVE=0
 RB_STATUS=0; RB_TIMED_OUT=0; RB_ABORTED=0; RB_OVERFLOW=0; REAP_STATUS=0
 S_ARGV_OK=0; HELP_STATE=not-run; HELP_SUBS=""; EXEC_HELP=not-run; EXEC_OPTS=""; EXEC_RESULT=not-run
 MEASURED=""; UNMEASURED=""; RUN_ARGV=()
@@ -35,67 +35,49 @@ charge() {
   CLEANUP_LEFT=$((CLEANUP_LEFT - $1))
   [[ "$CLEANUP_LEFT" -lt 0 ]] && CLEANUP_LEFT=0
 }
-proc_snap() { ps -p "$1" -o ppid= -o state= -o comm= 2>/dev/null | awk 'NR==1{print $1,$2,$3}'; }
-our_child() {
-  local snap pp st
-  [[ -n "${1:-}" ]] || return 1
-  snap=$(proc_snap "$1") || true
-  case "$snap" in *" "*" "*) ;; *) return 1 ;; esac
-  pp=${snap%% *}; snap=${snap#* }; st=${snap%% *}
-  [[ "$pp" == "$$" && "$st" != Z* ]]
-}
-reap_bounded() {
-  local pid="$1" until=$((SECONDS + 2)) snap pp st rest
-  REAP_STATUS=0
-  while [[ "$SECONDS" -lt "$until" ]]; do
-    snap=$(proc_snap "$pid") || true
-    if ! kill -0 "$pid" 2>/dev/null; then break; fi
-    case "$snap" in *" "*" "*) ;; *) break ;; esac
-    pp=${snap%% *}; rest=${snap#* }; st=${rest%% *}
-    [[ "$st" == Z* && "$pp" == "$$" ]] && break
-    [[ "$pp" != "$$" ]] && { REAP_STATUS=1; return 1; }
-    sleep 0.05
-  done
-  snap=$(proc_snap "$pid") || true
-  if kill -0 "$pid" 2>/dev/null; then
-    case "$snap" in *" "*" "*) pp=${snap%% *}; rest=${snap#* }; st=${rest%% *} ;; *) pp=""; st="" ;; esac
-    if [[ "$pp" == "$$" && "$st" != Z* ]]; then REAP_STATUS=124; return 1; fi
-    if [[ -n "$pp" && "$pp" != "$$" ]]; then REAP_STATUS=1; return 1; fi
-  fi
-  wait "$pid" 2>/dev/null; REAP_STATUS=$?; return 0
+# jobs must run in this shell. A pipeline or $(jobs) is a subshell and sees no jobs.
+job_running() {
+  local pid="${1:-}" line
+  [[ -n "$pid" ]] || return 1
+  jobs -r -p >"$WORKDIR/jobs.p" 2>/dev/null || true
+  while IFS= read -r line; do
+    [[ "$line" == "$pid" ]] && return 0
+  done <"$WORKDIR/jobs.p"
+  return 1
 }
 term_kill_reap() {
   local pid="$1" i=0
   [[ -n "$pid" ]] || return 0
-  CMD_PID=$pid
-  our_child "$pid" && kill -TERM "$pid" 2>/dev/null || true
-  # GRACE seconds stay reserved in the cleanup budget. The wait itself is short.
-  while [[ "$i" -lt 8 ]]; do
-    our_child "$pid" || break
-    sleep 0.05
-    i=$((i + 1))
-  done
-  our_child "$pid" && kill -KILL "$pid" 2>/dev/null || true
-  reap_bounded "$pid" || true
-  CMD_PID=""
-}
-drop_readers() {
-  local w="$1" ho="$2" he="$3"
-  if [[ -n "$w" ]] && kill -0 "$w" 2>/dev/null; then
-    [[ -n "$ho" ]] && kill -TERM "$ho" 2>/dev/null || true
-    [[ -n "$he" ]] && kill -TERM "$he" 2>/dev/null || true
+  if job_running "$pid"; then
+    kill -TERM "$pid" 2>/dev/null || true
+    # GRACE stays reserved in the cleanup budget. This poll is the whole grace.
+    while [[ "$i" -lt 8 ]]; do
+      job_running "$pid" || break
+      sleep 0.05
+      i=$((i + 1))
+    done
+    if job_running "$pid"; then kill -KILL "$pid" 2>/dev/null || true; fi
   fi
-  [[ -n "$ho" ]] && wait "$ho" 2>/dev/null || true
-  [[ -n "$he" ]] && wait "$he" 2>/dev/null || true
+  # Dead job: wait returns at once. Live job: SIGKILL was just sent, so wait returns.
+  wait "$pid" 2>/dev/null
+  REAP_STATUS=$?
+}
+capture_over() {
+  local n
+  # One wc for both files. Arithmetic accepts wc's leading spaces.
+  for n in $(wc -c <"$1" 2>/dev/null; wc -c <"$2" 2>/dev/null); do
+    [[ $((n)) -ge "$CAP" ]] && return 0
+  done
+  return 1
 }
 run_bounded() {
-  local secs="$1" out="$2" err="$3" infile="$4" t0 pid ho="" he="" fo fe sz ez reaped=0 left snap pp rest st polls=0 pb="" stall=0
+  local secs="$1" out="$2" err="$3" infile="$4" t0 pid reaped=0 left polls=0 pb=""
   shift 4
   [[ "${1:-}" == -- ]] && shift
   secs=$(cap_secs "$secs"); : >"$out"; : >"$err"
   case "${S11_BOUND_POLLS:-}" in ""|*[!0-9]*) ;; *) pb=$S11_BOUND_POLLS ;; esac
   [[ "$infile" == - ]] && infile=/dev/null
-  RB_TIMED_OUT=0; RB_ABORTED=0; RB_OVERFLOW=0; RB_STATUS=0
+  RB_TIMED_OUT=0; RB_ABORTED=0; RB_OVERFLOW=0; RB_STATUS=0; REAP_STATUS=0
   t0=$SECONDS
   if [[ "$IN_CLEANUP" == 1 ]]; then
     if [[ "$CLEANUP_LEFT" -le "$GRACE" ]]; then RB_TIMED_OUT=1; RB_STATUS=124; charge 0; return 124; fi
@@ -108,29 +90,16 @@ run_bounded() {
   fi
   [[ "$secs" -gt "$left" ]] && secs=$left
   if [[ "$secs" -lt 1 ]]; then RB_TIMED_OUT=1; RB_STATUS=124; charge $((SECONDS - t0)); return 124; fi
-  fo=$WORKDIR/c.o; fe=$WORKDIR/c.e
-  rm -f "$fo" "$fe"
-  mkfifo "$fo" "$fe" || { RB_STATUS=1; charge $((SECONDS - t0)); return 1; }
-  head -c $((CAP + 1)) <"$fo" >"$out" 2>/dev/null &
-  ho=$!
-  head -c $((CAP + 1)) <"$fe" >"$err" 2>/dev/null &
-  he=$!
-  "$@" <"$infile" >"$fo" 2>"$fe" &
-  pid=$!; CMD_PID=$pid
+  # Direct child only. Descendants inherit the files; nothing waits on them.
+  # ulimit -f on bash 3.2/macOS is 512-byte blocks: 64KiB = 128.
+  (
+    ulimit -c 0 2>/dev/null || true
+    ulimit -f $((CAP / 512)) || exit 127
+    exec "$@" <"$infile" >"$out" 2>"$err"
+  ) &
+  pid=$!
   while :; do
-    if ! our_child "$pid"; then
-      if ! kill -0 "$pid" 2>/dev/null; then break; fi
-      snap=$(proc_snap "$pid") || true
-      case "$snap" in
-        *" "*" "*)
-          pp=${snap%% *}; rest=${snap#* }; st=${rest%% *}
-          [[ "$st" == Z* || "$pp" == "$$" ]] && break
-          # Foreign PPID for a few samples can be a stale snapshot around exec. Do not signal it.
-          stall=$((stall + 1)); [[ "$stall" -ge 8 ]] && break
-          sleep 0.05; continue ;;
-        *) stall=$((stall + 1)); [[ "$stall" -ge 8 ]] && break; sleep 0.05; continue ;;
-      esac
-    fi
+    if ! job_running "$pid"; then break; fi
     polls=$((polls + 1))
     if [[ -n "$pb" && "$polls" -ge "$pb" || "$SECONDS" -ge $((t0 + secs)) ]]; then
       RB_TIMED_OUT=1; term_kill_reap "$pid"; reaped=1; break
@@ -138,17 +107,13 @@ run_bounded() {
     if [[ "$IN_CLEANUP" != 1 && "$REQUEST_CLEANUP" == 1 ]]; then
       RB_ABORTED=1; term_kill_reap "$pid"; reaped=1; break
     fi
-    sz=$(wc -c <"$out" 2>/dev/null | tr -d ' '); ez=$(wc -c <"$err" 2>/dev/null | tr -d ' ')
-    if [[ "${sz:-0}" -gt "$CAP" || "${ez:-0}" -gt "$CAP" ]]; then
-      RB_OVERFLOW=1; term_kill_reap "$pid"; reaped=1; break
-    fi
-    sleep 0.05
+    if capture_over "$out" "$err"; then RB_OVERFLOW=1; term_kill_reap "$pid"; reaped=1; break; fi
+    sleep 0.02
   done
-  [[ "$reaped" == 1 ]] || reap_bounded "$pid" || true
-  CMD_PID=""
-  drop_readers "$pid" "$ho" "$he"
-  sz=$(wc -c <"$out" 2>/dev/null | tr -d ' '); ez=$(wc -c <"$err" 2>/dev/null | tr -d ' ')
-  [[ "${sz:-0}" -gt "$CAP" || "${ez:-0}" -gt "$CAP" ]] && RB_OVERFLOW=1
+  if [[ "$reaped" != 1 ]]; then wait "$pid" 2>/dev/null; REAP_STATUS=$?; fi
+  # 153 = 128+SIGXFSZ. A full file is overflow even when the unit of ulimit -f differs.
+  [[ "$REAP_STATUS" -eq 153 ]] && RB_OVERFLOW=1
+  capture_over "$out" "$err" && RB_OVERFLOW=1
   if [[ "$RB_OVERFLOW" == 1 ]]; then RB_STATUS=125
   elif [[ "$RB_TIMED_OUT" == 1 ]]; then RB_STATUS=124
   elif [[ "$RB_ABORTED" == 1 ]]; then RB_STATUS=130
@@ -157,17 +122,23 @@ run_bounded() {
   return "$RB_STATUS"
 }
 start_run() {
-  local pid t0 confirm i=0
+  local pid t0 confirm
   "$@" </dev/null >/dev/null 2>&1 &
   pid=$!; RUN_PID=$pid; RUN_LIVE=1; confirm=$(cap_secs "$START_CONFIRM"); t0=$SECONDS
   case "${S11_START_SEC:-}" in ""|*[!0-9]*) ;; *) [[ "$S11_START_SEC" -lt "$confirm" ]] && confirm=$S11_START_SEC ;; esac
   while :; do
-    if our_child "$pid"; then
-      [[ "$SECONDS" -ge $((t0 + confirm)) ]] && return 0
-    elif ! kill -0 "$pid" 2>/dev/null; then
-      RUN_LIVE=0; RUN_PID=""; reap_bounded "$pid" || true; return 1
-    else
-      i=$((i + 1)); [[ "$i" -ge 8 ]] && { RUN_LIVE=0; RUN_PID=""; return 1; }
+    if ! job_running "$pid"; then
+      RUN_LIVE=0; RUN_PID=""
+      wait "$pid" 2>/dev/null || true
+      return 1
+    fi
+    if [[ "$SECONDS" -ge $((t0 + confirm)) ]]; then
+      # A zero confirm still waits one beat, so an immediate exit is not "started".
+      [[ "$confirm" -eq 0 ]] && sleep 0.1
+      if job_running "$pid"; then return 0; fi
+      RUN_LIVE=0; RUN_PID=""
+      wait "$pid" 2>/dev/null || true
+      return 1
     fi
     sleep 0.05
   done
@@ -230,7 +201,7 @@ check_softnet() {
 }
 parse_list() {
   local tmp=$WORKDIR/names.tmp cols=$WORKDIR/list.cols
-  rm -f "$tmp"
+  rm -f "$tmp" "$cols"
   awk -v cols="$cols" '
     function ncols(line, s, nm,   i,len,c,run,name,st,n) {
       n=0; len=length(line); i=1
@@ -265,15 +236,13 @@ parse_list() {
       line=$0
       if (line ~ /^[ ]*$/) next
       if (!hdr) {
-        n=ncols(line, starts, names); ni=0; si=0; ri=0
+        n=ncols(line, starts, names); ni=0; si=0
         for (i=1;i<=n;i++) {
           if (names[i]=="Name") ni=i
           if (names[i]=="State") si=i
-          if (names[i]=="Running" && si==0) ri=i
         }
-        if (si==0) si=ri
-        if (ni==0 || si==0) exit 2
         for (i=1;i<=n;i++) if (names[i] ~ /^[A-Za-z][A-Za-z0-9 -]*$/ && length(names[i])<=40) print names[i] > cols
+        if (ni==0 || si==0) exit 2
         hdr=1; next
       }
       if (length(line) < starts[si]) exit 3
@@ -669,8 +638,8 @@ precheck() {
   esac
 }
 decide() {
-  if [[ "$DRY" == 1 ]]; then STATUS=not-run; FINAL_EC=0; return; fi
   if [[ "$PRECHECK_FAILED" == 1 ]]; then STATUS=precheck-failed; FINAL_EC=2; return; fi
+  if [[ "$DRY" == 1 ]]; then STATUS=not-run; FINAL_EC=0; return; fi
   if [[ "$ANY_AMBIGUOUS" == 1 ]]; then STATUS=partial; FINAL_EC=5; return; fi
   if [[ "$ANY_COLLECTION_FAILED" == 1 ]]; then STATUS=partial; FINAL_EC=4; return; fi
   if [[ "$ANY_CLEANUP_FAILED" == 1 ]]; then STATUS=partial; FINAL_EC=5; return; fi

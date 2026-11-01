@@ -23,6 +23,10 @@ cleanup_base() {
     pid=$(cat "$CASE/stub/target.pid" 2>/dev/null || true)
     [[ -n "$pid" ]] && kill -KILL "$pid" 2>/dev/null || true
   fi
+  if [[ -n "${CASE:-}" && -f "$CASE/stub/bg.pid" ]]; then
+    pid=$(cat "$CASE/stub/bg.pid" 2>/dev/null || true)
+    [[ -n "$pid" ]] && kill -KILL "$pid" 2>/dev/null || true
+  fi
   if [[ -n "${WATCHER:-}" ]]; then
     kill -KILL -- -"$WATCHER" 2>/dev/null || true
     kill -KILL "$WATCHER" 2>/dev/null || true
@@ -84,8 +88,8 @@ die() {
 link_sys() {
   local c p
   mkdir -p "$SYS"
-  for c in bash ps awk sed grep mktemp head tr cut od readlink dirname id wc sleep \
-    cat rm mkdir mv cp ln chmod touch kill cmp find mkfifo; do
+  for c in bash awk sed grep mktemp head tr cut od readlink dirname id wc sleep \
+    cat rm mkdir mv cp ln chmod touch kill cmp find; do
     p=$(PATH=/usr/bin:/bin command -v "$c" || true)
     [[ -n "$p" ]] || die "missing system tool $c"
     ln -sf "$p" "$SYS/$c"
@@ -108,12 +112,12 @@ install_templates() {
     'echo "LEAK-not-for-report" >&2' \
     'hang() { trap "exit 143" TERM INT HUP; while true; do sleep 0.2; done; }' \
     'ignore_term() { echo $$ >"$ROOT/target.pid"; trap '"'"'echo TERM >>"$ROOT/term.log"'"'"' TERM; trap "" PIPE; while true; do sleep 0.2; done; }' \
-    'overflow_ignore() { echo $$ >"$ROOT/target.pid"; trap "" TERM PIPE; i=0; while [[ $i -lt 700 ]]; do printf "%s\n" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; i=$((i+1)); done; while true; do sleep 0.2; done; }' \
+    'overflow_ignore() { echo $$ >"$ROOT/target.pid"; trap '"'"'echo TERM >>"$ROOT/term.log"'"'"' TERM; trap "" XFSZ PIPE; i=0; while [[ $i -lt 1500 ]]; do printf "%s\n" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; i=$((i+1)); done; while true; do sleep 0.2; done; }' \
     'has() { awk -v s="$1" '"'"'$1==s{f=1} END{exit !f}'"'"' "$INV"; }' \
     'show_list() { printf "%-8s%-48s%-12s%-22s%-9s%s\n" Source Name "Disk Size" Accessed Running State; while read -r n st; do [[ -n "$n" ]] || continue; printf "%-8s%-48s%-12s%-22s%-9s%s\n" local "$n" "64 GB" "2026-10-01 09:00:00" no "$st"; done <"$INV"; }' \
     'cmd=${1:-}; shift || true' \
     'case "$cmd" in' \
-    '  --version) [[ -f "$ROOT/delay_exec" ]] && { echo $$ >"$ROOT/target.pid"; sleep 0.05; exec "${S11_REAL_SLEEP:?}" 30; }; [[ -f "$ROOT/hang_version" ]] && hang; echo "stub-tart 0"; exit 0 ;;' \
+    '  --version) [[ -f "$ROOT/bg_hold" ]] && { sleep 30 & echo $! >"$ROOT/bg.pid"; echo "stub-tart 0"; exit 0; }; [[ -f "$ROOT/hang_version" ]] && hang; echo "stub-tart 0"; exit 0 ;;' \
     '  --help) [[ -f "$ROOT/fail_help" ]] && exit 1; printf "%s\n" "commands: clone list run stop delete ip exec"; exit 0 ;;' \
     '  list)' \
     '    [[ -f "$ROOT/hang_list" ]] && hang' \
@@ -123,6 +127,7 @@ install_templates() {
     '    [[ -f "$ROOT/list_empty" ]] && exit 0' \
     '    [[ -f "$ROOT/list_no_header" ]] && { printf "%s\n" "local only-a-row 64 GB x no stopped"; exit 0; }' \
     '    [[ -f "$ROOT/list_trunc" ]] && { printf "%-8s%-48s%-12s%-22s%-9s%s\n" Source Name "Disk Size" Accessed Running State; printf "%s\n" "local   cut"; exit 0; }' \
+    '    [[ -f "$ROOT/list_running_only" ]] && { printf "%-8s%-48s%-12s%-22s%s\n" Source Name "Disk Size" Accessed Running; while read -r n st; do [[ -n "$n" ]] || continue; printf "%-8s%-48s%-12s%-22s%s\n" local "$n" "64 GB" "2026-10-01 09:00:00" no; done <"$INV"; exit 0; }' \
     '    show_list; exit 0 ;;' \
     '  clone)' \
     '    src=$1; dst=$2' \
@@ -135,6 +140,7 @@ install_templates() {
     '  run)' \
     '    has "$1" || exit 1' \
     '    [[ -f "$ROOT/fail_run" ]] && exit 1' \
+    '    [[ -f "$ROOT/run_exit" ]] && { echo $$ >"$ROOT/target.pid"; sleep 0.12; exit 0; }' \
     '    trap "exit 0" TERM INT HUP' \
     '    while true; do sleep 0.2; done ;;' \
     '  stop)' \
@@ -216,20 +222,6 @@ install_templates() {
     'ROOT=${S11_STUB_ROOT:?}' \
     '[[ -f "$ROOT/fail_ifconfig" ]] && exit 1' \
     'printf "%s\n" "inet6 fe80::1%en0 prefixlen 64" "inet6 2606:4700:4700::10 prefixlen 64"'
-  write_stub ps \
-    'ROOT=${S11_STUB_ROOT:?}' \
-    'REAL=${S11_REAL_PS:?}' \
-    'if [[ "${1:-}" == -p && -f "$ROOT/ps.foreign" && -f "$ROOT/target.pid" ]]; then' \
-    '  pid=$2; target=$(cat "$ROOT/target.pid" 2>/dev/null || true)' \
-    '  if [[ -n "$target" && "$pid" == "$target" ]]; then' \
-    '    nf=$ROOT/ps.n.$pid; n=0; [[ -f "$nf" ]] && n=$(cat "$nf"); n=$((n+1)); echo "$n" >"$nf"' \
-    '    line=$("$REAL" -p "$pid" -o ppid= -o state= -o comm= 2>/dev/null | head -n 1 || true)' \
-    '    comm=${line##* }; [[ -z "$comm" ]] && comm=bash' \
-    '    if [[ "$n" -eq 1 ]]; then printf "%s\n" "$line"; exit 0; fi' \
-    '    printf "1 S %s\n" "$comm"; exit 0' \
-    '  fi' \
-    'fi' \
-    'exec "$REAL" "$@"'
   write_stub stat \
     'ROOT=${S11_STUB_ROOT:?}' \
     '[[ $# -eq 3 && "$1" == -f && "$2" == "%Su %Sp" ]] || exit 2' \
@@ -259,9 +251,7 @@ setup() {
   export PATH="$ROOT/bin:$SYS"
   export TMPDIR=$CASE/tmp
   export S11_START_SEC=0
-  export S11_REAL_PS=$(PATH=/usr/bin:/bin command -v ps)
-  export S11_REAL_SLEEP=$(PATH=/usr/bin:/bin command -v sleep)
-  unset S11_BOUND_SEC S11_BOUND_POLLS S11_FORCE_NAME S11_PROBE_BUDGET S11_CLEANUP_BUDGET
+  unset BASH_ENV S11_XTRACE S11_BOUND_SEC S11_BOUND_POLLS S11_FORCE_NAME S11_PROBE_BUDGET S11_CLEANUP_BUDGET
   ARGS=(--ssh-key "$CASE/id_key" --tart-home "$CASE/thome" --out "$CASE/out")
 }
 
@@ -272,7 +262,11 @@ start_probe() {
   WATCHER=""
   set -m
   set +b
-  bash "$PROBE" "$@" >"$CASE/stdout" 2>"$CASE/stderr" &
+  if [[ "${S11_XTRACE:-}" == 1 ]]; then
+    BASH_XTRACEFD=9 bash -x "$PROBE" "$@" >"$CASE/stdout" 2>"$CASE/stderr" 9>"$CASE/xtrace" &
+  else
+    bash "$PROBE" "$@" >"$CASE/stdout" 2>"$CASE/stderr" &
+  fi
   PROBE_PID=$!
   ( sleep "$limit"; kill -KILL -- -"$PROBE_PID" 2>/dev/null || true ) &
   WATCHER=$!
@@ -380,7 +374,7 @@ static_checks() {
   bash -n "$HERE/test_s11_0_probe.sh"
   local n
   n=$(wc -l <"$PROBE" | tr -d ' ')
-  [[ "$n" -le 740 ]] || die "probe has $n lines"
+  [[ "$n" -lt 735 ]] || die "probe has $n lines"
   [[ "$(head -n 1 "$PROBE")" == '#!/bin/bash' ]] || die "shebang"
   local pat
   for pat in 'mapfile' 'declare -A' 'readarray' 'readlink -f' 'ioreg' 'system_profiler' 'wait -n'; do
@@ -398,7 +392,7 @@ static_checks() {
   n=$(grep -F -c -- '--no-graphics' "$PROBE" || true)
   [[ "$n" == 1 ]] || die "no-graphics count $n"
   if grep -F -q 'test_s11_0_probe' "$VERIFY"; then die "verify.sh still calls the stub suite"; fi
-  for pat in S11_FORCE_NAME CMD_LIVE nslookup 'run.out'; do
+  for pat in S11_FORCE_NAME CMD_LIVE CMD_PID nslookup 'run.out' mkfifo proc_snap same_proc our_child drop_readers 'ps -p'; do
     if grep -n -F -- "$pat" "$PROBE"; then die "probe contains $pat"; fi
   done
   grep -F -q 'dig -r +notcp +ignore +time=2 +tries=1' "$PROBE"
@@ -903,6 +897,7 @@ test_kill_overflow() {
   run_probe 8 --stage A "${ARGS[@]}"
   need_ec 2
   child_dead
+  grep -q TERM "$ROOT/term.log" || die "no TERM before kill"
   common_end
   need_reason capture-overflow
   need_reason list-untrusted
@@ -910,45 +905,63 @@ test_kill_overflow() {
   no_clone_ops
 }
 
-test_delay_exec() {
+test_bg_hold() {
   setup
-  touch "$ROOT/delay_exec"
-  export S11_BOUND_POLLS=12
-  run_probe 6 --stage A "${ARGS[@]}"
-  need_ec 2
-  child_dead
+  touch "$ROOT/bg_hold"
+  export S11_BOUND_SEC=1
+  run_probe 4 --dry-run --stage A "${ARGS[@]}"
+  need_ec 0
   common_end
-  need_reason tart-timeout
-  no_clone_ops
+  grep -F -q '"status":"not-run"' "$CASE/out/report.json" || die "status"
+  [[ -s "$ROOT/bg.pid" ]] || die "no descendant"
+  kill -KILL "$(cat "$ROOT/bg.pid")" 2>/dev/null || true
 }
 
-test_foreign_ppid() {
+test_no_kill_after_exit() {
   setup
-  touch "$ROOT/hang_list_ignore" "$ROOT/ps.foreign"
-  export S11_BOUND_SEC=4
-  run_probe 8 --stage A "${ARGS[@]}"
-  need_ec 2
-  local pid
-  pid=$(cat "$ROOT/target.pid")
-  kill -0 "$pid" 2>/dev/null || die "foreign child was signaled"
-  [[ ! -s "$ROOT/term.log" ]] || die "TERM sent to foreign pid"
-  kill -KILL "$pid" 2>/dev/null || true
+  touch "$ROOT/run_exit" "$ROOT/guest_hang"
+  export S11_BOUND_POLLS=4 S11_XTRACE=1
+  run_probe 6 --stage A "${ARGS[@]}"
+  need_ec 4
   common_end
-  need_reason list-failed
+  local pid
+  [[ -s "$ROOT/target.pid" ]] || die "run did not start"
+  [[ -s "$CASE/xtrace" ]] || die "no xtrace"
+  pid=$(cat "$ROOT/target.pid")
+  if kill -0 "$pid" 2>/dev/null; then die "run still alive"; fi
+  if grep -E -q "kill -(TERM|KILL)( --)? ${pid}( |$)" "$CASE/xtrace"; then
+    die "signaled finished job $pid"
+  fi
+  grep -F -q '"collection":"failed"' "$CASE/out/report.json" || die "collection"
+}
+
+test_dry_precheck() {
+  setup
+  printf '%s\n' 'root -rwxr-xr-x' >"$ROOT/real/softnet.statout"
+  run_probe 6 --dry-run --stage A "${ARGS[@]}"
+  need_ec 2
+  common_end
+  need_reason softnet-not-suid
+  grep -F -q '"status":"precheck-failed"' "$CASE/out/report.json" || die "status"
+  grep -F -q '"measured":[]' "$CASE/out/report.json" || die "measured"
   no_clone_ops
 }
 
 test_list_untrusted() {
   setup
   local mode
-  for mode in list_empty list_no_header list_trunc; do
+  for mode in list_empty list_no_header list_trunc list_running_only; do
     rm -rf "$CASE/out" "$ROOT/tart.log"
-    rm -f "$ROOT/list_empty" "$ROOT/list_no_header" "$ROOT/list_trunc"
+    rm -f "$ROOT/list_empty" "$ROOT/list_no_header" "$ROOT/list_trunc" "$ROOT/list_running_only"
     touch "$ROOT/$mode"
     run_probe 6 --stage A "${ARGS[@]}"
     need_ec 2
     need_reason list-untrusted
     if grep -F -q 'golden-missing' "$CASE/out/report.json"; then die "untrusted as missing ($mode)"; fi
+    if grep -F -q 'golden-unknown' "$CASE/out/report.json"; then die "untrusted as unknown ($mode)"; fi
+    if [[ "$mode" == list_running_only ]]; then
+      grep -F -q '"inventory_columns":["Source","Name","Disk Size","Accessed","Running"]' "$CASE/out/report.json" || die "columns"
+    fi
     no_clone_ops
   done
   common_end
@@ -1086,6 +1099,11 @@ run_case() {
       pid=$(cat "$CASE/stub/target.pid" 2>/dev/null || true)
       [[ -n "$pid" ]] && kill -KILL "$pid" 2>/dev/null || true
     fi
+    if [[ -f "$CASE/stub/bg.pid" ]]; then
+      local pid
+      pid=$(cat "$CASE/stub/bg.pid" 2>/dev/null || true)
+      [[ -n "$pid" ]] && kill -KILL "$pid" 2>/dev/null || true
+    fi
     rm -rf "$CASE"
   else
     echo "FAILED $name" >&2
@@ -1126,8 +1144,9 @@ run_case help test_help
 run_case kill-timeout test_kill_timeout
 run_case kill-cancel test_kill_cancel
 run_case kill-overflow test_kill_overflow
-run_case delay-exec test_delay_exec
-run_case foreign-ppid test_foreign_ppid
+run_case bg-hold test_bg_hold
+run_case no-kill-after-exit test_no_kill_after_exit
+run_case dry-precheck test_dry_precheck
 run_case list-untrusted test_list_untrusted
 run_case boot-ready test_boot_ready
 run_case cleanup-blocks-b test_cleanup_blocks_b

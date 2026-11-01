@@ -22,7 +22,7 @@
 export PATH="$HOME/bin:$PATH"
 # 示例，替换为获批地址。--tart-home 的参数换成本机目录。
 bash computer-use/scripts/s11-0-probe.sh --dry-run --stage all \
-  --endpoint-ip 203.0.113.10 --tart-home '<路径>'
+  --endpoint-ip 203.0.113.10 --tart-home '<路径>' --out ./s11-0-dry-out
 bash computer-use/scripts/s11-0-probe.sh --stage all \
   --endpoint-ip 203.0.113.10 --tart-home '<路径>' --out ./s11-0-out
 ```
@@ -38,9 +38,9 @@ bash computer-use/scripts/s11-0-probe.sh --stage B --endpoint-placeholder --tart
 
 ## 时长与清理
 
-探测预算 1500 秒（bash `SECONDS`，不看墙钟）。每次非清理命令的限时会被夹到剩余探测时间。清理使用一份累计清理额度 90 秒，阶段之间的清理和退出时的再清理共用这一份，不按次重置。单次清理命令的限时先扣掉 1 秒，把 TERM 之后的短宽限留在额度里。实际宽限是若干次 0.05 秒轮询，到点仍在的子进程会被 KILL。中途清理计入探测计时：清理进行时 `SECONDS` 继续走，后面的阶段只剩更少的探测时间，同时这笔时间也从累计清理额度里扣。宽限、写报告和最后一次回收仍可能超出这两个名义数字，因此不承诺精确的总硬上限。
+探测预算 1500 秒（bash `SECONDS`，不看墙钟）。每次非清理命令的限时会被夹到剩余探测时间。清理使用一份累计清理额度 90 秒，阶段之间的清理和退出时的再清理共用这一份，不按次重置。单次清理命令的限时先扣掉 1 秒，把 TERM 之后的短宽限留在额度里。实际宽限是若干次 0.05 秒轮询作业表，到点仍在跑的直接子进程会被 KILL。中途清理计入探测计时：清理进行时 `SECONDS` 继续走，后面的阶段只剩更少的探测时间，同时这笔时间也从累计清理额度里扣。宽限、写报告和最后一次回收仍可能超出这两个名义数字，因此不承诺精确的总硬上限。
 
-版本、列表、帮助、`tart ip` 每次最多 10 秒，clone 180 秒，`tart exec` 20 秒，就绪 ssh 20 秒，采集 ssh 50 秒，等地址最多 240 秒，stop 和 delete 各 30 秒。这些都再被剩余时间夹住。有限命令的输出在产生时用 `head -c` 限到 64KiB；超过是 `capture-overflow`，不会把截断的 `tart list` 当成“不存在”。`tart run` 的标准输出和标准错误直接丢弃，不留原始日志。
+版本、列表、帮助、`tart ip` 每次最多 10 秒，clone 180 秒，`tart exec` 20 秒，就绪 ssh 20 秒，采集 ssh 50 秒，等地址最多 240 秒，stop 和 delete 各 30 秒。这些都再被剩余时间夹住。有限命令的标准输出和标准错误写入普通临时文件，子进程用 `ulimit -f` 把单个文件限制在 64KiB（bash 3.2 / macOS 按 512 字节一块，共 128 块）。写满会收到 SIGXFSZ 或写失败，记为 `capture-overflow`，不会把截断的 `tart list` 当成“不存在”。`tart run` 的标准输出和标准错误直接丢弃，不留原始日志。
 
 清理期间忽略 INT、TERM、HUP，避免第二次信号打断 stop/delete。清理结束后用可信的 `tart list` 确认该名字已经不在，而不只看命令退出码。Ctrl-C 在清理开始前会停下后续阶段，并只清掉本进程已经确认创建的 clone。阶段 A 的 stop、delete 或确认失败时不进入阶段 B，也不覆盖 A 的记录。
 
@@ -52,7 +52,7 @@ bash computer-use/scripts/s11-0-probe.sh --stage B --endpoint-placeholder --tart
 
 每次测量：gateway 的 TCP 22/53/80/443，gateway 与一个公网解析器的 DNS（guest 上只跑 `dig -r +notcp +ignore +time=2 +tries=1 @<解析器> example.com A`；`-r` 忽略 `.digrc`，`+notcp` 与 `+ignore` 禁止截断后改走 TCP），metadata `169.254.169.254` 的 TCP 80，是否有全局 IPv6 地址，以及到一个公网 IPv6 的一次 TCP。没有 `dig` 时该观察是 `tool-error`，`dns-udp-gateway` 和 `dns-udp-public` 进入 `unmeasured`，不换别的解析工具。阶段 B 另加获批或占位端点的 TCP 443。`tart ip` 没有地址、或 sshd 尚未接受固定的 key-only 就绪命令时，在启动预算内重试；采集命令只在就绪后跑一次。A 和 B 另外各给 `tart exec <clone> /usr/bin/true` 一段有界的启动机会，不依赖 ssh 是否成功，成功也不说明它不经 IP。阶段 C 只记录 `tart --help` 和 `tart exec --help` 里的子命令/选项事实，不 clone；其中任一失败则这次采集失败，退出码非零。
 
-`tart list` 按表头列起始偏移切分，不按空白切（`Disk Size` 这类值含空格）。解析只要求存在 Name，以及 State 或 Running。空输出、缺这两列表头、或数据行短于状态列，都是库存不可信（`list-untrusted`），不是“VM 不存在”。报告里的 `inventory_columns` 是这次表头里通过白名单的列名原文。
+`tart list` 按表头列起始偏移切分，不按空白切（`Disk Size` 这类值含空格）。解析只接受同时有 Name 和 State 的表头，不用 Running 顶替 State。空输出、缺 Name 或 State、或数据行短于 State 列，都是库存不可信（`list-untrusted`），不是“VM 不存在”。报告里的 `inventory_columns` 是表头里通过白名单的列名原文；缺 State 时库存不可信，这些列名仍会留下，方便对照真实表头再适配。
 
 `measured` / `unmeasured` 来自各阶段实际观察，不是事先填好的清单。dry-run、前置检查失败、ssh 未连上时，`measured` 为空或不含这次没采到的网络角色。宣布某阶段网络采集完成前，预期角色必须齐全且每个只出现一次。`route` 或 `ifconfig` 管道失败是 `tool-error`，不是“无网关 / 无地址”。
 
