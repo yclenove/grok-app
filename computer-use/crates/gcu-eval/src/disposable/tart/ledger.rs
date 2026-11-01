@@ -4,24 +4,45 @@
 //! permit does not clone, delete, or seal. `rows` returns the exact owned
 //! records. It is not a VM inventory and it has no prefix lookup.
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 
 use super::deadline::{
     AttemptDeadline, FakeClock, HostClock, MonoInstant, QueryDeadline, SealDeadline,
 };
 use super::identity::{CloneId, RunId};
+use super::output::{ScriptOutcome, TraceEntry};
 
 /// Closed notes a caller may append. There is no free-text field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LedgerFact {
     /// Clone was issued for this exact reservation.
     CloneIssued,
+    /// Start was issued for this reservation. Not a process-exit proof.
+    StartIssued,
     /// A recovery pass saw this exact reservation. This is not a deletion and not a score.
     RecoveryNoted,
     /// Owner death left cleanup unconfirmed. Not a deletion and not a score.
     CleanupUnknown,
     /// This row forbids another attempt. Not a task score.
     Quarantined,
+}
+
+/// One ledger call recorded with the deadline the fake enforced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LedgerOp {
+    /// `reserve`.
+    Reserve,
+    /// `rows`.
+    Rows,
+    /// `query`.
+    Query,
+    /// `append` of this fact.
+    Append(LedgerFact),
+    /// `note_identity`.
+    NoteIdentity,
+    /// `seal`.
+    Seal,
 }
 
 /// Scripted ledger fault. An empty queue keeps the success path.
@@ -278,6 +299,8 @@ pub struct FakeLedger {
     clock: FakeClock,
     rows: Vec<Reservation>,
     faults: VecDeque<LedgerFault>,
+    /// `query` and `rows` take `&self`, so the trace sits behind a cell.
+    trace: RefCell<Vec<TraceEntry<LedgerOp>>>,
 }
 
 impl FakeLedger {
@@ -290,7 +313,14 @@ impl FakeLedger {
             clock,
             rows: Vec::new(),
             faults: VecDeque::new(),
+            trace: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Recorded calls, in order. Deadlines are the instants the fake enforced.
+    #[must_use]
+    pub fn trace(&self) -> Vec<TraceEntry<LedgerOp>> {
+        self.trace.borrow().clone()
     }
 
     /// Queue a fault for the next `reserve`, `append`, `note_identity`, or `seal`.
@@ -301,8 +331,18 @@ impl FakeLedger {
         self.faults.push_back(fault);
     }
 
-    fn ensure_call(&self, at: MonoInstant) -> Result<(), LedgerError> {
-        if self.clock.now() >= at {
+    fn stamp(&self, op: LedgerOp, at: MonoInstant) -> Result<(), LedgerError> {
+        let expired = self.clock.now() >= at;
+        self.trace.borrow_mut().push(TraceEntry {
+            command: op,
+            deadline: at,
+            outcome: if expired {
+                ScriptOutcome::Expired
+            } else {
+                ScriptOutcome::Success
+            },
+        });
+        if expired {
             Err(LedgerError::Expired)
         } else {
             Ok(())
@@ -346,7 +386,7 @@ impl AttemptLedger for FakeLedger {
         absolute: AttemptDeadline,
         call: QueryDeadline,
     ) -> Result<ClonePermit, LedgerError> {
-        self.ensure_call(call.at())?;
+        self.stamp(LedgerOp::Reserve, call.at())?;
         if absolute.at() <= self.clock.now() {
             return Err(LedgerError::AttemptAlreadyExpired);
         }
@@ -377,7 +417,7 @@ impl AttemptLedger for FakeLedger {
     }
 
     fn query(&self, clone: &CloneId, call: QueryDeadline) -> Result<Reservation, LedgerError> {
-        self.ensure_call(call.at())?;
+        self.stamp(LedgerOp::Query, call.at())?;
         let index = self.row_index(clone)?;
         Ok(self.rows[index].clone())
     }
@@ -388,7 +428,7 @@ impl AttemptLedger for FakeLedger {
         fact: LedgerFact,
         call: QueryDeadline,
     ) -> Result<(), LedgerError> {
-        self.ensure_call(call.at())?;
+        self.stamp(LedgerOp::Append(fact), call.at())?;
         let index = self.row_index(clone)?;
         if self.rows[index].sealed {
             return Err(LedgerError::Sealed);
@@ -404,7 +444,7 @@ impl AttemptLedger for FakeLedger {
         identity: &VmIdentity,
         call: QueryDeadline,
     ) -> Result<(), LedgerError> {
-        self.ensure_call(call.at())?;
+        self.stamp(LedgerOp::NoteIdentity, call.at())?;
         let index = self.row_index(clone)?;
         if self.rows[index].sealed {
             return Err(LedgerError::Sealed);
@@ -415,7 +455,7 @@ impl AttemptLedger for FakeLedger {
     }
 
     fn seal(&mut self, clone: &CloneId, call: SealDeadline) -> Result<(), LedgerError> {
-        self.ensure_call(call.at())?;
+        self.stamp(LedgerOp::Seal, call.at())?;
         let index = self.row_index(clone)?;
         if self.rows[index].sealed {
             return Err(LedgerError::Sealed);
@@ -426,7 +466,7 @@ impl AttemptLedger for FakeLedger {
     }
 
     fn rows(&self, call: QueryDeadline) -> Result<Vec<Reservation>, LedgerError> {
-        self.ensure_call(call.at())?;
+        self.stamp(LedgerOp::Rows, call.at())?;
         Ok(self.rows.clone())
     }
 }

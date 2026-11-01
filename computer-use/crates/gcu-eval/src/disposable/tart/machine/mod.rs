@@ -5,23 +5,25 @@
 //! There is no worker, no shared owner, and no asynchronous task.
 //!
 //! An already-due deadline fails before dispatch. That is not cancellation of
-//! work the fake has already started. The effective instant of a step after
-//! reserve is the earlier of the call and the absolute attempt deadline.
-//! Recovery of an unsealed row uses the new call's deadlines: the old absolute
-//! deadline stays on the row and is not extended, and it does not block the
-//! deletion that a restart still owes.
+//! work the fake has already started. Runner, guest, and ledger calls go
+//! through one dispatch: the earlier of the caller deadline, that call's phase
+//! budget, the attempt absolute deadline, and the aggregate that encloses the
+//! phase. Prep encloses reserve through ready. Run and the owner lease are not
+//! shortened by a finished prep. Cleanup encloses revoke, destroy, and seal.
+//! Recovery uses only the new call's deadlines.
 
 mod cleanup;
+mod io;
 mod recover;
 mod steps;
 
 use std::time::Duration;
 
 use super::budgets::PhaseBudgets;
-use super::deadline::{HostClock, MonoInstant, QueryDeadline};
+use super::deadline::{HostClock, MonoInstant};
 use super::guest::GuestChannel;
 use super::identity::{CloneId, RunId};
-use super::ledger::{AttemptLedger, ClonePermit, LedgerError, LedgerFact, VmIdentity};
+use super::ledger::{AttemptLedger, ClonePermit, LedgerError, VmIdentity};
 use super::lock::{CleanupLock, LockError};
 use super::output::CallError;
 use super::receipt::{AttemptReceipt, Evidence, NotRunReason, Phase, TaskScore};
@@ -29,6 +31,19 @@ use super::runner::TartRunner;
 
 pub use cleanup::CleanupDeadlines;
 pub use steps::ReserveInput;
+
+/// Which aggregate, if any, encloses a dispatch.
+///
+/// Prep covers reserve through ready. Task is run and the owner lease.
+/// Cleanup covers revoke, destroy, and seal. Recovery uses only the caller's
+/// deadlines.
+#[derive(Clone, Copy)]
+pub(super) enum Scope {
+    Prep,
+    Task,
+    Cleanup,
+    Recovery,
+}
 
 /// Why one step did not advance.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -158,6 +173,8 @@ pub struct Attempt<'a, R, G, L, K, C> {
     pub(super) lease_until: Option<MonoInstant>,
     pub(super) lease_seq: u64,
     pub(super) identity: Option<VmIdentity>,
+    /// Start was issued. A later list that omits the name is not process-exit proof.
+    pub(super) vm_started: bool,
     /// The ledger row was observed sealed. An allocated unsealed row needs recovery.
     pub(super) sealed: bool,
     pub(super) receipt: Option<AttemptReceipt>,
@@ -210,6 +227,7 @@ where
             lease_until: None,
             lease_seq: 0,
             identity: None,
+            vm_started: false,
             sealed: false,
             receipt: None,
         }
@@ -233,12 +251,17 @@ where
         self.client_starts
     }
 
-    pub(super) fn ensure_phase(&mut self, expected: &[Phase]) -> Result<(), StepError> {
+    pub(super) fn ensure_phase(
+        &mut self,
+        expected: &[Phase],
+        caller: Option<MonoInstant>,
+        scope: Scope,
+    ) -> Result<(), StepError> {
         if self.phase.closed() {
             return Err(StepError::Terminal);
         }
         if self.lease_expired() {
-            self.expire_owner(None);
+            self.expire_owner(caller, scope);
             return Err(StepError::OwnerDead);
         }
         if expected.contains(&self.phase) {
@@ -248,64 +271,34 @@ where
         Err(StepError::Unexpected)
     }
 
-    /// Budget, expiry, absolute deadline, and one try-lock.
+    /// Phase budget, the dispatch clip, and one try-lock.
     ///
     /// Does not sleep. `AboveBudget` does not change the phase. Expiry and a
-    /// busy lock do.
+    /// busy lock do. The returned instant is the same clip later IO uses.
     pub(super) fn admit(
         &mut self,
         requested: MonoInstant,
         budget: Duration,
-        prep: bool,
+        scope: Scope,
+        absolute: Option<MonoInstant>,
     ) -> Result<MonoInstant, StepError> {
         let now = self.clock.now();
         if self.lease_expired() {
-            self.expire_owner(Some(requested));
+            self.expire_owner(Some(requested), scope);
             return Err(StepError::OwnerDead);
         }
         let budget_end = now.checked_add(budget).map_err(|_| StepError::Overflow)?;
         if requested > budget_end {
             return Err(StepError::AboveBudget);
         }
-        if prep {
-            if let Some(origin) = self.origin {
-                let prep_end = origin
-                    .checked_add(self.budgets.prep)
-                    .map_err(|_| StepError::Overflow)?;
-                if now >= prep_end {
-                    self.fail(NotRunReason::Deadline);
-                    return Err(StepError::Expired);
-                }
-            }
-        }
-        if let Some(started) = self.cleanup_origin {
-            let end = started
-                .checked_add(self.budgets.cleanup)
-                .map_err(|_| StepError::Overflow)?;
-            if now >= end {
-                self.fail(NotRunReason::Deadline);
-                return Err(StepError::Expired);
-            }
-        }
-        let mut effective = requested;
-        if let Some(absolute) = self.absolute {
-            if now >= absolute {
-                self.fail(NotRunReason::Deadline);
-                return Err(StepError::Expired);
-            }
-            effective = effective.min(absolute);
-        }
-        if let Some(group) = self.group_limit(now).map_err(|_| StepError::Overflow)? {
-            effective = effective.min(group);
-        }
-        if now >= effective {
-            self.fail(NotRunReason::Deadline);
-            return Err(StepError::Expired);
-        }
-        if let Err(err) = self.lock.try_acquire(effective) {
+        let at = match self.bound(requested, budget, scope, absolute) {
+            Ok(at) => at,
+            Err(err) => return Err(self.map_trip(err)),
+        };
+        if let Err(err) = self.lock.try_acquire(at) {
             return Err(self.on_lock(err));
         }
-        Ok(effective)
+        Ok(at)
     }
 
     pub(super) fn gate(
@@ -313,68 +306,11 @@ where
         expected: &[Phase],
         requested: MonoInstant,
         budget: Duration,
-        prep: bool,
-    ) -> Result<MonoInstant, StepError> {
-        self.ensure_phase(expected)?;
-        self.admit(requested, budget, prep)
-    }
-
-    /// Earlier of the request, the inner budget, and an optional absolute cap.
-    ///
-    /// Does not change phase. A due instant is [`NotRunReason::Deadline`].
-    pub(super) fn earlier(
-        &self,
-        requested: MonoInstant,
-        budget: Duration,
+        scope: Scope,
         absolute: Option<MonoInstant>,
-    ) -> Result<MonoInstant, NotRunReason> {
-        let now = self.clock.now();
-        let budget_end = now
-            .checked_add(budget)
-            .map_err(|_| NotRunReason::Deadline)?;
-        let mut effective = requested.min(budget_end);
-        if let Some(absolute) = absolute {
-            if now >= absolute {
-                return Err(NotRunReason::Deadline);
-            }
-            effective = effective.min(absolute);
-        }
-        if let Some(group) = self.group_limit(now)? {
-            effective = effective.min(group);
-        }
-        if now >= effective {
-            Err(NotRunReason::Deadline)
-        } else {
-            Ok(effective)
-        }
-    }
-
-    /// Prep end, cleanup end, or the earlier of the two when both are still ahead.
-    ///
-    /// A prep end that has already passed does not clip cleanup. Recovery has
-    /// neither origin and is not clipped to a dead row.
-    fn group_limit(&self, now: MonoInstant) -> Result<Option<MonoInstant>, NotRunReason> {
-        let mut limit = None;
-        if let Some(origin) = self.origin {
-            let prep_end = origin
-                .checked_add(self.budgets.prep)
-                .map_err(|_| NotRunReason::Deadline)?;
-            if now < prep_end {
-                limit = Some(prep_end);
-            }
-        }
-        if let Some(started) = self.cleanup_origin {
-            let cleanup_end = started
-                .checked_add(self.budgets.cleanup)
-                .map_err(|_| NotRunReason::Deadline)?;
-            if now < cleanup_end {
-                limit = Some(match limit {
-                    Some(prep_end) => prep_end.min(cleanup_end),
-                    None => cleanup_end,
-                });
-            }
-        }
-        Ok(limit)
+    ) -> Result<MonoInstant, StepError> {
+        self.ensure_phase(expected, Some(requested), scope)?;
+        self.admit(requested, budget, scope, absolute)
     }
 
     pub(super) fn lease_expired(&self) -> bool {
@@ -447,47 +383,9 @@ where
         if self.phase.closed() {
             return Err(StepError::Terminal);
         }
-        self.admit(requested, budget, false)?;
+        self.admit(requested, budget, self.scope_for_phase(), None)?;
         self.fail(reason);
         Err(StepError::Lost(reason))
-    }
-
-    pub(super) fn query_deadline(
-        &self,
-        effective: MonoInstant,
-    ) -> Result<QueryDeadline, StepError> {
-        let at = self
-            .earlier(effective, self.budgets.query, None)
-            .map_err(|_| StepError::Expired)?;
-        Ok(QueryDeadline::from_instant(at))
-    }
-
-    pub(super) fn append_fact(
-        &mut self,
-        fact: LedgerFact,
-        effective: MonoInstant,
-    ) -> Result<(), LedgerError> {
-        let Some(clone) = self.clone_id.clone() else {
-            return Err(LedgerError::NotFound);
-        };
-        let call = self
-            .query_deadline(effective)
-            .map_err(|_| LedgerError::Expired)?;
-        self.ledger.append(&clone, fact, call)
-    }
-
-    pub(super) fn note_identity(
-        &mut self,
-        identity: &VmIdentity,
-        effective: MonoInstant,
-    ) -> Result<(), LedgerError> {
-        let Some(clone) = self.clone_id.clone() else {
-            return Err(LedgerError::NotFound);
-        };
-        let call = self
-            .query_deadline(effective)
-            .map_err(|_| LedgerError::Expired)?;
-        self.ledger.note_identity(&clone, identity, call)
     }
 }
 

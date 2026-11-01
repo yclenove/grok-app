@@ -1,30 +1,29 @@
 //! Forward steps. Each one returns before its deadline and does not sleep.
 
+use std::num::NonZeroU64;
+
 use super::super::super::Probe;
 use super::super::deadline::{
-    CloneDeadline, GroupDeadline, LeaseDeadline, LoginDeadline, QueryDeadline, RunDeadline,
-    StageDeadline, StartDeadline,
+    CloneDeadline, GroupDeadline, HostClock, LeaseDeadline, LoginDeadline, QueryDeadline,
+    RunDeadline, StageDeadline, StartDeadline,
 };
 use super::super::guest::{GuestChannel, GUEST_CHANNEL_VERSION};
-use super::super::identity::{CloneId, RunId};
-use super::super::ledger::{AttemptLedger, VmIdentity};
+use super::super::identity::GoldenImage;
+use super::super::ledger::{AttemptLedger, LedgerError, LedgerFact, VmIdentity};
 use super::super::lock::CleanupLock;
 use super::super::manifest::InstallManifest;
 use super::super::parse::{self, LoginMark};
 use super::super::policy::SoftnetFlags;
 use super::super::receipt::{NotRunReason, Phase};
 use super::super::runner::TartRunner;
-use std::num::NonZeroU64;
-
-use super::super::deadline::HostClock as Clock;
-use super::{call_reason, ledger_reason, score_of, Attempt, StepError};
+use super::{ledger_reason, score_of, Attempt, Scope, StepError};
 
 /// Inputs for [`Attempt::reserve`]. Digests are compared, not trusted.
 pub struct ReserveInput {
     /// Run id written before the permit exists.
-    pub run: RunId,
+    pub run: super::super::identity::RunId,
     /// Clone id written before the permit exists. Not a golden name.
-    pub clone_id: CloneId,
+    pub clone_id: super::super::identity::CloneId,
     /// Absolute attempt deadline. Retries cannot extend it.
     pub absolute: super::super::deadline::AttemptDeadline,
     /// Presented install digests.
@@ -43,19 +42,28 @@ where
     G: GuestChannel,
     L: AttemptLedger,
     K: CleanupLock,
-    C: Clock,
+    C: HostClock,
 {
     /// Validate the manifest, Stop, and owner, then reserve.
     ///
     /// Does not clone. An unsealed or quarantined ledger row is refused and
-    /// the phase stays `Idle`. A refusal before a row exists moves to
-    /// `Destroying` so the caller can seal a rejection receipt. Does not block.
+    /// the phase stays `Idle`. A lost acknowledgement is read back inside the
+    /// same deadline: a stored row keeps its ids and requires recovery, and a
+    /// missing row does not. Does not block.
     pub fn reserve(
         &mut self,
         input: ReserveInput,
         deadline: QueryDeadline,
     ) -> Result<(), StepError> {
-        let effective = self.gate(&[Phase::Idle], deadline.at(), self.budgets.query, false)?;
+        let caller = deadline.at();
+        let absolute = Some(input.absolute.at());
+        self.gate(
+            &[Phase::Idle],
+            caller,
+            self.budgets.query,
+            Scope::Prep,
+            absolute,
+        )?;
         if !input.owner_present {
             self.fail(NotRunReason::Refused);
             return Err(StepError::Refused);
@@ -76,25 +84,21 @@ where
         if input.absolute.at() > attempt_end {
             return Err(StepError::AboveBudget);
         }
-        let query = self.query_deadline(effective)?;
-        let rows = match self.ledger.rows(query) {
+        let rows = match self.ledger_rows(caller, Scope::Prep, absolute) {
             Ok(rows) => rows,
-            Err(err) => {
-                self.fail(ledger_reason(&err));
-                return Err(StepError::Ledger(err));
-            }
+            Err(err) => return Err(self.ledger_err(err)),
         };
         if rows.iter().any(|row| !row.is_sealed()) {
             return Err(StepError::MustRecover);
         }
-        if rows.iter().any(|row| {
-            row.facts()
-                .contains(&super::super::ledger::LedgerFact::Quarantined)
-        }) {
+        if rows
+            .iter()
+            .any(|row| row.facts().contains(&LedgerFact::Quarantined))
+        {
             self.halted = true;
             return Err(StepError::Halted);
         }
-        let names = match self.names_at(effective, None) {
+        let names = match self.listed(caller, Scope::Prep, absolute) {
             Ok(names) => names,
             Err(reason) => {
                 self.fail(reason);
@@ -104,11 +108,13 @@ where
         if names.iter().any(|name| name == input.clone_id.as_str()) {
             return Err(StepError::DestinationExists);
         }
-        match self.ledger.reserve(
+        match self.ledger_reserve(
             input.run.clone(),
             input.clone_id.clone(),
             input.absolute,
-            query,
+            caller,
+            Scope::Prep,
+            absolute,
         ) {
             Ok(permit) => {
                 self.absolute = Some(permit.absolute_deadline());
@@ -119,94 +125,132 @@ where
                 self.phase = Phase::Reserved;
                 Ok(())
             }
-            Err(err) => {
-                self.fail(ledger_reason(&err));
-                Err(StepError::Ledger(err))
-            }
+            Err(LedgerError::ReplyLost) => self.reconcile_reserve(input, caller),
+            Err(err) => Err(self.ledger_err(err)),
         }
+    }
+
+    /// A lost reserve ack is not proof the row is absent.
+    fn reconcile_reserve(
+        &mut self,
+        input: ReserveInput,
+        caller: super::super::deadline::MonoInstant,
+    ) -> Result<(), StepError> {
+        let absolute = Some(input.absolute.at());
+        match self.ledger_query(&input.clone_id, caller, Scope::Prep, absolute) {
+            Err(LedgerError::NotFound) => Err(self.ledger_err(LedgerError::ReplyLost)),
+            Ok(_) | Err(_) => self.hold_unacked(input),
+        }
+    }
+
+    fn hold_unacked(&mut self, input: ReserveInput) -> Result<(), StepError> {
+        self.run = Some(input.run);
+        self.clone_id = Some(input.clone_id);
+        self.absolute = Some(input.absolute.at());
+        self.origin = Some(self.clock.now());
+        self.trigger = Some(NotRunReason::ReplyLost);
+        self.phase = Phase::Revoking;
+        if self.cleanup_origin.is_none() {
+            self.cleanup_origin = Some(self.clock.now());
+        }
+        self.receipt = Some(super::super::receipt::AttemptReceipt::new(
+            self.run.clone(),
+            self.clone_id.clone(),
+            super::super::receipt::AttemptOutcome::NotRun {
+                reason: NotRunReason::ReplyLost,
+                client_started: false,
+            },
+            false,
+            super::super::super::CleanupDisposition::Allocated,
+            false,
+            true,
+        ));
+        Err(StepError::Ledger(LedgerError::ReplyLost))
     }
 
     /// Clone the golden image with the reserved permit.
     ///
-    /// The permit is consumed on every path that reaches the runner, including
-    /// failure. The effective deadline is the earlier of `deadline`, the phase
-    /// budget, prep end, and the absolute attempt deadline. A lost reply does
-    /// not store an incarnation, so a same-name VM is not owned.
-    /// Does not block.
+    /// The expected fake incarnation is written before the runner is called.
+    /// The permit is taken only for that call. A success body that does not
+    /// match the stored expectation is not written over it. Does not block.
     pub fn clone_vm(
         &mut self,
-        golden: super::super::identity::GoldenImage,
+        golden: GoldenImage,
         deadline: CloneDeadline,
     ) -> Result<(), StepError> {
-        let effective = self.gate(
+        let caller = deadline.at();
+        self.gate(
             &[Phase::Reserved],
-            deadline.at(),
+            caller,
             self.budgets.clone_limit,
-            true,
+            Scope::Prep,
+            None,
         )?;
         let Some(clone) = self.clone_id.clone() else {
             self.fail(NotRunReason::Unexpected);
             return Err(StepError::Unexpected);
         };
-        let names = match self.names_at(effective, self.absolute) {
+        let names = match self.listed(caller, Scope::Prep, None) {
             Ok(names) => names,
             Err(reason) => {
-                self.permit.take();
                 self.fail(reason);
                 return Err(step_from_reason(reason));
             }
         };
         if names.iter().any(|name| name == clone.as_str()) {
-            self.permit.take();
             self.fail(NotRunReason::IdentityConflict);
             return Err(StepError::Cleanup(NotRunReason::IdentityConflict));
         }
+        let expected = Self::fake_allocation();
+        let landed = match self.identity_landed(&clone, &expected, caller, Scope::Prep) {
+            Ok(landed) => landed,
+            Err(err) => return Err(self.ledger_err(err)),
+        };
+        if !landed {
+            return Err(self.ledger_err(LedgerError::ReplyLost));
+        }
+        self.identity = Some(expected.clone());
         let Some(permit) = self.permit.take() else {
             self.fail(NotRunReason::Unexpected);
             return Err(StepError::Unexpected);
         };
-        let call = CloneDeadline::from_instant(effective);
-        let result = self.runner.clone_vm(permit, golden, call);
-        match result {
-            Ok(body) => {
-                let mark = match parse::parse_clone(body.as_bytes()) {
-                    Ok(mark) => mark,
-                    Err(_) => {
-                        self.fail(NotRunReason::Malformed);
-                        return Err(StepError::MalformedBody);
-                    }
-                };
-                let identity = VmIdentity::from_parts(mark.incarnation, mark.config);
-                if let Err(err) =
-                    self.append_fact(super::super::ledger::LedgerFact::CloneIssued, effective)
-                {
-                    self.fail(ledger_reason(&err));
-                    return Err(StepError::Ledger(err));
-                }
-                if let Err(err) = self.note_identity(&identity, effective) {
-                    self.fail(ledger_reason(&err));
-                    return Err(StepError::Ledger(err));
-                }
-                self.identity = Some(identity);
-                self.phase = Phase::Cloned;
-                Ok(())
+        let body = self.runner_clone(permit, golden, caller, Scope::Prep)?;
+        let mark = match parse::parse_clone(body.as_bytes()) {
+            Ok(mark) => mark,
+            Err(_) => {
+                self.fail(NotRunReason::Malformed);
+                return Err(StepError::MalformedBody);
             }
-            Err(err) => {
-                self.fail(call_reason(&err));
-                Err(StepError::Call(err))
-            }
+        };
+        let got = VmIdentity::from_parts(mark.incarnation, mark.config);
+        if got != expected {
+            self.fail(NotRunReason::IdentityConflict);
+            return Err(StepError::Cleanup(NotRunReason::IdentityConflict));
         }
+        if !self.fact_ok(&clone, LedgerFact::CloneIssued, caller)? {
+            return Err(self.ledger_err(LedgerError::ReplyLost));
+        }
+        self.phase = Phase::Cloned;
+        Ok(())
     }
 
     /// Start the clone with the required Softnet flags.
     ///
-    /// There is no start without those flags and no restart. Does not block.
+    /// Records [`LedgerFact::StartIssued`] before the runner call. There is no
+    /// start without those flags and no restart. Does not block.
     pub fn start(
         &mut self,
         flags: &SoftnetFlags,
         deadline: StartDeadline,
     ) -> Result<(), StepError> {
-        let effective = self.gate(&[Phase::Cloned], deadline.at(), self.budgets.start, true)?;
+        let caller = deadline.at();
+        self.gate(
+            &[Phase::Cloned],
+            caller,
+            self.budgets.start,
+            Scope::Prep,
+            None,
+        )?;
         let Some(clone) = self.clone_id.clone() else {
             self.fail(NotRunReason::Unexpected);
             return Err(StepError::Unexpected);
@@ -219,21 +263,17 @@ where
             self.fail(NotRunReason::IdentityConflict);
             return Err(StepError::Cleanup(NotRunReason::IdentityConflict));
         };
-        if let Err(reason) = self.confirm_owned(&clone, &run, &identity, effective) {
+        if let Err(reason) = self.confirm_owned(&clone, &run, &identity, caller) {
             self.fail(reason);
             return Err(step_from_reason(reason));
         }
-        let call = StartDeadline::from_instant(effective);
-        match self.runner.start(&clone, flags, call) {
-            Ok(_) => {
-                self.phase = Phase::Booting;
-                Ok(())
-            }
-            Err(err) => {
-                self.fail(call_reason(&err));
-                Err(StepError::Call(err))
-            }
+        if !self.fact_ok(&clone, LedgerFact::StartIssued, caller)? {
+            return Err(self.ledger_err(LedgerError::ReplyLost));
         }
+        self.vm_started = true;
+        self.runner_start(&clone, flags, caller, Scope::Prep)?;
+        self.phase = Phase::Booting;
+        Ok(())
     }
 
     /// Inventory and every probe. A failed probe enters cleanup immediately.
@@ -242,17 +282,19 @@ where
     /// uses the probe budget, inside `deadline` and the absolute deadline.
     /// Does not block.
     pub fn isolate(&mut self, deadline: GroupDeadline) -> Result<(), StepError> {
-        let effective = self.gate(
+        let caller = deadline.at();
+        self.gate(
             &[Phase::Booting],
-            deadline.at(),
+            caller,
             self.budgets.probe_group,
-            true,
+            Scope::Prep,
+            None,
         )?;
         if self.guest.protocol_version() != GUEST_CHANNEL_VERSION {
             self.fail(NotRunReason::MissingProof);
             return Err(StepError::Protocol);
         }
-        let body = self.guest_query(effective, |guest, call| guest.inventory(call))?;
+        let body = self.guest_inventory(caller, Scope::Prep)?;
         let view = match parse::parse_guest(body.as_bytes()) {
             Ok(view) => view,
             Err(_) => {
@@ -262,21 +304,7 @@ where
         };
         self.evidence.guest = Some(view);
         for probe in Probe::ALL {
-            let at = match self.earlier(effective, self.budgets.probe, self.absolute) {
-                Ok(at) => at,
-                Err(reason) => {
-                    self.fail(reason);
-                    return Err(StepError::Expired);
-                }
-            };
-            let call = super::super::deadline::ProbeDeadline::from_instant(at);
-            let body = match self.guest.probe(probe, call) {
-                Ok(body) => body,
-                Err(err) => {
-                    self.fail(call_reason(&err));
-                    return Err(StepError::Call(err));
-                }
-            };
+            let body = self.guest_probe(probe, caller, Scope::Prep)?;
             let check = match parse::parse_probe(body.as_bytes()) {
                 Ok(check) => check,
                 Err(_) => {
@@ -298,12 +326,19 @@ where
     ///
     /// Does not block. A missing or foreign ACK enters cleanup.
     pub fn bootstrap(&mut self, deadline: StageDeadline) -> Result<(), StepError> {
-        let effective = self.gate(&[Phase::Isolated], deadline.at(), self.budgets.stage, true)?;
+        let caller = deadline.at();
+        self.gate(
+            &[Phase::Isolated],
+            caller,
+            self.budgets.stage,
+            Scope::Prep,
+            None,
+        )?;
         let Some(run) = self.run.clone() else {
             self.fail(NotRunReason::Unexpected);
             return Err(StepError::Unexpected);
         };
-        let body = self.guest_stage(effective, |guest, call| guest.bootstrap(call))?;
+        let body = self.guest_bootstrap(caller, Scope::Prep)?;
         match parse::parse_ack(body.as_bytes(), run.as_str()) {
             Ok(generation) => {
                 self.evidence.ack_generation = Some(generation);
@@ -319,13 +354,15 @@ where
 
     /// Record fake login evidence. The call takes no secret and does not block.
     pub fn login(&mut self, deadline: LoginDeadline) -> Result<(), StepError> {
-        let effective = self.gate(
+        let caller = deadline.at();
+        self.gate(
             &[Phase::Bootstrapped],
-            deadline.at(),
+            caller,
             self.budgets.login,
-            true,
+            Scope::Prep,
+            None,
         )?;
-        let body = self.guest_login(effective)?;
+        let body = self.guest_login(caller, Scope::Prep)?;
         match parse::parse_login(body.as_bytes()) {
             Ok(LoginMark::Ready) => {
                 self.evidence.login_ready = true;
@@ -348,13 +385,15 @@ where
     /// Does not mint a launch capability. A boot change is not adopted.
     /// Does not block.
     pub fn ready(&mut self, deadline: QueryDeadline) -> Result<(), StepError> {
-        let effective = self.gate(
+        let caller = deadline.at();
+        self.gate(
             &[Phase::CredentialReady],
-            deadline.at(),
+            caller,
             self.budgets.query,
-            true,
+            Scope::Prep,
+            None,
         )?;
-        let body = self.guest_query(effective, |guest, call| guest.inventory(call))?;
+        let body = self.guest_inventory(caller, Scope::Prep)?;
         let view = match parse::parse_guest(body.as_bytes()) {
             Ok(view) => view,
             Err(_) => {
@@ -388,29 +427,16 @@ where
     /// Issue the fake run once and record its score body.
     ///
     /// A second call is refused and does not issue another run. The score is
-    /// provisional until seal. Does not block.
+    /// provisional until seal. The run budget is not shortened by prep.
+    /// Does not block.
     pub fn run(&mut self, deadline: RunDeadline) -> Result<(), StepError> {
-        let effective = self.gate(&[Phase::Ready], deadline.at(), self.budgets.run, false)?;
+        let caller = deadline.at();
+        self.gate(&[Phase::Ready], caller, self.budgets.run, Scope::Task, None)?;
         if self.client_starts > 0 {
             self.fail(NotRunReason::Unexpected);
             return Err(StepError::Unexpected);
         }
-        let at = match self.earlier(effective, self.budgets.run, self.absolute) {
-            Ok(at) => at,
-            Err(reason) => {
-                self.fail(reason);
-                return Err(StepError::Expired);
-            }
-        };
-        self.client_starts = self.client_starts.saturating_add(1);
-        let call = RunDeadline::from_instant(at);
-        let body = match self.guest.run(call) {
-            Ok(body) => body,
-            Err(err) => {
-                self.fail(call_reason(&err));
-                return Err(StepError::Call(err));
-            }
-        };
+        let body = self.guest_run(caller, Scope::Task)?;
         match parse::parse_score(body.as_bytes()) {
             Ok(mark) => {
                 self.evidence.provisional = Some(score_of(mark));
@@ -426,107 +452,44 @@ where
 
     /// Send one owner lease. A late call does not extend or revive it.
     ///
-    /// Does not block. The sequence starts at 1 and only increases.
+    /// Does not block. The sequence starts at 1 and only increases. The lease
+    /// end is the clipped instant of this call, not a second budget.
     pub fn arm_owner_lease(&mut self, deadline: LeaseDeadline) -> Result<(), StepError> {
+        let caller = deadline.at();
         if self.phase.closed() {
             return Err(StepError::Terminal);
         }
         if self.lease_expired() {
-            self.expire_owner(None);
+            self.expire_owner(Some(caller), Scope::Task);
             return Err(StepError::LeaseExpired);
         }
-        self.ensure_phase(&[Phase::Running])?;
-        let effective = self.admit(deadline.at(), self.budgets.lease, false)?;
+        self.ensure_phase(&[Phase::Running], Some(caller), Scope::Task)?;
+        self.admit(caller, self.budgets.lease, Scope::Task, None)?;
         let next = self.lease_seq.checked_add(1).ok_or(StepError::Overflow)?;
         let Some(seq) = NonZeroU64::new(next) else {
             return Err(StepError::Overflow);
         };
-        let call = LeaseDeadline::from_instant(effective);
-        match self.guest.lease(seq, call) {
-            Ok(_) => {
-                self.lease_seq = next;
-                self.lease_until = Some(effective);
-                Ok(())
-            }
-            Err(err) => {
-                self.fail(call_reason(&err));
-                Err(StepError::Call(err))
-            }
+        let until = self.guest_lease(seq, caller, Scope::Task)?;
+        self.lease_seq = next;
+        self.lease_until = Some(until);
+        Ok(())
+    }
+
+    fn fact_ok(
+        &mut self,
+        clone: &super::super::identity::CloneId,
+        fact: LedgerFact,
+        caller: super::super::deadline::MonoInstant,
+    ) -> Result<bool, StepError> {
+        match self.fact_landed(clone, fact, caller, Scope::Prep) {
+            Ok(landed) => Ok(landed),
+            Err(err) => Err(self.ledger_err(err)),
         }
     }
 
-    fn guest_query(
-        &mut self,
-        effective: super::super::deadline::MonoInstant,
-        call: impl FnOnce(
-            &mut G,
-            QueryDeadline,
-        ) -> Result<
-            super::super::output::BoundedOutput,
-            super::super::output::CallError,
-        >,
-    ) -> Result<super::super::output::BoundedOutput, StepError> {
-        let at = match self.earlier(effective, self.budgets.query, self.absolute) {
-            Ok(at) => at,
-            Err(reason) => {
-                self.fail(reason);
-                return Err(StepError::Expired);
-            }
-        };
-        match call(self.guest, QueryDeadline::from_instant(at)) {
-            Ok(body) => Ok(body),
-            Err(err) => {
-                self.fail(call_reason(&err));
-                Err(StepError::Call(err))
-            }
-        }
-    }
-
-    fn guest_stage(
-        &mut self,
-        effective: super::super::deadline::MonoInstant,
-        call: impl FnOnce(
-            &mut G,
-            StageDeadline,
-        ) -> Result<
-            super::super::output::BoundedOutput,
-            super::super::output::CallError,
-        >,
-    ) -> Result<super::super::output::BoundedOutput, StepError> {
-        let at = match self.earlier(effective, self.budgets.stage, self.absolute) {
-            Ok(at) => at,
-            Err(reason) => {
-                self.fail(reason);
-                return Err(StepError::Expired);
-            }
-        };
-        match call(self.guest, StageDeadline::from_instant(at)) {
-            Ok(body) => Ok(body),
-            Err(err) => {
-                self.fail(call_reason(&err));
-                Err(StepError::Call(err))
-            }
-        }
-    }
-
-    fn guest_login(
-        &mut self,
-        effective: super::super::deadline::MonoInstant,
-    ) -> Result<super::super::output::BoundedOutput, StepError> {
-        let at = match self.earlier(effective, self.budgets.login, self.absolute) {
-            Ok(at) => at,
-            Err(reason) => {
-                self.fail(reason);
-                return Err(StepError::Expired);
-            }
-        };
-        match self.guest.login(LoginDeadline::from_instant(at)) {
-            Ok(body) => Ok(body),
-            Err(err) => {
-                self.fail(call_reason(&err));
-                Err(StepError::Call(err))
-            }
-        }
+    fn ledger_err(&mut self, err: LedgerError) -> StepError {
+        self.fail(ledger_reason(&err));
+        StepError::Ledger(err)
     }
 }
 

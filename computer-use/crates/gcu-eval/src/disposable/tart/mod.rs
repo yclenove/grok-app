@@ -37,8 +37,8 @@ pub use deadline::{
 pub use guest::{FakeGuestChannel, GuestChannel, GuestCommand, GUEST_CHANNEL_VERSION};
 pub use identity::{CloneId, GoldenImage, IdentityError, RunId, MAX_IDENTITY_LEN};
 pub use ledger::{
-    AttemptLedger, ClonePermit, FakeLedger, LedgerError, LedgerFact, LedgerFault, Reservation,
-    VmIdentity,
+    AttemptLedger, ClonePermit, FakeLedger, LedgerError, LedgerFact, LedgerFault, LedgerOp,
+    Reservation, VmIdentity,
 };
 pub use lock::{CleanupLock, FakeCleanupLock, LockError};
 pub use machine::{Attempt, CleanupDeadlines, ReserveInput, RuntimeLoss, StepError};

@@ -16,6 +16,9 @@ use super::harness::{
     runner_commands, scripts_to_reach, start_ids, CFG, CLONE, INC, RUN, RUN_2,
 };
 
+#[path = "review_fix.rs"]
+mod fix;
+
 #[allow(
     clippy::type_complexity,
     reason = "one table of named checks; a type alias would not make the pointer simpler"
@@ -42,8 +45,16 @@ pub(super) const TESTS: &[(&str, fn() -> Result<(), String>)] = &[
         boot_change_during_cleanup_is_not_scored,
     ),
     (
-        "lost_clone_reply_does_not_delete_on_recovery",
-        lost_clone_reply_does_not_delete_on_recovery,
+        "lost_clone_reply_reclaims_the_same_incarnation",
+        fix::lost_clone_reply_reclaims_the_same_incarnation,
+    ),
+    (
+        "lost_clone_reply_refuses_a_replacement",
+        fix::lost_clone_reply_refuses_a_replacement,
+    ),
+    (
+        "unwritten_identity_does_not_clone_or_delete",
+        fix::unwritten_identity_does_not_clone_or_delete,
     ),
     (
         "contradictory_absent_status_is_malformed",
@@ -122,8 +133,12 @@ pub(super) const TESTS: &[(&str, fn() -> Result<(), String>)] = &[
         expired_recovery_stop_does_not_stop,
     ),
     (
-        "committed_clone_append_does_not_own_the_vm",
-        committed_clone_append_does_not_own_the_vm,
+        "committed_identity_rejects_a_replacement_body",
+        fix::committed_identity_rejects_a_replacement_body,
+    ),
+    (
+        "committed_reserve_matches_the_next_gate",
+        fix::committed_reserve_matches_the_next_gate,
     ),
     (
         "stop_without_confirmation_does_not_delete",
@@ -138,8 +153,64 @@ pub(super) const TESTS: &[(&str, fn() -> Result<(), String>)] = &[
         committed_quarantine_still_requires_recovery,
     ),
     (
-        "committed_seal_clears_recovery_required",
-        committed_seal_clears_recovery_required,
+        "committed_seal_readback_finalizes",
+        fix::committed_seal_readback_finalizes,
+    ),
+    (
+        "running_revoke_absent_list_is_not_cleanup",
+        fix::running_revoke_absent_list_is_not_cleanup,
+    ),
+    (
+        "recovery_of_started_vm_absent_from_the_list",
+        fix::recovery_of_started_vm_absent_from_the_list,
+    ),
+    (
+        "lease_expiry_during_stop_does_not_delete",
+        fix::lease_expiry_during_stop_does_not_delete,
+    ),
+    (
+        "reserve_absolute_clips_ledger_and_list",
+        fix::reserve_absolute_clips_ledger_and_list,
+    ),
+    (
+        "expired_revoke_does_not_dispatch_fresh_io",
+        fix::expired_revoke_does_not_dispatch_fresh_io,
+    ),
+    (
+        "seal_readback_stays_inside_the_seal_deadline",
+        fix::seal_readback_stays_inside_the_seal_deadline,
+    ),
+    (
+        "seal_reply_lost_readback_is_not_final",
+        fix::seal_reply_lost_readback_is_not_final,
+    ),
+    (
+        "run_after_ready_keeps_the_task_deadline",
+        fix::run_after_ready_keeps_the_task_deadline,
+    ),
+    (
+        "post_stop_run_change_does_not_delete",
+        fix::post_stop_run_change_does_not_delete,
+    ),
+    (
+        "config_mismatch_does_not_stop",
+        fix::config_mismatch_does_not_stop,
+    ),
+    (
+        "softnet_still_up_does_not_delete",
+        fix::softnet_still_up_does_not_delete,
+    ),
+    (
+        "drop_after_stop_recovers_without_a_score",
+        fix::drop_after_stop_recovers_without_a_score,
+    ),
+    (
+        "drop_after_delete_recovers_without_a_score",
+        fix::drop_after_delete_recovers_without_a_score,
+    ),
+    (
+        "drop_after_committed_quarantine_halts_the_next_reserve",
+        fix::drop_after_committed_quarantine_halts_the_next_reserve,
     ),
     ("drop_leaves_the_vm_running", drop_leaves_the_vm_running),
 ];
@@ -319,33 +390,6 @@ fn boot_change_during_cleanup_is_not_scored() -> Result<(), String> {
     not_scored(&receipt)
 }
 
-fn lost_clone_reply_does_not_delete_on_recovery() -> Result<(), String> {
-    let (mut world, io) = opened(PhaseBudgets::adr());
-    {
-        push_clear(&io);
-        push_clear(&io);
-        let mut attempt = world.attempt();
-        reserve_default(&mut attempt, &io.clock)?;
-        let deadline = CloneDeadline::after(io.clock.now(), CloneDeadline::CAP).unwrap();
-        if attempt
-            .clone_vm(
-                gcu_eval::disposable::tart::GoldenImage::MacosS2Eval,
-                deadline,
-            )
-            .is_ok()
-        {
-            return Err("lost clone succeeded".into());
-        }
-    }
-    harness::push_present(&io);
-    let mut again = world.attempt();
-    let err = again.recover(&cleanup_deadlines(&io.clock));
-    if err.is_ok() || saw(&io, is_stop) || saw(&io, is_delete) {
-        return Err(format!("lost clone deleted: {err:?}"));
-    }
-    Ok(())
-}
-
 fn contradictory_absent_status_is_malformed() -> Result<(), String> {
     let (mut world, io) = opened(PhaseBudgets::adr());
     let mut attempt = drive(&mut world, &io, Phase::Revoking)?;
@@ -443,6 +487,14 @@ fn late_renew_blocks_revoke_destroy_and_seal() -> Result<(), String> {
         || lease_count(&io) != 1
     {
         return Err(format!("renew phase {:?}", attempt.phase()));
+    }
+    if !matches!(
+        attempt.arm_owner_lease(LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap()),
+        Err(StepError::Terminal)
+    ) || lease_count(&io) != 1
+        || attempt.phase() != Phase::Suspended
+    {
+        return Err(format!("rearm phase {:?}", attempt.phase()));
     }
     harness::push_present(&io);
     push_guest(&io, ok_body("score pass"));
@@ -558,6 +610,19 @@ fn cleanup_end_clips_the_stop_deadline() -> Result<(), String> {
     attempt
         .revoke(RevokeDeadline::after(io.clock.now(), RevokeDeadline::CAP).unwrap())
         .map_err(|err| format!("revoke: {err:?}"))?;
+    let revoke_at = RevokeDeadline::after(started, Duration::from_secs(2))
+        .unwrap()
+        .at();
+    let revoke = io
+        .guest
+        .borrow()
+        .trace()
+        .iter()
+        .find(|entry| matches!(entry.command, GuestCommand::Revoke))
+        .map(|entry| entry.deadline);
+    if revoke != Some(revoke_at) {
+        return Err(format!("revoke deadline {revoke:?} expected {revoke_at:?}"));
+    }
     harness::advance(&io.clock, Duration::from_millis(1500))?;
     harness::push_present(&io);
     attempt
@@ -757,44 +822,6 @@ fn expired_recovery_stop_does_not_stop() -> Result<(), String> {
     Ok(())
 }
 
-fn committed_clone_append_does_not_own_the_vm() -> Result<(), String> {
-    let (mut world, io) = opened(PhaseBudgets::adr());
-    {
-        push_clear(&io);
-        let mut attempt = world.attempt();
-        reserve_default(&mut attempt, &io.clock)?;
-        push_clear(&io);
-        push_clone_ok(&io);
-        io.ledger
-            .borrow_mut()
-            .push_fault(LedgerFault::CommittedLost);
-        let deadline = CloneDeadline::after(io.clock.now(), CloneDeadline::CAP).unwrap();
-        if !matches!(
-            attempt.clone_vm(
-                gcu_eval::disposable::tart::GoldenImage::MacosS2Eval,
-                deadline
-            ),
-            Err(StepError::Ledger(_))
-        ) {
-            return Err("committed-lost clone was acknowledged".into());
-        }
-    }
-    let row = io
-        .ledger
-        .borrow()
-        .query(&id_clone(CLONE), query(&io.clock))
-        .map_err(|err| format!("{err:?}"))?;
-    if row.expected().is_some() || !row.facts().contains(&LedgerFact::CloneIssued) {
-        return Err(format!("row {row:?}"));
-    }
-    harness::push_present(&io);
-    let mut again = world.attempt();
-    if again.recover(&cleanup_deadlines(&io.clock)).is_ok() || saw(&io, is_delete) {
-        return Err("unidentified clone was deleted".into());
-    }
-    Ok(())
-}
-
 fn stop_without_confirmation_does_not_delete() -> Result<(), String> {
     let (mut world, io) = opened(PhaseBudgets::adr());
     let mut attempt = drive(&mut world, &io, Phase::Revoking)?;
@@ -866,45 +893,6 @@ fn committed_quarantine_still_requires_recovery() -> Result<(), String> {
     ) {
         return Err("committed quarantine did not force recovery".into());
     }
-    Ok(())
-}
-
-fn committed_seal_clears_recovery_required() -> Result<(), String> {
-    let (mut world, io) = opened(PhaseBudgets::adr());
-    let mut attempt = drive(&mut world, &io, Phase::Destroying)?;
-    io.ledger
-        .borrow_mut()
-        .push_fault(LedgerFault::CommittedLost);
-    if attempt
-        .seal(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
-        .is_ok()
-    {
-        return Err("committed-lost seal was acknowledged".into());
-    }
-    let receipt = attempt.receipt().cloned().ok_or("no receipt")?;
-    let row = io
-        .ledger
-        .borrow()
-        .query(&id_clone(CLONE), query(&io.clock))
-        .map_err(|err| format!("{err:?}"))?;
-    if receipt.recovery_required() || !row.is_sealed() {
-        return Err(format!("receipt {receipt:?} row {row:?}"));
-    }
-    drop(attempt);
-    push_clear(&io);
-    let mut again = world.attempt();
-    let absolute = AttemptDeadline::after(io.clock.now(), AttemptDeadline::CAP).unwrap();
-    reserve_named(
-        &mut again,
-        &io.clock,
-        RUN_2,
-        harness::CLONE_2,
-        absolute,
-        false,
-        true,
-        harness::manifest(),
-    )
-    .map_err(|err| format!("next reserve: {err:?}"))?;
     Ok(())
 }
 

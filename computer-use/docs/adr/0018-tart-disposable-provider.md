@@ -241,14 +241,14 @@ S11b 在 S11-0 给出通道事实之前只应接这些 fake，不得选定真实
 
 已实现（`gcu-eval/src/disposable/tart/`，无后台线程、无观察者、无 async、无新依赖）：
 
-- 阶段：`Idle → Reserved → Cloned → Booting → Isolated → Bootstrapped → CredentialReady → Ready → Running → Revoking → Destroying → Final`。`Quarantined` 是清理或回执失败，停后续 task/arm/repeat。`Suspended` 只由已经到期的 owner 租约在调用入口同步进入：晚到的 renew、之后的转移和发布门看到 `lease_until` 已过，都进入 `Suspended`，禁止该 owner 删除，不封存，回执 cleanup 为 unknown，下次启动先 `recover`。没有计时器，也没有自动恢复。进入之后，arm、run、revoke、destroy、seal 都不能把阶段改回或续租。
-- 每步一个同步方法，调用方持有 runner、guest、账本、锁和钟。`Drop` 不 stop、不 delete、不 seal。reserve 之后的步骤取调用 deadline、阶段预算、准备阶段结束、清理阶段结束和绝对截止中最早的一个。stop 之后的 status 不超过 stop 的有效截止；delete 之后的缺席确认不超过 delete 的有效截止。恢复只用本次调用的 deadline，不用已死行的绝对截止。阶段预算集中在 `budgets.rs`（§2 的上限），测试只能缩小。Stop 常量未改。
-- 所有权：clone 正文里的化身和配置写入预约记录。同名目的地在 reserve 和 clone 之前拒绝。start、stop、delete 和恢复在动手前要求权威清单里的身份与记录一致；缺失或歧义进入隔离，不按名字或 run 标签认领。guest boot 变化使本次分数失效，但清理仍可销毁已经正向识别为自己所有的 VM。
-- 停止与缺席：`state=absent` 不是进程已退出的证明。tart 或 softnet 仍为 up 的 absent 正文是畸形，不能当清理成功。资源“不存在”只来自一份完整且成功的 list；这份 list 已经证明某个名字不在其中之后，不再对这个名字发 stop 或 delete。
+- 阶段：`Idle → Reserved → Cloned → Booting → Isolated → Bootstrapped → CredentialReady → Ready → Running → Revoking → Destroying → Final`。`Quarantined` 是清理或回执失败，停后续 task/arm/repeat。`Suspended` 在调用入口看到 `lease_until` 已过时同步进入，也在 stop 之后、delete 之前（以及之后每一次破坏性派发之前）再次检查到租约已过时进入。进入是状态决定，不依赖 IO。可选的 revoke 和 `CleanupUnknown` 只在触发这次检查的调用截止仍有剩余时才派发；没有剩余就跳过，并标记需要恢复。禁止该 owner 删除，不封存，回执 cleanup 为 unknown，下次启动先 `recover`。没有计时器，也没有自动恢复。进入之后，arm、run、revoke、destroy、seal 都不能把阶段改回或续租。
+- 每步一个同步方法，调用方持有 runner、guest、账本、锁和钟。`Drop` 不 stop、不 delete、不 seal。runner、guest 和账本调用只经过一个派发函数：取调用方给出的截止、这一调用的阶段预算结束、attempt 绝对截止、以及围住该阶段的聚合结束中最早的一个。准备聚合只围住 reserve 到 ready；run 和租约不被已经结束或仍在将来的准备阶段截短。清理聚合只围住 revoke、destroy 和 seal；第一次 revoke 在派发前记下清理起点，因此也受清理结束约束。恢复只用本次调用的 deadline，不用已死行的绝对截止。调用方 helper 不自己构造 deadline。已到期入口上的可选 IO 不再另铸 `now + 预算`。读回使用同一次调用的剩余截止。stop 之后的 status 不超过 stop 的有效截止；delete 之后的缺席确认不超过 delete 的有效截止。阶段预算集中在 `budgets.rs`（§2 的上限），测试只能缩小。Stop 常量未改。
+- 所有权：fake 在 clone 派发之前把期望的化身和配置写入预约记录，成功正文必须与之相同，不一致不会覆盖已记下的期望。回复丢失后，恢复认领的是这一化身，并拒绝同名替换者。这不是真实身份源。同名目的地在 reserve 和 clone 之前拒绝。start、stop、delete 和恢复在动手前要求权威清单里的 run、化身和配置都与记录一致；缺失或歧义进入隔离，不按名字或单独的 run 标签认领。没有化身记录时，不按名字删除。guest boot 变化使本次分数失效，但清理仍可销毁已经正向识别为自己所有的 VM。
+- 停止与缺席：`state=absent` 不是进程已退出的证明。清单里没有该 clone 也不等于 tart 和 softnet 已退出。VM 一旦发出 start，若没有独立的状态报告证明二者都已退出，就不得 `cleanup_confirmed`，结果是 `CleanupFailed` / 隔离，并且不再按这个名字 stop 或 delete。从未 start 的缺席仍可确认，并且同样不再按名字 stop 或 delete。tart 或 softnet 仍为 up 的 absent 正文是畸形。`stopped_clean` 仍要求 `Stopped` 且 tart 与 softnet 都已退出；只剩 softnet 存活不是停止证明。
 - `Bootstrapped` / `CredentialReady` / `Ready` 只推进状态并记录证据。login/run 仍是 fake。不选 H1 传输，不安装 H2 guard。
-- 清理：非预期转移（含 `Revoking` / `Destroying` 上的 run、start）记录 `Unexpected` 并永久 `not_run`。超时和故障进入 `Revoking → Destroying`（stop → 确认 → delete → 权威 list 确认不存在 → 封存）。查询失败或不完整不是“已消失”。只处理账本里的精确 clone id；不按前缀删除，不删 golden 或外部 VM，不重启孤儿。登记仍先于 clone。边矩阵是每条正向边上的一种故障注入，不是每个中断前缀。
-- 恢复：`recover` 只读未封存行，先追加 `RecoveryNoted`，再按记录中的化身 stop/delete。它用本次调用的 deadline，不用已死行的绝对截止，否则绝对截止已过的孤儿无法删除。旧 attempt 仍永久 `not_run`，不恢复分数。带 `CleanupUnknown` 的行记 `OwnerDeath`，其余未封存行记 `HostCrash`。没有化身记录时，同名 VM 不删。
-- 环境违约、缺证明、边界崩溃、清理阶段的非法调用一律 `not_run`，即使 fake 曾返回 pass。只有证据完整、身份未变、且清理确认成功才保留分数。回执只记录当前原因；原先的 provisional 分数和第一因的保留留给 S11d。例如 provider 崩溃之后清理又失败，发布出去的是 `CleanupFailed`，不是两条原因。`recovery_required` 由这一行是否已分配且未封存推导。
+- 清理：非预期转移（含 `Revoking` / `Destroying` 上的 run、start）记录 `Unexpected` 并永久 `not_run`。超时和故障进入 `Revoking → Destroying`。已启动的 VM 要先有停止证明，再 delete，再由权威 list 确认不存在，然后封存。查询失败或不完整不是“已消失”。只处理账本里的精确 clone id；不按前缀删除，不删 golden 或外部 VM，不重启孤儿。期望身份的登记先于 clone 派发。边矩阵是每条正向边上的一种故障注入，不是每个中断前缀。已覆盖的中断后续是 stop 之后、delete 之后、以及隔离事实追加之后的 `Drop` 再恢复；没有声称每一个前缀。
+- 恢复：`recover` 只读未封存行，先追加 `RecoveryNoted`，再按记录中的化身 stop/delete。start 已发出而清单没有该名字时，不把缺席当成进程退出，也不按名字删除。它用本次调用的 deadline，不用已死行的绝对截止，否则绝对截止已过的孤儿无法删除。旧 attempt 仍永久 `not_run`，不恢复分数。带 `CleanupUnknown` 的行记 `OwnerDeath`，其余未封存行记 `HostCrash`。没有化身记录时，同名 VM 不删。
+- 环境违约、缺证明、边界崩溃、清理阶段的非法调用一律 `not_run`，即使 fake 曾返回 pass。只有证据完整、身份未变、且清理确认成功才保留分数。回执只记录当前原因；原先的 provisional 分数和第一因的保留留给 S11d。例如 provider 崩溃之后清理又失败，发布出去的是 `CleanupFailed`，不是两条原因。丢失的 reserve 确认若读回发现行已写入，回执 `recovery_required` 与下一次 reserve 的 `MustRecover` 一致；读回确认未写入则不要求恢复。seal 的确认丢失但读回发现行已封存，视为封存成功，不发布 `Quarantined(ReceiptFailed)`。隔离事实本身的 `CommittedLost` 仍留下未封存行，下一次 reserve 必须先恢复。
 
 仍依赖后续卡，本卡不实现：
 

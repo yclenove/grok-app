@@ -262,7 +262,7 @@ fn success_trace_keeps_pass_and_rejects_later_events() -> Result<(), String> {
         .borrow()
         .query(&clone, query(&io.clock))
         .map_err(|err| format!("{err:?}"))?;
-    if !row.is_sealed() || row.facts() != [LedgerFact::CloneIssued] {
+    if !row.is_sealed() || row.facts() != [LedgerFact::CloneIssued, LedgerFact::StartIssued] {
         return Err(format!("row {row:?}"));
     }
     let runner_len = commands.len();

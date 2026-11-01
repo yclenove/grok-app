@@ -5,14 +5,14 @@
 //! instant already passed does not block the deletion a restart still owes,
 //! and the old attempt stays `not_run` with no score.
 
-use super::super::deadline::{HostClock, QueryDeadline, SealDeadline};
+use super::super::deadline::HostClock;
 use super::super::guest::GuestChannel;
 use super::super::identity::{CloneId, RunId};
 use super::super::ledger::{AttemptLedger, LedgerFact};
 use super::super::lock::CleanupLock;
 use super::super::receipt::{AttemptOutcome, AttemptReceipt, NotRunReason, Phase};
 use super::super::runner::TartRunner;
-use super::{Attempt, CleanupDeadlines, StepError};
+use super::{Attempt, CleanupDeadlines, Scope, StepError};
 
 impl<'a, R, G, L, K, C> Attempt<'a, R, G, L, K, C>
 where
@@ -27,9 +27,10 @@ where
     /// Does not clone or start. Appends [`LedgerFact::RecoveryNoted`] before
     /// stop or delete. An append failure deletes nothing. A row with
     /// [`LedgerFact::CleanupUnknown`] is [`NotRunReason::OwnerDeath`]; any
-    /// other unsealed row is [`NotRunReason::HostCrash`]. Neither keeps a
-    /// score. Does not block. The returned receipts are not kept on the
-    /// machine, so a later reserve is a new attempt.
+    /// other unsealed row is [`NotRunReason::HostCrash`]. A row whose start
+    /// was issued is not treated as cleaned up just because a list omits the
+    /// name. Neither keeps a score. Does not block. The returned receipts are
+    /// not kept on the machine, so a later reserve is a new attempt.
     pub fn recover(
         &mut self,
         deadlines: &CleanupDeadlines,
@@ -48,18 +49,14 @@ where
         if self.clock.now() >= deadlines.query.at() {
             return Err(StepError::Expired);
         }
-        let locked = self
-            .earlier(deadlines.query.at(), self.budgets.query, None)
-            .map_err(|_| StepError::Expired)?;
-        if let Err(err) = self.lock.try_acquire(locked) {
-            return Err(self.on_lock(err));
-        }
-        let listed = self
-            .earlier(deadlines.query.at(), self.budgets.query, None)
-            .map_err(|_| StepError::Expired)?;
+        self.admit(
+            deadlines.query.at(),
+            self.budgets.query,
+            Scope::Recovery,
+            None,
+        )?;
         let rows = self
-            .ledger
-            .rows(QueryDeadline::from_instant(listed))
+            .ledger_rows(deadlines.query.at(), Scope::Recovery, None)
             .map_err(StepError::Ledger)?;
         let mut receipts = Vec::new();
         for row in rows {
@@ -73,40 +70,45 @@ where
             } else {
                 NotRunReason::HostCrash
             };
-            let note_at = self
-                .earlier(deadlines.query.at(), self.budgets.query, None)
-                .map_err(|_| StepError::Expired)?;
-            if let Err(err) = self.ledger.append(
+            if let Err(err) = self.ledger_append(
                 &clone,
                 LedgerFact::RecoveryNoted,
-                QueryDeadline::from_instant(note_at),
+                deadlines.query.at(),
+                Scope::Recovery,
+                None,
             ) {
                 return self.stop_recovery(
                     &run,
                     &clone,
+                    deadlines.query.at(),
                     NotRunReason::ReceiptFailed,
                     StepError::Ledger(err),
                 );
             }
-            // Identity stays on the row. Copying it onto this Idle attempt would
-            // leak the dead reservation into the next reserve.
-            if let Err(reason) =
-                self.reclaim(&run, &clone, deadlines, None, row.expected().cloned())
-            {
-                self.mark_quarantine(&clone, deadlines);
-                return self.stop_recovery(&run, &clone, reason, StepError::Cleanup(reason));
-            }
-            let seal_at = self
-                .earlier(deadlines.seal.at(), self.budgets.seal, None)
-                .map_err(|_| StepError::Expired)?;
-            if let Err(err) = self
-                .ledger
-                .seal(&clone, SealDeadline::from_instant(seal_at))
-            {
+            let started = row.facts().contains(&LedgerFact::StartIssued);
+            if let Err(reason) = self.reclaim(
+                &run,
+                &clone,
+                deadlines,
+                Scope::Recovery,
+                started,
+                row.expected().cloned(),
+            ) {
                 self.mark_quarantine(&clone, deadlines);
                 return self.stop_recovery(
                     &run,
                     &clone,
+                    deadlines.query.at(),
+                    reason,
+                    StepError::Cleanup(reason),
+                );
+            }
+            if let Err(err) = self.ledger_seal(&clone, deadlines.seal.at(), Scope::Recovery) {
+                self.mark_quarantine(&clone, deadlines);
+                return self.stop_recovery(
+                    &run,
+                    &clone,
+                    deadlines.query.at(),
                     NotRunReason::ReceiptFailed,
                     StepError::Ledger(err),
                 );
@@ -128,13 +130,12 @@ where
     }
 
     fn mark_quarantine(&mut self, clone: &CloneId, deadlines: &CleanupDeadlines) {
-        let Ok(at) = self.earlier(deadlines.query.at(), self.budgets.query, None) else {
-            return;
-        };
-        let _ = self.ledger.append(
+        let _ = self.ledger_append(
             clone,
             LedgerFact::Quarantined,
-            QueryDeadline::from_instant(at),
+            deadlines.query.at(),
+            Scope::Recovery,
+            None,
         );
     }
 
@@ -142,13 +143,14 @@ where
         &mut self,
         run: &RunId,
         clone: &CloneId,
+        query_at: super::super::deadline::MonoInstant,
         reason: NotRunReason,
         error: StepError,
     ) -> Result<Vec<AttemptReceipt>, StepError> {
         self.halted = true;
         self.run = Some(run.clone());
         self.clone_id = Some(clone.clone());
-        self.sealed = self.row_is_sealed();
+        self.sealed = self.row_sealed(query_at, Scope::Recovery);
         if self.trigger.is_none() {
             self.trigger = Some(reason);
         }
