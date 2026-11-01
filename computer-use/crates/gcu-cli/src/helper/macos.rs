@@ -492,9 +492,7 @@ fn fake_driver(scene: &str) -> Result<gcu_driver_fake::FakeDriver, Failure> {
 }
 
 fn socket_path(uid: u32) -> PathBuf {
-    std::env::temp_dir()
-        .join("grok-computer-use")
-        .join(format!("{uid}.sock"))
+    super::identity::ordinary_socket(&std::env::temp_dir(), uid)
 }
 
 fn current_uid() -> u32 {

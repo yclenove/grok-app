@@ -12,6 +12,7 @@ pub mod host;
 pub mod http;
 mod image_cache;
 mod instructions;
+mod lease_view;
 pub mod lifecycle;
 mod params;
 mod result;
@@ -128,5 +129,9 @@ where
     }
 }
 
+#[cfg(test)]
+mod access_retire_tests;
+#[cfg(test)]
+mod lease_cache_tests;
 #[cfg(test)]
 mod stdio_tests;

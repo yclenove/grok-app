@@ -24,7 +24,9 @@ impl ScopeLease {
     /// Acquire all output locks before calling; the closure must not block on
     /// another mutex. Blocking: waits for a writer already in this section.
     /// Timeout: none (the armed test pause is bounded). Cancellation: none.
-    /// A poisoned lock is recovered. A later revoke does not roll back success.
+    /// A poisoned lock is recovered. A later revoke does not change the value
+    /// returned here. A later read hides a product whose epoch is no longer
+    /// current.
     pub fn commit_if_current<T>(
         &self,
         authority: &[(&str, u64)],
@@ -84,8 +86,8 @@ impl ScopeLease {
     /// Publishers enter this explicitly outside `commit_if_current`.
     /// Memory only. Armed pauses are bounded; no cancellation. Production leaves
     /// this disarmed.
-    /// Not entered when the authority check fails. A revoke here does not undo
-    /// the registration.
+    /// Not entered when the authority check fails. A revoke here does not change
+    /// the value already returned. A later read hides a stale epoch.
     #[must_use]
     pub fn commit_after_gate(&self) -> Arc<crate::action::PublishGate> {
         Arc::clone(&self.shared.commit_after)

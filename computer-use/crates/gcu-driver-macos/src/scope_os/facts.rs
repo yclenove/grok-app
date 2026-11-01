@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(target_os = "macos")]
 use std::sync::Arc;
-#[cfg(any(test, target_os = "macos"))]
 use std::sync::Mutex;
 
 use gcu_protocol::Rect;
@@ -54,7 +53,6 @@ pub struct Snapshot {
 ///
 /// Memory only. No blocking, timeout, or cancellation. `boot_time` is ignored
 /// so a wall-clock reset cannot make two boots compare equal.
-#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn boot_identity_from(uuid: Option<&str>, boot_time: Option<&str>) -> Option<String> {
     let _boot_time_is_not_identity = boot_time;
     let uuid = uuid.map(str::trim).filter(|value| !value.is_empty())?;
@@ -112,6 +110,172 @@ pub trait OsFacts: Send + Sync {
     #[cfg(target_os = "macos")]
     fn token_book(&self) -> Option<Arc<TokenBook>> {
         None
+    }
+    /// Current code identity of `pid`.
+    ///
+    /// Real macOS guest observation is not wired: 真实读取 not_run，缺失即拒绝.
+    /// The default is `None`. Callers refuse. A static signature read of an
+    /// executable path is not a substitute and must not be reported as success.
+    /// Memory only. No timeout or cancellation.
+    fn code_identity(&self, _pid: u32) -> Option<CodeIdentity> {
+        None
+    }
+}
+
+/// Code identity observed for one live process. A path is not included.
+///
+/// `None` from the reader is absence. Callers refuse. Do not fill a missing
+/// field from the peer's claim or from a file on disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIdentity {
+    /// Codesign identifier (`kSecCodeInfoIdentifier`).
+    pub identifier: String,
+    /// Team id, when the observed signature has one.
+    pub team_id: Option<String>,
+    /// Code-directory hash, lowercase hex.
+    pub cdhash: String,
+}
+
+/// Process-instance facts a scoped helper re-reads at admission.
+///
+/// This is the [`OsFacts`] surface used for a peer: boot session, process
+/// start, and the code identity of that process. A pathname is not part of
+/// the check. Implementations must not answer from a cache that can outlive
+/// the process. Memory only. No timeout or cancellation. A live macOS body
+/// may block on the same budget as [`OsFacts`].
+pub trait ProcessFacts: Send + Sync {
+    /// Boot session, or `None` when it cannot be re-derived.
+    fn boot_identity(&self) -> Option<String>;
+    /// Process start in microseconds, or `None` when the pid is gone or the time is zero.
+    fn process_start_us(&self, pid: u32) -> Option<u64>;
+    /// Current code identity of `pid`, or `None` when it cannot be read.
+    ///
+    /// Real macOS guest observation is not wired: 真实读取 not_run，缺失即拒绝.
+    /// A live source returns `None`. Callers refuse. This does not report a
+    /// pathname's static signature as a successful read.
+    fn code_identity(&self, pid: u32) -> Option<CodeIdentity>;
+}
+
+impl<T> ProcessFacts for T
+where
+    T: OsFacts + ?Sized,
+{
+    fn boot_identity(&self) -> Option<String> {
+        OsFacts::boot_identity(self)
+    }
+    fn process_start_us(&self, pid: u32) -> Option<u64> {
+        OsFacts::process_start_us(self, pid)
+    }
+    fn code_identity(&self, pid: u32) -> Option<CodeIdentity> {
+        OsFacts::code_identity(self, pid)
+    }
+}
+
+/// Injected process facts. No process, window, or accessibility call.
+///
+/// Used by the scoped helper handshake. A missing pid or a zero start is absence.
+#[derive(Default)]
+pub struct ScriptedFacts {
+    boot: Mutex<Option<String>>,
+    boot_time: Mutex<Option<String>>,
+    procs: Mutex<HashMap<u32, u64>>,
+    /// Code identity by pid. A missing pid reads as `None` (fail closed).
+    codes: Mutex<HashMap<u32, CodeIdentity>>,
+}
+
+impl ScriptedFacts {
+    /// Empty facts. Every read is `None` until a setter runs.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace the boot identity. An empty string is stored and then rejected.
+    pub fn set_boot(&self, boot: impl Into<String>) {
+        *self.boot.lock().unwrap_or_else(|err| err.into_inner()) = Some(boot.into());
+    }
+
+    /// Store a readable boot time. It is not accepted as boot identity.
+    pub fn set_boot_time(&self, boot_time: impl Into<String>) {
+        *self.boot_time.lock().unwrap_or_else(|err| err.into_inner()) = Some(boot_time.into());
+    }
+
+    /// Replace one process start. Zero is stored and then rejected on read.
+    pub fn set_process(&self, pid: u32, start_us: u64) {
+        self.procs
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(pid, start_us);
+    }
+
+    /// Remove a process so the next read looks like it exited.
+    pub fn drop_process(&self, pid: u32) {
+        self.procs
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&pid);
+    }
+
+    /// Replace the code identity observed for `pid`.
+    ///
+    /// The next [`OsFacts::code_identity`] read returns this value. Memory only.
+    /// No timeout or cancellation. This does not change the process start.
+    pub fn set_code(&self, pid: u32, code: CodeIdentity) {
+        self.codes
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(pid, code);
+    }
+
+    /// Drop the code identity so the next read is absence.
+    ///
+    /// Memory only. No timeout or cancellation. Callers must refuse `None`.
+    pub fn drop_code(&self, pid: u32) {
+        self.codes
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&pid);
+    }
+}
+
+impl OsFacts for ScriptedFacts {
+    fn boot_identity(&self) -> Option<String> {
+        let boot = self.boot.lock().unwrap_or_else(|err| err.into_inner());
+        let boot_time = self.boot_time.lock().unwrap_or_else(|err| err.into_inner());
+        boot_identity_from(boot.as_deref(), boot_time.as_deref())
+    }
+
+    fn process_start_us(&self, pid: u32) -> Option<u64> {
+        let start = *self
+            .procs
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(&pid)?;
+        if start == 0 {
+            None
+        } else {
+            Some(start)
+        }
+    }
+
+    fn executable_path(&self, _pid: u32) -> Option<String> {
+        None
+    }
+
+    fn windows(&self) -> Option<Vec<OsWindow>> {
+        None
+    }
+
+    fn element(&self, _pid: u32, _id: u64) -> Option<ElementFact> {
+        None
+    }
+
+    fn code_identity(&self, pid: u32) -> Option<CodeIdentity> {
+        self.codes
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(&pid)
+            .cloned()
     }
 }
 

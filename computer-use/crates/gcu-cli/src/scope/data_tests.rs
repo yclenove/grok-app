@@ -77,3 +77,24 @@ async fn idle_bridge_wakes_at_the_engine_deadline_without_control_watching() {
     .await
     .unwrap();
 }
+
+/// Generation 1 stays admitted while the lease has already moved to generation 2.
+///
+/// The plane is not suspended. `request` would still succeed. Deleting both
+/// generation comparisons in `admit_data` makes this return `Ok`.
+#[test]
+fn admit_data_rejects_when_admitted_generation_lags_the_lease() {
+    let plane = DataPlane::new();
+    plane.open_generation(1);
+    let lease = ScopeLease::install(scope());
+    let next = FixtureScope::try_new("run", 2, "engine", "desktop", "control", vec![]).unwrap();
+    lease.rebind(next).unwrap();
+    assert_eq!(lease.current().unwrap().generation(), 2);
+    assert!(plane.is_open());
+    assert!(plane.allows(1));
+    assert!(!plane.allows(2));
+    let effects = plane.effects();
+    assert!(admit_data(&plane, &lease).is_err());
+    assert_eq!(plane.effects(), effects);
+    assert!(plane.request().is_ok());
+}

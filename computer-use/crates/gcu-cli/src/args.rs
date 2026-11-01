@@ -80,6 +80,11 @@ pub(crate) enum Command {
     /// The process serves the per-user helper socket. Accessibility and screen
     /// recording are attributed to this app, not to the terminal that invoked `open`.
     Agent,
+    /// Dedicated scoped helper. It does not share the ordinary helper's socket,
+    /// auth store, or Stop store. Real launch and FD handoff are not available;
+    /// this entry fails closed.
+    #[command(hide = true, name = "scoped-agent")]
+    ScopedAgent,
     /// Run an App-managed engine over private inherited Host and Stop channels.
     Engine {
         #[arg(

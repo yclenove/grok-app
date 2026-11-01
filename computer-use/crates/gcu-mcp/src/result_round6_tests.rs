@@ -338,7 +338,7 @@ async fn connection_export_and_cached_image_stay_empty_before_commit() {
 }
 
 #[tokio::test]
-async fn revoke_before_commit_hides_the_spill_and_after_commit_keeps_it() {
+async fn revoke_before_commit_hides_the_spill_and_revoke_after_commit_reclaims_it() {
     let scope = lease();
     let results = desk(Some(scope.clone()));
     let gate = scope.commit_before_gate();
@@ -396,13 +396,22 @@ async fn revoke_before_commit_hides_the_spill_and_after_commit_keeps_it() {
     watcher.join().unwrap();
     let rendered = serde_json::to_string(&published).unwrap();
     assert_eq!(published.is_error, Some(false), "{rendered}");
-    let rows = files.export().unwrap();
+    let paths = artifact_paths(&rendered);
+    assert!(!paths.is_empty(), "{rendered}");
     assert!(
-        rows.iter().any(|(_, bytes)| bytes
-            .windows(b"CANARY-AFTER".len())
-            .any(|window| window == b"CANARY-AFTER")),
-        "revoke rolled back a committed spill: {rendered}"
+        paths.iter().all(|path| path.exists()),
+        "revoked bytes stay on disk until export: {paths:?}"
     );
+    let exported = files.export().unwrap();
+    assert!(
+        paths.iter().all(|path| !path.exists()),
+        "export left a revoked file: {paths:?}"
+    );
+    assert!(
+        exported.is_empty(),
+        "revoked spill stayed readable: {rendered}"
+    );
+    assert!(!files.contains_bytes(b"CANARY-AFTER"));
     files.close().unwrap();
 }
 
@@ -441,13 +450,11 @@ async fn revoke_during_commit_waits_until_registration_finishes() {
     watcher.join().unwrap();
     let rendered = serde_json::to_string(&published).unwrap();
     assert_eq!(published.is_error, Some(false), "{rendered}");
-    let rows = files.export().unwrap();
     assert!(
-        rows.iter().any(|(_, bytes)| bytes
-            .windows(b"CANARY-DURING".len())
-            .any(|window| window == b"CANARY-DURING")),
-        "{rendered}"
+        files.export().unwrap().is_empty(),
+        "revoked spill stayed readable: {rendered}"
     );
+    assert!(!files.contains_bytes(b"CANARY-DURING"));
     files.close().unwrap();
 }
 
@@ -516,7 +523,7 @@ async fn revoke_while_cache_admission_waits_does_not_deadlock_or_publish() {
 }
 
 #[tokio::test]
-async fn revoke_after_image_commit_keeps_the_entire_published_batch() {
+async fn revoke_after_image_commit_hides_the_published_batch() {
     let scope = lease();
     let results = desk(Some(scope.clone()));
     let gate = scope.commit_after_gate();
@@ -545,10 +552,114 @@ async fn revoke_after_image_commit_keeps_the_entire_published_batch() {
     let result = results.state(state).await;
     watcher.join().unwrap();
     assert_eq!(result.is_error, Some(false));
-    assert!(results.images.get("i_private").is_some());
-    assert_eq!(results.files.export().unwrap().len(), 2);
-    assert!(results.files.contains_bytes(b"CANARY-COMMITTED"));
+    let rendered = serde_json::to_string(&result).unwrap();
+    let paths = artifact_paths(&rendered);
+    assert!(!paths.is_empty(), "{rendered}");
+    assert!(
+        paths.iter().all(|path| path.exists()),
+        "revoked files stay until export: {paths:?}"
+    );
+    assert!(
+        results.images.resident("i_private"),
+        "revoked pixels stay until get"
+    );
+    let exported = results.files.export().unwrap();
+    assert!(
+        paths.iter().all(|path| !path.exists()),
+        "export left a revoked file: {paths:?}"
+    );
+    assert!(exported.is_empty(), "revoked generation stayed readable");
+    let image = results.images.get("i_private");
+    assert!(
+        !results.images.resident("i_private"),
+        "get left the revoked row resident"
+    );
+    assert!(image.is_none(), "revoked generation stayed readable");
+    assert!(!results.files.contains_bytes(b"CANARY-COMMITTED"));
     results.files.close().unwrap();
+}
+
+fn artifact_paths(rendered: &str) -> Vec<std::path::PathBuf> {
+    // Tool JSON escapes `\`, so a Windows path is not a raw `C:\...` substring.
+    // Parse first, then classify with `Path::is_absolute` (drive prefix or `/`).
+    let text = rendered_text(rendered);
+    let mut paths = Vec::new();
+    for marker in ["full text: ", "Screenshot file: "] {
+        for chunk in text.split(marker).skip(1) {
+            let stop = chunk
+                .find(|ch: char| ch.is_whitespace() || matches!(ch, ']' | '"' | ','))
+                .unwrap_or(chunk.len());
+            let path = std::path::Path::new(chunk[..stop].trim());
+            if path.is_absolute() {
+                paths.push(path.to_path_buf());
+            }
+        }
+    }
+    paths
+}
+
+fn rendered_text(rendered: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(rendered) else {
+        return rendered.to_string();
+    };
+    let mut text = String::new();
+    push_json_strings(&value, &mut text);
+    text
+}
+
+fn push_json_strings(value: &serde_json::Value, text: &mut String) {
+    match value {
+        serde_json::Value::String(item) => {
+            text.push_str(item);
+            text.push('\n');
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                push_json_strings(item, text);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values() {
+                push_json_strings(item, text);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn artifact_paths_parse_json_strings_before_taking_absolute_paths() {
+    let logical = "full text: C:\\session\\0.png\nScreenshot file: /tmp/shot.png\nScreenshot file: /tmp/ses\\sion/0.png\n";
+    let rendered = serde_json::to_string(&serde_json::json!({
+        "content": [{ "text": logical }]
+    }))
+    .unwrap();
+    assert!(
+        rendered.contains(r"C:\\session\\0.png"),
+        "fixture must keep the escaped backslash: {rendered}"
+    );
+    assert!(
+        rendered.contains(r"/tmp/ses\\sion/0.png"),
+        "fixture must keep the escaped backslash: {rendered}"
+    );
+    let paths = artifact_paths(&rendered);
+    let shot = std::path::Path::new("/tmp/shot.png");
+    let nested = std::path::Path::new(r"/tmp/ses\sion/0.png");
+    let windows = std::path::Path::new(r"C:\session\0.png");
+    if shot.is_absolute() {
+        assert!(paths.iter().any(|path| path == shot), "{paths:?}");
+    }
+    if nested.is_absolute() {
+        assert!(
+            paths.iter().any(|path| path == nested),
+            "unescape skipped or backslash still ends the path: {paths:?} from {rendered}"
+        );
+    }
+    if windows.is_absolute() {
+        assert!(paths.iter().any(|path| path == windows), "{paths:?}");
+    } else {
+        assert!(paths.iter().all(|path| path != windows), "{paths:?}");
+    }
 }
 
 #[derive(Debug, Default)]

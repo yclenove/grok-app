@@ -12,15 +12,18 @@ pub mod client;
 mod error;
 #[cfg(unix)]
 pub mod frame;
+pub(crate) mod identity;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(unix)]
 pub mod proxy;
+mod scope_link;
 #[cfg(unix)]
 mod serve;
 
 use crate::exit::Failure;
 pub use error::HelperError;
+pub(crate) use scope_link::run_scoped_agent;
 
 /// Run `gcu agent`.
 ///

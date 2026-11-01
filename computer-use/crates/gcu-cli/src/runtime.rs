@@ -18,6 +18,9 @@ pub(crate) async fn run(cli: Cli) -> Result<u8, Failure> {
     if matches!(cli.command, Some(Command::Agent)) {
         return dispatch_agent(&cli).await;
     }
+    if matches!(cli.command, Some(Command::ScopedAgent)) {
+        return crate::helper::run_scoped_agent().await;
+    }
     if let Some(Command::TurnEnded { session, payload }) = cli.command.as_ref() {
         let mut args = Vec::new();
         if let Some(session) = session {
