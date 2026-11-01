@@ -45,4 +45,4 @@ mod worker;
 pub use driver::{MacElement, MacosDriver};
 #[cfg(target_os = "macos")]
 pub use real::RealMacApi;
-pub use scope_os::{ProcessFacts, ScriptedFacts};
+pub use scope_os::{CodeIdentity, ProcessFacts, ScriptedFacts};

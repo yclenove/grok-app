@@ -7,18 +7,21 @@ use crate::helper::identity::{
     identities_are_distinct, ordinary_socket, scoped_socket, StoreLedger, StoreRole,
 };
 use crate::scope::DataPlane;
-use gcu_driver_macos::ScriptedFacts;
+use gcu_driver_macos::{CodeIdentity, ScriptedFacts};
 use gcu_host_protocol::{
     codec,
     scope::{Ack, Control, Scope, LEASE, VERSION},
     Error,
 };
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc, Mutex,
 };
+use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 const BOOT: &str = "boot-session";
 const CDHASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -48,12 +51,50 @@ fn identities() -> ScopedIdentities {
     }
 }
 
+fn observed(wire: &CodeWire) -> CodeIdentity {
+    CodeIdentity {
+        identifier: wire.identifier.clone(),
+        team_id: wire.team_id.clone(),
+        cdhash: wire.cdhash.clone(),
+    }
+}
+
 fn primed() -> Arc<ScriptedFacts> {
     let facts = Arc::new(ScriptedFacts::new());
     facts.set_boot(BOOT);
     facts.set_process(11, 1_000);
     facts.set_process(22, 2_000);
+    let ids = identities();
+    facts.set_code(ids.supervisor.pid, observed(&ids.supervisor_code));
+    facts.set_code(ids.helper.pid, observed(&ids.helper_code));
     facts
+}
+
+#[derive(Clone, Copy)]
+enum LiveFault {
+    Cdhash,
+    Team,
+    Identifier,
+    Missing,
+}
+
+fn apply_live_fault(facts: &ScriptedFacts, pid: u32, fault: LiveFault) {
+    let ids = identities();
+    let mut code = if pid == ids.helper.pid {
+        observed(&ids.helper_code)
+    } else {
+        observed(&ids.supervisor_code)
+    };
+    match fault {
+        LiveFault::Cdhash => code.cdhash = "b".repeat(40),
+        LiveFault::Team => code.team_id = Some("TEAM123456".into()),
+        LiveFault::Identifier => code.identifier = "other.identity".into(),
+        LiveFault::Missing => {
+            facts.drop_code(pid);
+            return;
+        }
+    }
+    facts.set_code(pid, code);
 }
 
 fn scope_record() -> Scope {
@@ -93,8 +134,128 @@ struct Ends {
     stores: Arc<StoreLedger>,
 }
 
+/// Parks the helper ACK flush so a test can change live code while the write
+/// is still outstanding. The first `allow` flushes pass. Later flushes wait
+/// until [`FlushHold::release`].
+struct FlushHold {
+    allow: AtomicUsize,
+    held: AtomicBool,
+    release: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl FlushHold {
+    fn new(allow_flushes: usize) -> Self {
+        Self {
+            allow: AtomicUsize::new(allow_flushes),
+            held: AtomicBool::new(false),
+            release: Mutex::new(None),
+        }
+    }
+
+    fn release(&self) {
+        if let Some(tx) = self.release.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+enum FlushMode {
+    Decide,
+    Forward,
+    Hold(tokio::sync::oneshot::Receiver<()>),
+}
+
+struct HeldFlush<T> {
+    inner: T,
+    hold: Arc<FlushHold>,
+    mode: FlushMode,
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for HeldFlush<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for HeldFlush<T> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        loop {
+            match std::mem::replace(&mut this.mode, FlushMode::Decide) {
+                FlushMode::Decide => {
+                    let parked = this
+                        .hold
+                        .allow
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                            left.checked_sub(1)
+                        })
+                        .is_err();
+                    if parked {
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        *this.hold.release.lock().unwrap() = Some(tx);
+                        this.hold.held.store(true, Ordering::SeqCst);
+                        this.mode = FlushMode::Hold(rx);
+                    } else {
+                        this.mode = FlushMode::Forward;
+                    }
+                }
+                FlushMode::Forward => {
+                    let poll = Pin::new(&mut this.inner).poll_flush(cx);
+                    this.mode = if poll.is_ready() {
+                        FlushMode::Decide
+                    } else {
+                        FlushMode::Forward
+                    };
+                    return poll;
+                }
+                FlushMode::Hold(mut rx) => match Pin::new(&mut rx).poll(cx) {
+                    Poll::Pending => {
+                        this.mode = FlushMode::Hold(rx);
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(_) => this.mode = FlushMode::Forward,
+                },
+            }
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
 fn start() -> Ends {
     let (supervisor, helper) = tokio::io::duplex(64 * 1024);
+    launch(supervisor, Box::new(helper))
+}
+
+fn start_held(allow_flushes: usize) -> (Ends, Arc<FlushHold>) {
+    let (supervisor, helper) = tokio::io::duplex(64 * 1024);
+    let hold = Arc::new(FlushHold::new(allow_flushes));
+    let stream = HeldFlush {
+        inner: helper,
+        hold: Arc::clone(&hold),
+        mode: FlushMode::Decide,
+    };
+    (launch(supervisor, Box::new(stream)), hold)
+}
+
+fn launch(
+    supervisor: tokio::io::DuplexStream,
+    helper: gcu_host_protocol::transport::BoxStream,
+) -> Ends {
     let facts = primed();
     let plane = DataPlane::new();
     let hits = Arc::new(AtomicUsize::new(0));
@@ -108,7 +269,7 @@ fn start() -> Ends {
     let serve_plane = plane.clone();
     let serve_hits = Arc::clone(&hits);
     let task = tokio::spawn(super::run_helper(
-        Box::new(helper),
+        helper,
         driver.clone(),
         Arc::clone(&stores),
         gate,
@@ -158,6 +319,16 @@ async fn finish_never_opened(ends: Ends) {
 
 async fn finish_revoked(ends: Ends) {
     finish(ends, false).await;
+}
+
+async fn wait_held(hold: &FlushHold) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !hold.held.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("ack flush parked");
 }
 
 async fn read_ack(ends: &mut Ends) -> super::ScopedAck {
@@ -458,4 +629,99 @@ fn ack_mismatch_is_authentication_failure() {
         ),
         Err(Error::Authentication)
     ));
+}
+
+#[test]
+fn unchanged_ack_wire_is_refused_when_live_code_changes() {
+    let faults = [
+        LiveFault::Cdhash,
+        LiveFault::Team,
+        LiveFault::Identifier,
+        LiveFault::Missing,
+    ];
+    for pid in [11, 22] {
+        for fault in faults {
+            let facts = primed();
+            let ids = identities();
+            apply_live_fault(&facts, pid, fault);
+            let expected = Ack {
+                run_id: "run".into(),
+                generation: 1,
+                scope_digest: scope_record().digest("run", 1).unwrap(),
+            };
+            let body = super::ScopedAck {
+                run_id: expected.run_id.clone(),
+                generation: expected.generation,
+                scope_digest: expected.scope_digest.clone(),
+                peer: ids.helper.clone(),
+                code: ids.helper_code.clone(),
+            };
+            // The supervisor check reads the helper identity named by the body.
+            if pid == ids.helper.pid {
+                assert!(
+                    matches!(
+                        accept_helper_ack(
+                            &body,
+                            &expected,
+                            &ids.helper,
+                            &ids.helper_code,
+                            facts.as_ref()
+                        ),
+                        Err(Error::Authentication)
+                    ),
+                    "ack check must read the helper"
+                );
+            }
+            let encoder = super::ack_encoder(
+                Arc::clone(&facts) as Arc<dyn gcu_driver_macos::ProcessFacts>,
+                ids,
+            );
+            assert!(
+                encoder(&expected).is_err(),
+                "ack encode must read pid {pid}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn unchanged_wire_live_code_is_refused_at_admit_ack_and_recheck() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let faults = [
+            LiveFault::Cdhash,
+            LiveFault::Team,
+            LiveFault::Identifier,
+            LiveFault::Missing,
+        ];
+        for pid in [11, 22] {
+            for fault in faults {
+                let mut admitted = start();
+                apply_live_fault(&admitted.facts, pid, fault);
+                codec::write_frame(&mut admitted.supervisor, &good_hello(1))
+                    .await
+                    .unwrap();
+                finish_never_opened(admitted).await;
+
+                let (mut pending, hold) = start_held(0);
+                codec::write_frame(&mut pending.supervisor, &good_hello(1))
+                    .await
+                    .unwrap();
+                wait_held(&hold).await;
+                apply_live_fault(&pending.facts, pid, fault);
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                hold.release();
+                finish_never_opened(pending).await;
+
+                let mut live = start();
+                codec::write_frame(&mut live.supervisor, &good_hello(1))
+                    .await
+                    .unwrap();
+                let _ = read_ack(&mut live).await;
+                apply_live_fault(&live.facts, pid, fault);
+                finish_revoked(live).await;
+            }
+        }
+    })
+    .await
+    .unwrap();
 }

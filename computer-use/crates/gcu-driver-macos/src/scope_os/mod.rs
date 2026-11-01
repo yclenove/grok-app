@@ -23,7 +23,7 @@ mod tests;
 
 pub(crate) use deliver::PostView;
 pub(crate) use evidence::{not_proved, Evidence};
-pub use facts::{ProcessFacts, ScriptedFacts};
+pub use facts::{CodeIdentity, ProcessFacts, ScriptedFacts};
 pub(crate) use job::JobScope;
 pub(crate) use spi::ax_window_status;
 

@@ -111,19 +111,49 @@ pub trait OsFacts: Send + Sync {
     fn token_book(&self) -> Option<Arc<TokenBook>> {
         None
     }
+    /// Current code identity of `pid`.
+    ///
+    /// Real macOS guest observation is not wired: 真实读取 not_run，缺失即拒绝.
+    /// The default is `None`. Callers refuse. A static signature read of an
+    /// executable path is not a substitute and must not be reported as success.
+    /// Memory only. No timeout or cancellation.
+    fn code_identity(&self, _pid: u32) -> Option<CodeIdentity> {
+        None
+    }
+}
+
+/// Code identity observed for one live process. A path is not included.
+///
+/// `None` from the reader is absence. Callers refuse. Do not fill a missing
+/// field from the peer's claim or from a file on disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIdentity {
+    /// Codesign identifier (`kSecCodeInfoIdentifier`).
+    pub identifier: String,
+    /// Team id, when the observed signature has one.
+    pub team_id: Option<String>,
+    /// Code-directory hash, lowercase hex.
+    pub cdhash: String,
 }
 
 /// Process-instance facts a scoped helper re-reads at admission.
 ///
-/// This is the [`OsFacts`] surface used for a peer: boot session and process
-/// start. A pathname is not part of the check. Implementations must not answer
-/// from a cache that can outlive the process. Memory only. No timeout or
-/// cancellation. A live macOS body may block on the same budget as [`OsFacts`].
+/// This is the [`OsFacts`] surface used for a peer: boot session, process
+/// start, and the code identity of that process. A pathname is not part of
+/// the check. Implementations must not answer from a cache that can outlive
+/// the process. Memory only. No timeout or cancellation. A live macOS body
+/// may block on the same budget as [`OsFacts`].
 pub trait ProcessFacts: Send + Sync {
     /// Boot session, or `None` when it cannot be re-derived.
     fn boot_identity(&self) -> Option<String>;
     /// Process start in microseconds, or `None` when the pid is gone or the time is zero.
     fn process_start_us(&self, pid: u32) -> Option<u64>;
+    /// Current code identity of `pid`, or `None` when it cannot be read.
+    ///
+    /// Real macOS guest observation is not wired: 真实读取 not_run，缺失即拒绝.
+    /// A live source returns `None`. Callers refuse. This does not report a
+    /// pathname's static signature as a successful read.
+    fn code_identity(&self, pid: u32) -> Option<CodeIdentity>;
 }
 
 impl<T> ProcessFacts for T
@@ -136,6 +166,9 @@ where
     fn process_start_us(&self, pid: u32) -> Option<u64> {
         OsFacts::process_start_us(self, pid)
     }
+    fn code_identity(&self, pid: u32) -> Option<CodeIdentity> {
+        OsFacts::code_identity(self, pid)
+    }
 }
 
 /// Injected process facts. No process, window, or accessibility call.
@@ -146,6 +179,8 @@ pub struct ScriptedFacts {
     boot: Mutex<Option<String>>,
     boot_time: Mutex<Option<String>>,
     procs: Mutex<HashMap<u32, u64>>,
+    /// Code identity by pid. A missing pid reads as `None` (fail closed).
+    codes: Mutex<HashMap<u32, CodeIdentity>>,
 }
 
 impl ScriptedFacts {
@@ -176,6 +211,27 @@ impl ScriptedFacts {
     /// Remove a process so the next read looks like it exited.
     pub fn drop_process(&self, pid: u32) {
         self.procs
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&pid);
+    }
+
+    /// Replace the code identity observed for `pid`.
+    ///
+    /// The next [`OsFacts::code_identity`] read returns this value. Memory only.
+    /// No timeout or cancellation. This does not change the process start.
+    pub fn set_code(&self, pid: u32, code: CodeIdentity) {
+        self.codes
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(pid, code);
+    }
+
+    /// Drop the code identity so the next read is absence.
+    ///
+    /// Memory only. No timeout or cancellation. Callers must refuse `None`.
+    pub fn drop_code(&self, pid: u32) {
+        self.codes
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .remove(&pid);
@@ -212,6 +268,14 @@ impl OsFacts for ScriptedFacts {
 
     fn element(&self, _pid: u32, _id: u64) -> Option<ElementFact> {
         None
+    }
+
+    fn code_identity(&self, pid: u32) -> Option<CodeIdentity> {
+        self.codes
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(&pid)
+            .cloned()
     }
 }
 

@@ -157,7 +157,7 @@ where
     let peer_facts = Arc::clone(&facts);
     let peer_expected = expected.clone();
     let peer = move || recheck(&peer_expected, peer_facts.as_ref());
-    let encoder = ack_encoder(facts, expected.helper, expected.helper_code);
+    let encoder = ack_encoder(facts, expected.clone());
     run_ready(
         control,
         driver,
@@ -242,7 +242,9 @@ fn verify_peer(
     expected_code: &CodeWire,
 ) -> Result<(), Error> {
     verify_instance(claimed, facts)?;
-    verify_code(claimed_code, expected_code)
+    verify_code(claimed_code, expected_code)?;
+    // The wire claim is not the code that is running. Read it again.
+    verify_observed_code(claimed.pid, expected_code, facts)
 }
 
 fn verify_instance(claimed: &PeerWire, facts: &dyn ProcessFacts) -> Result<(), Error> {
@@ -264,12 +266,40 @@ fn verify_instance(claimed: &PeerWire, facts: &dyn ProcessFacts) -> Result<(), E
 }
 
 fn verify_code(claimed: &CodeWire, expected: &CodeWire) -> Result<(), Error> {
-    let claimed_sig = CodeSignature::new(
+    codes_match(
         &claimed.identifier,
         claimed.team_id.as_deref(),
         &claimed.cdhash,
+        expected,
     )
-    .ok_or(Error::Authentication)?;
+}
+
+/// Compare the process's current code, as read from `facts`, with `expected`.
+///
+/// `None` or an unusable observation is authentication failure. Memory only.
+/// No timeout or cancellation. A pathname is not consulted.
+fn verify_observed_code(
+    pid: u32,
+    expected: &CodeWire,
+    facts: &dyn ProcessFacts,
+) -> Result<(), Error> {
+    let observed = facts.code_identity(pid).ok_or(Error::Authentication)?;
+    codes_match(
+        &observed.identifier,
+        observed.team_id.as_deref(),
+        &observed.cdhash,
+        expected,
+    )
+}
+
+fn codes_match(
+    identifier: &str,
+    team_id: Option<&str>,
+    cdhash: &str,
+    expected: &CodeWire,
+) -> Result<(), Error> {
+    let claimed_sig =
+        CodeSignature::new(identifier, team_id, cdhash).ok_or(Error::Authentication)?;
     let expected_sig = CodeSignature::new(
         &expected.identifier,
         expected.team_id.as_deref(),
@@ -293,17 +323,44 @@ fn install_from_hello(hello: &ScopeHello) -> Control {
     }
 }
 
-fn ack_encoder(facts: Arc<dyn ProcessFacts>, helper: PeerWire, code: CodeWire) -> AckEncoder {
+fn ack_encoder(facts: Arc<dyn ProcessFacts>, expected: ScopedIdentities) -> AckEncoder {
     Arc::new(move |ack: &Ack| {
-        verify_instance(&helper, facts.as_ref())?;
+        // Encode only after both peers' live code still matches. The body
+        // carries that observed helper code, not a copy checked against itself.
+        verify_peer(
+            &expected.supervisor,
+            &expected.supervisor_code,
+            facts.as_ref(),
+            &expected.supervisor_code,
+        )?;
+        verify_peer(
+            &expected.helper,
+            &expected.helper_code,
+            facts.as_ref(),
+            &expected.helper_code,
+        )?;
+        let observed = facts
+            .code_identity(expected.helper.pid)
+            .ok_or(Error::Authentication)?;
+        let code = CodeWire {
+            identifier: observed.identifier,
+            team_id: observed.team_id,
+            cdhash: observed.cdhash,
+        };
         let body = ScopedAck {
             run_id: ack.run_id.clone(),
             generation: ack.generation,
             scope_digest: ack.scope_digest.clone(),
-            peer: helper.clone(),
-            code: code.clone(),
+            peer: expected.helper.clone(),
+            code,
         };
-        accept_helper_ack(&body, ack, &helper, &code, facts.as_ref())?;
+        accept_helper_ack(
+            &body,
+            ack,
+            &expected.helper,
+            &expected.helper_code,
+            facts.as_ref(),
+        )?;
         serde_json::to_vec(&body).map_err(|_| Error::Invalid)
     })
 }
