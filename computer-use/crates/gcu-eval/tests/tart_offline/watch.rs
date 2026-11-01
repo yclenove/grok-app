@@ -49,6 +49,9 @@ const CLEANUP_LIMIT: Duration = Duration::from_secs(5);
 /// return. It stays under [`CHECK_LIMIT`].
 pub(super) const HANG_LIMIT: Duration = Duration::from_secs(2);
 
+/// Pause between `try_wait` polls so supervision does not burn a core.
+const POLL: Duration = Duration::from_millis(10);
+
 /// Nonzero status used when exit was not observed. Not an OS exit code.
 const UNCLEAN_CODE: i32 = 1;
 
@@ -202,7 +205,7 @@ fn supervise_with(
             Ok(None) if now().saturating_duration_since(started) >= limit => {
                 return kill_and_reap(child, &mut now);
             }
-            Ok(None) => std::hint::spin_loop(),
+            Ok(None) => std::thread::sleep(POLL),
             // Polling failed. Do not panic: unwinding would drop `Child`
             // without a cleanup attempt and without an unclean result.
             Err(_) => return kill_and_reap(child, &mut now),
@@ -249,7 +252,7 @@ fn poll_until_exit(
                     unclean: false,
                 };
             }
-            Ok(None) | Err(_) if !overdue => std::hint::spin_loop(),
+            Ok(None) | Err(_) if !overdue => std::thread::sleep(POLL),
             Ok(None) | Err(_) => {
                 let _ = child.kill();
                 // Exit was not observed. Drop does not kill or reap; kill was
