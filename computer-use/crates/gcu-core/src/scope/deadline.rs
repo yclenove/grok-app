@@ -36,6 +36,7 @@ impl ScopeLease {
 
     /// Trusted control renewal. An expired lease is terminal, even before the
     /// teardown timer runs. Memory only; never awaits or invokes data work.
+    /// A renewal that is still active does not publish invalidation callbacks.
     pub fn renew_deadline(&self, deadline: Duration) -> Result<(), ScopeError> {
         self.expire();
         let mut guard = self.shared.state.write().unwrap_or_else(|e| e.into_inner());
@@ -75,6 +76,12 @@ impl ScopeLease {
             if self.shared.clock.as_ref().is_some_and(|clock| clock.now() >= *deadline))
     }
 
+    /// Revoke and publish when the injected clock is past the deadline.
+    ///
+    /// Called from lease reads. There is no timer: a caller that never reads
+    /// the lease does not publish expiry, and invalidation callbacks wait for
+    /// that read. Memory only aside from those callbacks, which run after the
+    /// state lock is released. No timeout or cancellation.
     pub(super) fn expire(&self) {
         let guard = self.shared.state.read().unwrap_or_else(|e| e.into_inner());
         if !self.expired(&guard) {
