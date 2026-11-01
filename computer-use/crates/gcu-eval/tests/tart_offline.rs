@@ -36,6 +36,8 @@ macro_rules! ok {
 
 #[path = "tart_offline/review_fixes.rs"]
 mod review_fixes;
+#[path = "tart_offline/s11b/mod.rs"]
+mod s11b;
 #[path = "tart_offline/watch.rs"]
 mod watch;
 
@@ -147,6 +149,7 @@ fn run_checks() -> i32 {
             failures.push(format!("{name}: {err}"));
         }
     }
+    s11b::run(&mut failures);
     if !failures.is_empty() {
         panic!("{}", failures.join("\n"));
     }
@@ -326,6 +329,7 @@ fn caps_match_adr_0018_and_have_no_default() -> Result<(), String> {
         StopDeadline::CAP,
         DeleteDeadline::CAP,
         ProbeDeadline::CAP,
+        gcu_eval::disposable::tart::GroupDeadline::CAP,
         StageDeadline::CAP,
         LoginDeadline::CAP,
         RunDeadline::CAP,
@@ -341,6 +345,7 @@ fn caps_match_adr_0018_and_have_no_default() -> Result<(), String> {
         Duration::from_secs(20),
         Duration::from_secs(20),
         Duration::from_secs(2),
+        Duration::from_secs(60),
         Duration::from_secs(5),
         Duration::from_secs(5 * 60),
         Duration::from_secs(15 * 60),

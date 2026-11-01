@@ -67,7 +67,7 @@ pub(super) fn bounded_deadline(
 }
 
 macro_rules! deadline_type {
-    ($name:ident, $secs:literal, $doc:literal) => {
+    ($name:ident, $cap:expr, $doc:literal) => {
         #[doc = $doc]
         #[must_use = "pass this deadline to one call; it is not a default"]
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -77,7 +77,7 @@ macro_rules! deadline_type {
 
         impl $name {
             /// Fixed cap for this call. Not a deadline and not a default limit.
-            pub const CAP: Duration = Duration::from_secs($secs);
+            pub const CAP: Duration = $cap;
 
             /// Deadline `limit` after `now`.
             ///
@@ -94,73 +94,90 @@ macro_rules! deadline_type {
             pub const fn at(self) -> MonoInstant {
                 self.at
             }
+
+            /// Deadline at an instant the state machine already clipped.
+            ///
+            /// Does not check the cap again and does not block. Callers outside
+            /// this module keep using [`Self::after`].
+            ///
+            /// Every deadline type has this constructor. The machine rebuilds
+            /// only the types it clips, so some copies are unused.
+            #[allow(dead_code)]
+            pub(super) const fn from_instant(at: MonoInstant) -> Self {
+                Self { at }
+            }
         }
     };
 }
 
 deadline_type!(
     QueryDeadline,
-    5,
+    super::budgets::QUERY_BUDGET,
     "Bound for one list, status, inventory, or ledger read/write. Cap is 5 seconds (ADR 0018 §2). Zero and any longer limit are rejected."
 );
 deadline_type!(
     CloneDeadline,
-    60,
+    super::budgets::CLONE_BUDGET,
     "Bound for one clone. Cap is 60 seconds (ADR 0018 §2). Zero and any longer limit are rejected."
 );
 deadline_type!(
     StartDeadline,
-    120,
+    super::budgets::START_BUDGET,
     "Bound for one start, including boot ready. Cap is 120 seconds (ADR 0018 §2). Zero and any longer limit are rejected."
 );
 deadline_type!(
     StopDeadline,
-    20,
+    super::budgets::STOP_BUDGET,
     "Bound for one stop plus confirmation. Cap is 20 seconds (ADR 0018 §2). Zero and any longer limit are rejected."
 );
 deadline_type!(
     DeleteDeadline,
-    20,
+    super::budgets::DELETE_BUDGET,
     "Bound for one delete plus confirmation. Cap is 20 seconds (ADR 0018 §2). Zero and any longer limit are rejected."
 );
 deadline_type!(
     ProbeDeadline,
-    2,
+    super::budgets::PROBE_BUDGET,
     "Bound for one guest probe. Cap is 2 seconds (ADR 0018 §2). Zero and any longer limit are rejected."
 );
 deadline_type!(
+    GroupDeadline,
+    super::budgets::PROBE_GROUP_BUDGET,
+    "Bound for the probe group. Cap is 60 seconds (ADR 0018 §2). Zero and any longer limit are rejected. Each probe still uses its own 2 second cap."
+);
+deadline_type!(
     StageDeadline,
-    5,
+    super::budgets::STAGE_BUDGET,
     "Bound for one bootstrap or ACK stage. Cap is 5 seconds (ADR 0018 §2). Zero and any longer limit are rejected."
 );
 deadline_type!(
     LoginDeadline,
-    300,
+    super::budgets::LOGIN_BUDGET,
     "Bound for one fixed login call. Cap is 5 minutes (ADR 0018 §2). Zero and any longer limit are rejected. The call takes no secret."
 );
 deadline_type!(
     RunDeadline,
-    900,
+    super::budgets::RUN_BUDGET,
     "Bound for one guest run call. Cap is 15 minutes (ADR 0018 §2). Zero and any longer limit are rejected."
 );
 deadline_type!(
     LeaseDeadline,
-    3,
+    super::budgets::LEASE_BUDGET,
     "Bound for one guest lease. Cap is 3 seconds (ADR 0018 §2). Zero and any longer limit are rejected."
 );
 deadline_type!(
     RevokeDeadline,
-    10,
+    super::budgets::REVOKE_BUDGET,
     "Bound for one revoke or guest drain. Cap is 10 seconds (ADR 0018 §2). Zero and any longer limit are rejected."
 );
 deadline_type!(
     SealDeadline,
-    10,
+    super::budgets::SEAL_BUDGET,
     "Bound for sealing a ledger record. Cap is 10 seconds (ADR 0018 §2). Zero and any longer limit are rejected."
 );
 deadline_type!(
     AttemptDeadline,
-    1560,
+    super::budgets::ATTEMPT_BUDGET,
     "Absolute attempt deadline stored before clone. Cap is 10 minutes of prep plus 15 minutes of task plus 60 seconds of cleanup (ADR 0018 §2). Zero and any longer limit are rejected. Retries cannot extend it."
 );
 

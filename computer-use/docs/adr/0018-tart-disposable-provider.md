@@ -234,3 +234,22 @@ H1/H2 的具体组件若需另造通道或包过滤器，先拆独立设计卡�
 - `accepting_provider_linked` / `scoped_provider_ack` 仍恒拒绝。本模块不铸造 `AdmittedLaunch`。
 
 S11b 在 S11-0 给出通道事实之前只应接这些 fake，不得选定真实传输。fake 通过不改变矩阵的 native 状态。
+
+## 12. S11b 状态
+
+状态：调用方顺序驱动的同步状态机与账本清理已在 fake 上落地（2026-11-01）。这不是 provider，不铸造 `AdmittedLaunch`，不改变 S6 门禁，不批准真实运行。§11 里“状态机尚未实现”是 S11a 当时的记录；本节覆盖该句。
+
+已实现（`gcu-eval/src/disposable/tart/`，无后台线程、无观察者、无 async、无新依赖）：
+
+- 阶段：`Idle → Reserved → Cloned → Booting → Isolated → Bootstrapped → CredentialReady → Ready → Running → Revoking → Destroying → Final`。`Quarantined` 是 `not_run/cleanup_failed`，停后续 task/arm/repeat。`Suspended` 只表示外层 owner 租约到期：不删除 VM、不封存，回执 cleanup 为 unknown，下次启动先 `recover`。
+- 每步一个同步方法，调用方持有 runner、guest、账本、锁和钟。`Drop` 不 stop、不 delete、不 seal。reserve 之后的步骤取调用 deadline、阶段预算和绝对截止中最早的一个。阶段预算集中在 `budgets.rs`（§2 的上限），测试只能缩小。Stop 常量未改。
+- `Bootstrapped` / `CredentialReady` / `Ready` 只推进状态并记录证据。login/run 仍是 fake。不选 H1 传输，不安装 H2 guard。
+- 清理：非预期转移、超时和故障进入 `Revoking → Destroying`（stop → 确认 → delete → 权威 list 确认不存在 → 封存）。查询失败或不完整不是“已消失”。只处理账本里的精确 clone id；不按前缀删除，不删 golden 或外部 VM，不重启孤儿。登记仍先于 clone。
+- 恢复：`recover` 只读未封存行，先追加 `RecoveryNoted` 再 stop/delete。它用本次调用的 deadline，不用已死行的绝对截止，否则绝对截止已过的孤儿无法删除。旧 attempt 仍永久 `not_run`，不恢复分数。带 `CleanupUnknown` 的行记 `OwnerDeath`，其余未封存行记 `HostCrash`。
+- 环境违约、缺证明、边界崩溃、清理失败一律 `not_run`，即使 fake 曾返回 pass。只有证据完整且清理确认成功才保留分数。
+
+仍依赖后续卡，本卡不实现：
+
+- **S11-0**：H1 通道与 H2 guard 的实测。未选定传输和 guard。
+- **S11c**：真实探针、Softnet argv、宿主 guard。当前探针只消费 fake 回复。
+- 真实 Tart/Softnet、登录、模型、native Stop、TCC、父进程死亡和宿主重启仍是 `not_run`。fake 通过不改变矩阵的 native 状态。

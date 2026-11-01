@@ -1,7 +1,10 @@
 //! Ledger that records a reservation before any clone permit exists.
 //!
 //! The fake keeps rows in memory. That is not a durability proof. Dropping a
-//! permit does not clone, delete, or seal.
+//! permit does not clone, delete, or seal. `rows` returns the exact owned
+//! records. It is not a VM inventory and it has no prefix lookup.
+
+use std::collections::VecDeque;
 
 use super::deadline::{
     AttemptDeadline, FakeClock, HostClock, MonoInstant, QueryDeadline, SealDeadline,
@@ -13,8 +16,29 @@ use super::identity::{CloneId, RunId};
 pub enum LedgerFact {
     /// Clone was issued for this exact reservation.
     CloneIssued,
-    /// A recovery pass saw this exact reservation. This is not a deletion.
+    /// A recovery pass saw this exact reservation. This is not a deletion and not a score.
     RecoveryNoted,
+    /// Owner death left cleanup unconfirmed. Not a deletion and not a score.
+    CleanupUnknown,
+    /// This row forbids another attempt. Not a task score.
+    Quarantined,
+}
+
+/// Scripted ledger fault. An empty queue keeps the success path.
+///
+/// An already-due deadline does not consume a queued fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerFault {
+    /// Command failed. The row is unchanged.
+    Failed,
+    /// Timed out. The fake does not sleep.
+    TimedOut,
+    /// The reply cannot be used. The row is unchanged.
+    Malformed,
+    /// The reply was over the cap. Nothing is stored.
+    Overlong,
+    /// The call was issued and the reply did not arrive. Nothing is written.
+    ReplyLost,
 }
 
 /// Why a ledger call failed. The row is unchanged on failure.
@@ -38,6 +62,21 @@ pub enum LedgerError {
     /// The row is sealed. Append and a second seal are refused.
     #[error("reservation is sealed")]
     Sealed,
+    /// Scripted failure. The row is unchanged.
+    #[error("ledger command failed")]
+    Failed,
+    /// Scripted timeout. The fake did not sleep.
+    #[error("ledger command timed out")]
+    TimedOut,
+    /// Scripted unusable reply. The row is unchanged.
+    #[error("ledger reply was malformed")]
+    Malformed,
+    /// Scripted overlong reply. Nothing was stored.
+    #[error("ledger reply exceeded the cap")]
+    Overlong,
+    /// The reply was lost. Nothing was written.
+    #[error("ledger reply was lost")]
+    ReplyLost,
 }
 
 /// One reservation. The fake stores this value. Fields are a snapshot, not a live capability.
@@ -165,6 +204,12 @@ pub trait AttemptLedger {
 
     /// Seal the exact row. A second seal fails and leaves the row sealed.
     fn seal(&mut self, clone: &CloneId, call: SealDeadline) -> Result<(), LedgerError>;
+
+    /// Every owned row, in insertion order.
+    ///
+    /// The ids are complete. This is not a prefix search and not a VM list.
+    /// An expired call returns [`LedgerError::Expired`] and no rows.
+    fn rows(&self, call: QueryDeadline) -> Result<Vec<Reservation>, LedgerError>;
 }
 
 /// Memory ledger. Not durable, and not evidence that a VM was reserved.
@@ -172,6 +217,7 @@ pub trait AttemptLedger {
 pub struct FakeLedger {
     clock: FakeClock,
     rows: Vec<Reservation>,
+    faults: VecDeque<LedgerFault>,
 }
 
 impl FakeLedger {
@@ -183,7 +229,16 @@ impl FakeLedger {
         Self {
             clock,
             rows: Vec::new(),
+            faults: VecDeque::new(),
         }
+    }
+
+    /// Queue a fault for the next `reserve`, `append`, or `seal`.
+    ///
+    /// An empty queue is the success path. A due deadline does not consume
+    /// the fault. Does not block.
+    pub fn push_fault(&mut self, fault: LedgerFault) {
+        self.faults.push_back(fault);
     }
 
     fn ensure_call(&self, at: MonoInstant) -> Result<(), LedgerError> {
@@ -200,6 +255,17 @@ impl FakeLedger {
             .position(|row| &row.clone_id == clone)
             .ok_or(LedgerError::NotFound)
     }
+
+    fn take_fault(&mut self) -> Result<(), LedgerError> {
+        match self.faults.pop_front() {
+            None => Ok(()),
+            Some(LedgerFault::Failed) => Err(LedgerError::Failed),
+            Some(LedgerFault::TimedOut) => Err(LedgerError::TimedOut),
+            Some(LedgerFault::Malformed) => Err(LedgerError::Malformed),
+            Some(LedgerFault::Overlong) => Err(LedgerError::Overlong),
+            Some(LedgerFault::ReplyLost) => Err(LedgerError::ReplyLost),
+        }
+    }
 }
 
 impl AttemptLedger for FakeLedger {
@@ -214,6 +280,7 @@ impl AttemptLedger for FakeLedger {
         if absolute.at() <= self.clock.now() {
             return Err(LedgerError::AttemptAlreadyExpired);
         }
+        self.take_fault()?;
         if self.rows.iter().any(|row| row.run == run) {
             return Err(LedgerError::DuplicateRun);
         }
@@ -252,6 +319,7 @@ impl AttemptLedger for FakeLedger {
         if self.rows[index].sealed {
             return Err(LedgerError::Sealed);
         }
+        self.take_fault()?;
         self.rows[index].facts.push(fact);
         Ok(())
     }
@@ -262,7 +330,13 @@ impl AttemptLedger for FakeLedger {
         if self.rows[index].sealed {
             return Err(LedgerError::Sealed);
         }
+        self.take_fault()?;
         self.rows[index].sealed = true;
         Ok(())
+    }
+
+    fn rows(&self, call: QueryDeadline) -> Result<Vec<Reservation>, LedgerError> {
+        self.ensure_call(call.at())?;
+        Ok(self.rows.clone())
     }
 }
