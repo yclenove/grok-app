@@ -1,39 +1,96 @@
 //! Session-owned files; paths and names never come from tool arguments.
 use crate::lease_view::{visible, Epoch};
+use crate::retire::{CallbackSlot, Hold, Sweep};
 use gcu_core::scope::ScopeLease;
 use gcu_host_protocol::owner_only::{self, OwnerLock};
-#[cfg(test)]
-use std::sync::Condvar;
 use std::{
     io::{self, Write},
+    ops::{Deref, DerefMut},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, TryLockError},
     time::Duration,
 };
 use tempfile::TempDir;
 
+#[cfg(test)]
+#[path = "file_gate.rs"]
+mod file_gate;
+#[cfg(test)]
+pub(crate) use file_gate::FilePause;
+
 const MAX_SESSION_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) struct SessionFiles {
+    sweep_id: u64,
+    callbacks: CallbackSlot,
+    /// Tickets a publish left because this mutex was busy or already held here.
+    sweep: Sweep,
     area: Mutex<Area>,
-    /// Invalidation owner. Shutdown joins a synchronous thread before the area drops.
-    observer: Mutex<crate::retire::Observer>,
-    /// Test parks copied into the owner at [`SessionFiles::bind_lease`].
+    /// Signals once, before the sweep takes `area`. Test only.
     #[cfg(test)]
-    hooks: Mutex<crate::retire::DriveHooks>,
+    before_sweep: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Test pause installed by [`SessionFiles::arm_file_gate`]. Absent in production.
     #[cfg(test)]
     gate: Mutex<Option<Arc<FilePause>>>,
 }
 struct Area {
     lock: Option<OwnerLock>,
-    directory: Option<TempDir>,
+    /// Kept alive across unlink so `close` cannot free the name first.
+    directory: Option<Arc<TempDir>>,
     next: u64,
     stage_seq: u64,
     bytes: usize,
     files: Vec<StoredFile>,
     lease: Option<ScopeLease>,
-    /// Set when the retire owner could not start. Commits then register nothing.
-    publish_blocked: bool,
+}
+struct StaleBatch {
+    paths: Vec<PathBuf>,
+    /// Holds the directory inode until the unlinks below finish.
+    _directory: Option<Arc<TempDir>>,
+}
+
+/// Area mutex plus a deferred sweep after it unlocks.
+///
+/// A publish that cannot `try_lock` this mutex leaves a [`Sweep`] ticket.
+/// Drop unlocks first, then catches up, so revoke does not wait on a holder
+/// that is itself waiting for revoke.
+struct AreaLock<'a> {
+    store: &'a SessionFiles,
+    guard: Option<MutexGuard<'a, Area>>,
+}
+
+impl<'a> AreaLock<'a> {
+    fn new(store: &'a SessionFiles) -> Self {
+        Self {
+            store,
+            guard: Some(store.area.lock().unwrap_or_else(|error| error.into_inner())),
+        }
+    }
+}
+
+impl Deref for AreaLock<'_> {
+    type Target = Area;
+    fn deref(&self) -> &Area {
+        match self.guard.as_ref() {
+            Some(area) => area,
+            None => unreachable!("area lock used after drop"),
+        }
+    }
+}
+
+impl DerefMut for AreaLock<'_> {
+    fn deref_mut(&mut self) -> &mut Area {
+        match self.guard.as_mut() {
+            Some(area) => area,
+            None => unreachable!("area lock used after drop"),
+        }
+    }
+}
+
+impl Drop for AreaLock<'_> {
+    fn drop(&mut self) {
+        self.guard.take();
+        self.store.flush_retired();
+    }
 }
 struct StoredFile {
     path: PathBuf,
@@ -42,7 +99,9 @@ struct StoredFile {
 }
 /// Validated ledger insertion. Its lock is acquired before the lease lock.
 pub(crate) struct FileAdmission<'a> {
-    area: MutexGuard<'a, Area>,
+    files: &'a SessionFiles,
+    hold: Option<Hold>,
+    area: Option<MutexGuard<'a, Area>>,
     rows: Vec<StoredFile>,
     epoch: Option<Epoch>,
 }
@@ -56,21 +115,28 @@ impl FileAdmission<'_> {
 
     /// Memory-only, infallible registration of the batch validated by `admission`.
     ///
-    /// When the retire owner failed to start, the batch stays unregistered and
-    /// the staged guard deletes the bytes. No timeout or cancellation.
+    /// No timeout or cancellation. A closed admission registers nothing.
     pub(crate) fn commit(&mut self, staged: &mut [StagedFile]) {
-        if self.area.publish_blocked {
+        let Some(area) = self.area.as_mut() else {
             return;
-        }
+        };
         let epoch = self.epoch.clone();
         for mut row in self.rows.drain(..) {
-            self.area.bytes += row.len;
+            area.bytes += row.len;
             row.epoch = epoch.clone();
-            self.area.files.push(row);
+            area.files.push(row);
         }
         for file in staged {
             file.committed = true;
         }
+    }
+}
+
+impl Drop for FileAdmission<'_> {
+    fn drop(&mut self) {
+        self.area.take();
+        self.hold.take();
+        self.files.flush_retired();
     }
 }
 impl SessionFiles {
@@ -86,19 +152,20 @@ impl SessionFiles {
             }
         }
         Ok(Self {
+            sweep_id: crate::retire::next_sweep_id(),
+            callbacks: CallbackSlot::new(),
+            sweep: Sweep::new(),
             area: Mutex::new(Area {
                 lock: Some(lock),
-                directory: Some(directory),
+                directory: Some(Arc::new(directory)),
                 next: 0,
                 stage_seq: 0,
                 bytes: 0,
                 files: Vec::new(),
                 lease: None,
-                publish_blocked: false,
             }),
-            observer: Mutex::new(crate::retire::Observer::default()),
             #[cfg(test)]
-            hooks: Mutex::new(crate::retire::DriveHooks::default()),
+            before_sweep: Mutex::new(None),
             #[cfg(test)]
             gate: Mutex::new(None),
         })
@@ -121,7 +188,7 @@ impl SessionFiles {
     pub(crate) fn stage(&self, bytes: &[u8], extension: &str) -> io::Result<StagedFile> {
         #[cfg(test)]
         let gate = self.pause_for_test();
-        let mut area = self.area.lock().unwrap_or_else(|error| error.into_inner());
+        let mut area = AreaLock::new(self);
         if area.bytes.saturating_add(bytes.len()) > MAX_SESSION_BYTES {
             return Err(io::Error::other("session file budget reached"));
         }
@@ -158,7 +225,7 @@ impl SessionFiles {
     /// await, timeout, or cancellation. A closed area leaves the staged name
     /// in place for its guard to delete.
     pub(crate) fn seal(&self, staged: &mut StagedFile) -> io::Result<PathBuf> {
-        let mut area = self.area.lock().unwrap_or_else(|error| error.into_inner());
+        let mut area = AreaLock::new(self);
         let directory = area
             .directory
             .as_ref()
@@ -179,15 +246,27 @@ impl SessionFiles {
     /// lease commit point. Failure leaves the ledger unchanged and the caller
     /// still owns all staged guards. Dropping the admission registers nothing.
     pub(crate) fn admission(&self, staged: &[StagedFile]) -> io::Result<FileAdmission<'_>> {
+        let hold = Hold::enter(self.sweep_id);
         let mut area = self.area.lock().unwrap_or_else(|error| error.into_inner());
         if area.directory.is_none() {
+            drop(area);
+            drop(hold);
+            self.flush_retired();
             return Err(io::Error::other("session closed"));
         }
         let extra = staged
             .iter()
-            .try_fold(0usize, |sum, file| sum.checked_add(file.len))
-            .ok_or_else(|| io::Error::other("session file budget reached"))?;
+            .try_fold(0usize, |sum, file| sum.checked_add(file.len));
+        let Some(extra) = extra else {
+            drop(area);
+            drop(hold);
+            self.flush_retired();
+            return Err(io::Error::other("session file budget reached"));
+        };
         if area.bytes.saturating_add(extra) > MAX_SESSION_BYTES {
+            drop(area);
+            drop(hold);
+            self.flush_retired();
             return Err(io::Error::other("session file budget reached"));
         }
         let rows = staged
@@ -200,7 +279,9 @@ impl SessionFiles {
             .collect();
         area.files.reserve(staged.len());
         Ok(FileAdmission {
-            area,
+            files: self,
+            hold: Some(hold),
+            area: Some(area),
             rows,
             epoch: None,
         })
@@ -208,88 +289,108 @@ impl SessionFiles {
 
     /// Remember the lease that later exports compare, and retire on invalidation.
     ///
-    /// One owner: a task on the current runtime, or a dedicated thread when
-    /// there is none. A second bind replaces the lease and does not start
-    /// another owner. If the owner cannot start, later commits register nothing.
-    /// Disk unlink stays in [`Self::release_stale`], outside both locks.
+    /// Registers a weak callback on `lease`. Revoke, rebind, and a lease read
+    /// that publishes expiry run that callback on the calling thread. Dropping
+    /// this store drops the callback. A second bind arms the new lease and
+    /// drops the previous hook. Expiry is not watched: if nobody reads the
+    /// lease, rows stay until that read. Disk unlink stays outside both locks.
+    /// No timeout or cancellation.
     pub(crate) fn bind_lease(self: &Arc<Self>, lease: ScopeLease) {
         {
-            let mut area = self.area.lock().unwrap_or_else(|error| error.into_inner());
+            let mut area = AreaLock::new(self);
             area.lease = Some(lease.clone());
         }
-        let mut observer = self
-            .observer
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if observer.watching() {
-            return;
-        }
         let files = Arc::downgrade(self);
-        #[cfg(test)]
-        let hooks = self
-            .hooks
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        #[cfg(not(test))]
-        let hooks = crate::retire::DriveHooks::default();
-        let next = crate::retire::start(
-            lease,
-            Arc::new(move || {
-                if let Some(files) = files.upgrade() {
-                    files.release_stale();
-                }
-            }),
-            hooks,
-        );
-        // Observer, then the area. `start` returns before the owner takes the area.
-        self.area
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .publish_blocked = !next.watching();
-        *observer = next;
-    }
-
-    /// Parks and the exit count copied by the next [`Self::bind_lease`].
-    ///
-    /// Memory only. A bind that already started keeps the hooks it copied.
-    #[cfg(test)]
-    pub(crate) fn set_retire_hooks(&self, hooks: crate::retire::DriveHooks) {
-        *self.hooks.lock().unwrap_or_else(|error| error.into_inner()) = hooks;
+        let callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(files) = files.upgrade() {
+                files.release_stale();
+            }
+        });
+        self.callbacks.arm(&lease, callback);
+        self.release_stale();
     }
 
     /// Remove ledger rows that are no longer visible and delete their files.
     ///
-    /// The area lock and the lease lock are both dropped before unlink. No
-    /// timeout or cancellation. A closed area leaves the disk to [`Self::close`].
+    /// The area lock and the lease lock are both dropped before unlink. The
+    /// ticket is stored before `try_lock`. A busy mutex, or `Hold` already set
+    /// on this thread, returns without waiting: the holder's guard catches up
+    /// after it unlocks. Same-thread `try_lock` is unspecified, so this thread
+    /// never tries it while `Hold` is set. No timeout or cancellation. A
+    /// closed area leaves the disk to [`Self::close`]. Unlink errors are
+    /// ignored. At most eight passes; a still-open ticket waits for the next
+    /// unlock instead of spinning.
     pub(crate) fn release_stale(&self) {
-        let Ok(paths) = self.take_stale() else {
+        if Hold::contains(self.sweep_id) {
+            self.sweep.request();
             return;
-        };
-        for path in paths {
-            let _ = std::fs::remove_file(path);
+        }
+        #[cfg(test)]
+        self.fire_before_sweep();
+        self.sweep.request();
+        self.drive();
+    }
+
+    fn flush_retired(&self) {
+        if Hold::contains(self.sweep_id) {
+            self.sweep.request();
+            return;
+        }
+        self.drive();
+    }
+
+    fn drive(&self) {
+        for _ in 0..8 {
+            let target = self.sweep.requested();
+            if self.sweep.finished() >= target {
+                return;
+            }
+            let Some(batch) = self.extract() else {
+                return;
+            };
+            for path in &batch.paths {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
 
-    fn take_stale(&self) -> io::Result<Vec<PathBuf>> {
-        let mut area = self.area.lock().unwrap_or_else(|error| error.into_inner());
+    /// `None` means another thread holds the area lock.
+    fn extract(&self) -> Option<StaleBatch> {
+        let _hold = Hold::enter(self.sweep_id);
+        let mut area = match self.area.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::Poisoned(err)) => err.into_inner(),
+            Err(TryLockError::WouldBlock) => return None,
+        };
+        // Sample before the lease read. A publish during `visible` opens a
+        // newer ticket that this pass must not mark finished.
+        let seen = self.sweep.requested();
         if area.directory.is_none() {
-            return Err(io::Error::other("session closed"));
+            self.sweep.mark(seen);
+            return Some(StaleBatch {
+                paths: Vec::new(),
+                _directory: None,
+            });
         }
+        let directory = area.directory.clone();
         let lease = area.lease.clone();
         let mut stale_len = 0usize;
-        let mut stale_paths = Vec::new();
+        let mut paths = Vec::new();
         area.files.retain(|row| {
             if visible(lease.as_ref(), row.epoch.as_ref()) {
                 true
             } else {
                 stale_len = stale_len.saturating_add(row.len);
-                stale_paths.push(row.path.clone());
+                paths.push(row.path.clone());
                 false
             }
         });
         area.bytes = area.bytes.saturating_sub(stale_len);
-        Ok(stale_paths)
+        self.sweep.mark(seen);
+        Some(StaleBatch {
+            paths,
+            _directory: directory,
+        })
     }
     /// Rename a staged file into the export ledger.
     ///
@@ -298,7 +399,7 @@ impl SessionFiles {
     /// to delete and the ledger is unchanged.
     #[cfg(test)]
     fn commit(&self, mut staged: StagedFile) -> io::Result<PathBuf> {
-        let mut area = self.area.lock().unwrap_or_else(|error| error.into_inner());
+        let mut area = AreaLock::new(self);
         if area.bytes.saturating_add(staged.len) > MAX_SESSION_BYTES {
             return Err(io::Error::other("session file budget reached"));
         }
@@ -322,11 +423,8 @@ impl SessionFiles {
         Ok(path)
     }
     pub(crate) fn export(&self) -> io::Result<Vec<(PathBuf, Vec<u8>)>> {
-        let stale = self.take_stale()?;
-        for path in stale {
-            let _ = std::fs::remove_file(path);
-        }
-        let area = self.area.lock().unwrap_or_else(|error| error.into_inner());
+        self.release_stale();
+        let area = AreaLock::new(self);
         if area.directory.is_none() {
             return Err(io::Error::other("session closed"));
         }
@@ -341,143 +439,46 @@ impl SessionFiles {
             })
             .collect()
     }
-    /// Join the retire owner within 5 seconds, then delete the session directory.
+    /// Drop the invalidation callback, then delete the session directory.
     ///
-    /// The owner is signalled before the area lock. The directory is still
-    /// removed when the join fails; that error is returned when delete succeeded.
+    /// An unlink that already cloned the directory keeps that inode until it
+    /// finishes, so this call cannot hand the name to a later store first.
+    /// Blocking: the area mutex and the directory delete. Timeout: none.
+    /// Cancellation: none. A second call is a no-op.
     pub(crate) fn close(&self) -> io::Result<()> {
-        let joined = self
-            .observer
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .shutdown();
-        let mut area = self.area.lock().unwrap_or_else(|error| error.into_inner());
-        area.lock.take();
-        let deleted = if let Some(directory) = area.directory.take() {
-            directory.close()
-        } else {
-            Ok(())
+        self.callbacks.clear();
+        let directory = {
+            let mut area = AreaLock::new(self);
+            area.lock.take();
+            area.directory.take()
         };
-        deleted.and(joined)
+        match directory {
+            Some(directory) => match Arc::try_unwrap(directory) {
+                Ok(directory) => directory.close(),
+                Err(shared) => {
+                    drop(shared);
+                    Ok(())
+                }
+            },
+            None => Ok(()),
+        }
     }
 }
 
-impl Drop for SessionFiles {
+/// Ledger lock held by a test thread. Drop unlocks, then flushes a deferred sweep.
+#[cfg(test)]
+pub(crate) struct AreaHold<'a> {
+    files: &'a SessionFiles,
+    hold: Option<Hold>,
+    guard: Option<MutexGuard<'a, Area>>,
+}
+
+#[cfg(test)]
+impl Drop for AreaHold<'_> {
     fn drop(&mut self) {
-        let _ = self
-            .observer
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .shutdown();
-    }
-}
-/// One-shot pause around the first session-file write in a test.
-///
-/// Memory only. The first [`SessionFiles::write`] waits until [`Self::release`].
-/// Later writes do not wait. Panics after 15 seconds. No cancellation. Production never
-/// constructs this value.
-#[cfg(test)]
-pub(crate) struct FilePause {
-    state: Mutex<PauseState>,
-    cv: Condvar,
-}
-
-#[cfg(test)]
-struct PauseState {
-    armed: bool,
-    used: bool,
-    parked: bool,
-    released: bool,
-    finished: bool,
-    /// Writes to ignore before the one that parks. Zero parks the next write.
-    skip: u32,
-}
-
-#[cfg(test)]
-impl FilePause {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            state: Mutex::new(PauseState {
-                armed: false,
-                used: false,
-                parked: false,
-                released: false,
-                finished: false,
-                skip: 0,
-            }),
-            cv: Condvar::new(),
-        })
-    }
-
-    fn arm_skip(&self, skip: u32) {
-        let mut guard = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        guard.armed = true;
-        guard.released = false;
-        guard.parked = false;
-        guard.finished = false;
-        guard.used = false;
-        guard.skip = skip;
-    }
-
-    fn pause_once(&self) -> bool {
-        let mut guard = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        if !guard.armed || guard.used {
-            return false;
-        }
-        if guard.skip > 0 {
-            guard.skip -= 1;
-            return false;
-        }
-        guard.used = true;
-        guard.parked = true;
-        self.cv.notify_all();
-        let (mut guard, timeout) = self
-            .cv
-            .wait_timeout_while(guard, Duration::from_secs(15), |state| !state.released)
-            .unwrap_or_else(|err| err.into_inner());
-        let expired = timeout.timed_out() && !guard.released;
-        guard.parked = false;
-        guard.armed = false;
-        drop(guard);
-        assert!(
-            !expired,
-            "file test gate was not released within 15 seconds"
-        );
-        true
-    }
-
-    /// Unblock the write parked in this gate.
-    ///
-    /// Memory only. No timeout or cancellation.
-    pub(crate) fn release(&self) {
-        let mut guard = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        guard.released = true;
-        guard.armed = false;
-        self.cv.notify_all();
-    }
-
-    /// Whether the first write is waiting. Memory only. No timeout or cancellation.
-    pub(crate) fn is_parked(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .parked
-    }
-
-    /// The staged file from this gate was dropped or committed.
-    ///
-    /// Memory only. No timeout or cancellation.
-    pub(crate) fn has_finished(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .finished
-    }
-
-    fn note_finished(&self) {
-        let mut guard = self.state.lock().unwrap_or_else(|err| err.into_inner());
-        guard.finished = true;
-        self.cv.notify_all();
+        self.guard.take();
+        self.hold.take();
+        self.files.flush_retired();
     }
 }
 
@@ -504,6 +505,44 @@ impl SessionFiles {
         pause
     }
 
+    /// Hold the ledger lock until the guard drops.
+    ///
+    /// The drop flushes a sweep that was deferred because this thread held the
+    /// lock. Test only. Blocking: the area mutex. No timeout or cancellation.
+    #[cfg(test)]
+    pub(crate) fn lock_area_for_test(&self) -> AreaHold<'_> {
+        let hold = Hold::enter(self.sweep_id);
+        let guard = self.area.lock().unwrap_or_else(|error| error.into_inner());
+        AreaHold {
+            files: self,
+            hold: Some(hold),
+            guard: Some(guard),
+        }
+    }
+
+    /// Run `hook` once, on the next sweep, before it takes the ledger lock.
+    ///
+    /// Test only. Memory only. No timeout or cancellation.
+    #[cfg(test)]
+    pub(crate) fn set_before_sweep(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .before_sweep
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(hook);
+    }
+
+    #[cfg(test)]
+    fn fire_before_sweep(&self) {
+        let hook = self
+            .before_sweep
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     #[cfg(test)]
     fn pause_for_test(&self) -> Option<Arc<FilePause>> {
         let gate = self
@@ -516,8 +555,10 @@ impl SessionFiles {
 
     /// Whether any file in this session directory contains `needle`.
     ///
-    /// Includes names that are not in the export ledger. Test only. May wait on
-    /// the area mutex and reads the directory. No timeout or cancellation.
+    /// Includes names that are not in the export ledger. A sweep ticket left
+    /// by a busy publish is finished after the mutex drops and before the
+    /// directory is read. Test only. May wait on the area mutex. No timeout
+    /// or cancellation.
     #[cfg(test)]
     pub(crate) fn contains_bytes(&self, needle: &[u8]) -> bool {
         if needle.is_empty() {
@@ -527,6 +568,7 @@ impl SessionFiles {
             let area = self.area.lock().unwrap_or_else(|err| err.into_inner());
             area.directory.as_ref().map(|dir| dir.path().to_path_buf())
         };
+        self.flush_retired();
         let Some(root) = root else {
             return false;
         };

@@ -91,6 +91,10 @@ fn delivered_image_is_unreadable_after_rebind_and_the_new_generation_is_readable
     assert!(cache.get("shot").is_some());
     let next = FixtureScope::try_new("run", 2, "engine", "desktop", "control", vec![]).unwrap();
     bound.rebind(next).unwrap();
+    assert!(
+        !cache.resident("shot"),
+        "rebind must drop pixels before get"
+    );
     assert!(cache.get("shot").is_none());
     {
         let mut next_admission = cache.admission("shot".into(), image(5));
@@ -113,16 +117,12 @@ async fn delivered_image_is_unreadable_after_lease_expiry() {
         admission.commit();
     }
     assert!(cache.get("shot").is_some());
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
     tokio::time::advance(Duration::from_secs(3)).await;
-    for _ in 0..8 {
-        if !cache.resident("shot") {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    assert!(
+        cache.resident("shot"),
+        "a passive cache stays until something reads the lease"
+    );
+    assert!(bound.current().is_none(), "the read publishes expiry");
     assert!(
         !cache.resident("shot"),
         "expiry must drop the pixels before get"
@@ -147,24 +147,20 @@ async fn delivered_file_is_unreadable_after_lease_expiry() {
     }
     let path = staged.path().to_path_buf();
     assert_eq!(files.export().unwrap().len(), 1);
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
     tokio::time::advance(Duration::from_secs(3)).await;
-    for _ in 0..8 {
-        if !path.exists() {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    assert!(
+        path.exists(),
+        "a passive ledger stays until something reads the lease"
+    );
+    assert_eq!(bound.remaining(), Some(Duration::ZERO));
     assert!(!path.exists(), "expiry must delete the spill before export");
     assert!(files.export().unwrap().is_empty());
     assert!(!files.contains_bytes(b"png-bytes"));
     files.close().unwrap();
 }
 
-#[tokio::test]
-async fn rebind_deletes_artifacts_while_the_session_stays_open() {
+#[test]
+fn rebind_deletes_artifacts_while_the_session_stays_open() {
     let files = Arc::new(SessionFiles::new().unwrap());
     let cache = Arc::new(ImageCache::default());
     let bound = lease(1);
@@ -187,18 +183,12 @@ async fn rebind_deletes_artifacts_while_the_session_stays_open() {
     assert!(cache.resident("shot"));
     let next = FixtureScope::try_new("run", 2, "engine", "desktop", "control", vec![]).unwrap();
     bound.rebind(next).unwrap();
-    wait_until_retired(&path, &cache).await;
+    assert!(!path.exists(), "rebind must delete the file before export");
+    assert!(
+        !cache.resident("shot"),
+        "rebind must drop pixels before get"
+    );
     assert!(files.export().unwrap().is_empty());
     assert!(cache.get("shot").is_none());
     files.close().unwrap();
-}
-
-async fn wait_until_retired(path: &std::path::Path, cache: &ImageCache) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    while path.exists() || cache.resident("shot") {
-        if tokio::time::Instant::now() >= deadline {
-            panic!("invalidation left a delivered artifact");
-        }
-        tokio::task::yield_now().await;
-    }
 }

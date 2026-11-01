@@ -1,38 +1,39 @@
 //! Bounded session-private cache; only Results can insert redacted deliveries.
 use super::lease_view::{visible, Epoch};
+use super::retire::{CallbackSlot, Hold, Sweep};
 use gcu_core::action::PublishGate;
 use gcu_core::scope::ScopeLease;
 use gcu_host_protocol::messages::Image;
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, TryLockError},
 };
 
 struct Slot {
     images: VecDeque<(String, Image, Option<Epoch>)>,
     lease: Option<ScopeLease>,
-    /// Set when the retire owner could not start. Commits then register nothing.
-    publish_blocked: bool,
 }
 
 pub(crate) struct ImageCache {
+    sweep_id: u64,
+    callbacks: CallbackSlot,
+    /// Tickets a publish left because this mutex was busy or already held here.
+    sweep: Sweep,
     slot: Mutex<Slot>,
     /// Parks after the cache mutex is taken and before the entry is inserted.
     /// Production leaves it disarmed.
     gate: Arc<PublishGate>,
-    /// Invalidation owner. Shutdown joins a synchronous thread before the slot drops.
-    observer: Mutex<crate::retire::Observer>,
-    /// Test parks copied into the owner at [`ImageCache::bind_lease`].
-    #[cfg(test)]
-    hooks: Mutex<crate::retire::DriveHooks>,
 }
 
 /// Cache lock and private insertion, prepared before entering the lease lock.
 pub(crate) struct ImageAdmission<'a> {
-    slot: MutexGuard<'a, Slot>,
+    cache: &'a ImageCache,
+    hold: Option<Hold>,
+    slot: Option<MutexGuard<'a, Slot>>,
     pending: Option<(String, Image)>,
     epoch: Option<Epoch>,
-    retired: Vec<(String, Image)>,
+    /// Pixels removed under the lock and dropped after it is released.
+    retired: Vec<Image>,
     bytes: usize,
 }
 
@@ -46,27 +47,26 @@ impl ImageAdmission<'_> {
 
     /// Infallible memory registration. Retired pixels drop after the lease lock.
     ///
-    /// When the retire owner failed to start, the pending image is left
-    /// unregistered and drops with this admission. No timeout or cancellation.
+    /// No timeout or cancellation. A closed admission registers nothing.
     pub(crate) fn commit(&mut self) {
-        if self.slot.publish_blocked {
+        let Some(slot) = self.slot.as_mut() else {
             return;
-        }
+        };
         let Some((id, image)) = self.pending.take() else {
             return;
         };
         let epoch = self.epoch.clone();
-        let replaced = self.slot.images.iter().position(|(key, _, _)| *key == id);
-        if let Some(old) = replaced.and_then(|index| self.slot.images.remove(index)) {
+        let replaced = slot.images.iter().position(|(key, _, _)| *key == id);
+        if let Some(old) = replaced.and_then(|index| slot.images.remove(index)) {
             self.bytes -= old.1.bytes.len();
-            self.retired.push((old.0, old.1));
+            self.retired.push(old.1);
         }
         self.bytes += image.bytes.len();
-        self.slot.images.push_back((id, image, epoch));
-        while self.bytes > 32 * 1024 * 1024 || self.slot.images.len() > 64 {
-            if let Some(old) = self.slot.images.pop_front() {
+        slot.images.push_back((id, image, epoch));
+        while self.bytes > 32 * 1024 * 1024 || slot.images.len() > 64 {
+            if let Some(old) = slot.images.pop_front() {
                 self.bytes -= old.1.bytes.len();
-                self.retired.push((old.0, old.1));
+                self.retired.push(old.1);
             } else {
                 break;
             }
@@ -74,18 +74,25 @@ impl ImageAdmission<'_> {
     }
 }
 
+impl Drop for ImageAdmission<'_> {
+    fn drop(&mut self) {
+        self.slot.take();
+        self.hold.take();
+        self.cache.flush_retired();
+    }
+}
+
 impl Default for ImageCache {
     fn default() -> Self {
         Self {
+            sweep_id: super::retire::next_sweep_id(),
+            callbacks: CallbackSlot::new(),
+            sweep: Sweep::new(),
             slot: Mutex::new(Slot {
                 images: VecDeque::new(),
                 lease: None,
-                publish_blocked: false,
             }),
             gate: PublishGate::new(),
-            observer: Mutex::new(crate::retire::Observer::default()),
-            #[cfg(test)]
-            hooks: Mutex::new(crate::retire::DriveHooks::default()),
         }
     }
 }
@@ -93,83 +100,102 @@ impl Default for ImageCache {
 impl ImageCache {
     /// Remember the lease that later `get` calls compare, and retire on invalidation.
     ///
-    /// Call before taking this cache's lock for a commit. One owner runs the
-    /// sweep: a task on the current runtime, or a dedicated thread when there
-    /// is none. A second bind replaces the lease and does not start another
-    /// owner. If that owner cannot start, later commits register nothing. This
-    /// call waits only until a synchronous thread has built its runtime.
+    /// Registers a weak callback on `lease`. Revoke, rebind, and a lease read
+    /// that publishes expiry run that callback on the calling thread. Dropping
+    /// this cache drops the callback. A second bind arms the new lease and
+    /// drops the previous hook. Expiry is not watched: if nobody reads the
+    /// lease, pixels stay until that read. Pixel release stays outside the
+    /// cache lock. No timeout or cancellation.
     pub(crate) fn bind_lease(self: &Arc<Self>, lease: ScopeLease) {
         {
             let mut slot = self.slot.lock().unwrap_or_else(|err| err.into_inner());
             slot.lease = Some(lease.clone());
         }
-        let mut observer = self.observer.lock().unwrap_or_else(|err| err.into_inner());
-        if observer.watching() {
+        let cache = Arc::downgrade(self);
+        let callback: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(cache) = cache.upgrade() {
+                cache.release_stale();
+            }
+        });
+        self.callbacks.arm(&lease, callback);
+        self.release_stale();
+    }
+
+    /// Drop images whose epoch is no longer visible.
+    ///
+    /// Pixels are dropped after the cache lock. The ticket is stored before
+    /// `try_lock`. Admission holds this mutex across the publication gate, so
+    /// a revoke on another thread must not wait for it. A busy mutex, or
+    /// `Hold` already set on this thread, returns and the holder catches up
+    /// after unlock. Same-thread `try_lock` is unspecified. No timeout or
+    /// cancellation. At most eight passes; a still-open ticket waits for the
+    /// next unlock instead of spinning.
+    pub(crate) fn release_stale(&self) {
+        if Hold::contains(self.sweep_id) {
+            self.sweep.request();
             return;
         }
-        let cache = Arc::downgrade(self);
-        #[cfg(test)]
-        let hooks = self
-            .hooks
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .clone();
-        #[cfg(not(test))]
-        let hooks = crate::retire::DriveHooks::default();
-        let next = crate::retire::start(
-            lease,
-            Arc::new(move || {
-                if let Some(cache) = cache.upgrade() {
-                    cache.release_stale();
-                }
-            }),
-            hooks,
-        );
-        // Observer, then the slot. `start` returns before the owner takes the slot.
-        self.slot
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .publish_blocked = !next.watching();
-        *observer = next;
+        self.sweep.request();
+        self.drive();
     }
 
-    /// Install parks and the exit count for the next [`Self::bind_lease`].
-    ///
-    /// Memory only. No timeout or cancellation. A bind that already started
-    /// keeps the hooks it copied.
-    #[cfg(test)]
-    pub(crate) fn set_retire_hooks(&self, hooks: crate::retire::DriveHooks) {
-        *self.hooks.lock().unwrap_or_else(|err| err.into_inner()) = hooks;
+    fn flush_retired(&self) {
+        if Hold::contains(self.sweep_id) {
+            self.sweep.request();
+            return;
+        }
+        self.drive();
     }
 
-    /// Drop images whose epoch is no longer visible. Memory only.
-    ///
-    /// The cache lock is released before this returns. No timeout or cancellation.
-    pub(crate) fn release_stale(&self) {
-        let mut slot = self.slot.lock().unwrap_or_else(|err| err.into_inner());
-        reclaim(&mut slot);
+    fn drive(&self) {
+        for _ in 0..8 {
+            let target = self.sweep.requested();
+            if self.sweep.finished() >= target {
+                return;
+            }
+            let Some(removed) = self.extract() else {
+                return;
+            };
+            drop(removed);
+        }
+    }
+
+    /// `None` means another thread holds the cache lock.
+    fn extract(&self) -> Option<Vec<Image>> {
+        let _hold = Hold::enter(self.sweep_id);
+        let mut slot = match self.slot.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::Poisoned(err)) => err.into_inner(),
+            Err(TryLockError::WouldBlock) => return None,
+        };
+        let seen = self.sweep.requested();
+        let removed = take_invisible(&mut slot);
+        self.sweep.mark(seen);
+        Some(removed)
     }
 
     /// Acquire the cache lock and prepare an insertion without exposing pixels.
     ///
     /// Memory only. No await, timeout, or cancellation. Run before acquiring the
     /// lease lock so a concurrent reader never delays revocation. Dropping an
-    /// uncommitted admission leaves the cache unchanged. Stale rows are dropped
-    /// under this same lock before the byte budget is counted.
+    /// uncommitted admission leaves the cache unchanged. Stale rows are moved
+    /// out under this lock and dropped after it, before the byte budget is counted.
     pub(crate) fn admission(&self, id: String, image: Image) -> ImageAdmission<'_> {
-        let gate = Arc::clone(&self.gate);
+        let hold = Hold::enter(self.sweep_id);
         let mut slot = self.slot.lock().unwrap_or_else(|err| err.into_inner());
-        reclaim(&mut slot);
-        gate.enter();
+        let mut retired = take_invisible(&mut slot);
+        self.gate.enter();
         let bytes = slot
             .images
             .iter()
             .map(|(_, image, _)| image.bytes.len())
             .sum();
-        let retired = Vec::with_capacity(slot.images.len() + 1);
+        retired.reserve(slot.images.len() + 1);
         slot.images.reserve(1);
         ImageAdmission {
-            slot,
+            cache: self,
+            hold: Some(hold),
+            slot: Some(slot),
             pending: Some((id, image)),
             epoch: None,
             retired,
@@ -179,29 +205,42 @@ impl ImageCache {
 
     /// Clone one image that is still the bound lease's current generation.
     ///
-    /// A stale row is dropped under the cache lock before the copy. Memory only
-    /// aside from the lease read inside [`visible`]. No timeout or cancellation.
+    /// A stale row is moved out under the cache lock and dropped after it.
+    /// Memory only aside from the lease read inside [`visible`]. No timeout or
+    /// cancellation.
     pub fn get(&self, id: &str) -> Option<Image> {
-        let mut slot = self.slot.lock().unwrap_or_else(|err| err.into_inner());
-        reclaim(&mut slot);
-        slot.images
-            .iter()
-            .find(|(key, _, _)| key == id)
-            .map(|(_, image, _)| image.clone())
+        let (removed, found) = {
+            let _hold = Hold::enter(self.sweep_id);
+            let mut slot = self.slot.lock().unwrap_or_else(|err| err.into_inner());
+            let removed = take_invisible(&mut slot);
+            let found = slot
+                .images
+                .iter()
+                .find(|(key, _, _)| key == id)
+                .map(|(_, image, _)| image.clone());
+            (removed, found)
+        };
+        drop(removed);
+        self.flush_retired();
+        found
     }
 
-    /// Drop every image. The bound lease stays. Memory only.
+    /// Drop every image. The bound lease stays.
+    ///
+    /// Pixels are dropped after the cache lock. A ticket left while this mutex
+    /// was held is finished after that. Memory only. No timeout or cancellation.
     pub fn clear(&self) {
-        self.slot
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .images
-            .clear();
+        let removed = {
+            let mut slot = self.slot.lock().unwrap_or_else(|err| err.into_inner());
+            std::mem::take(&mut slot.images)
+        };
+        drop(removed);
+        self.flush_retired();
     }
 
     /// True when `id` is still stored, without dropping stale rows.
     ///
-    /// [`Self::get`] reclaims first, so it cannot prove the watcher released
+    /// [`Self::get`] reclaims first, so it cannot prove the callback released
     /// the pixels. Memory only. No timeout or cancellation.
     #[cfg(test)]
     pub(crate) fn resident(&self, id: &str) -> bool {
@@ -220,18 +259,17 @@ impl ImageCache {
     }
 }
 
-impl Drop for ImageCache {
-    fn drop(&mut self) {
-        let _ = self
-            .observer
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .shutdown();
-    }
-}
-
-fn reclaim(slot: &mut Slot) {
+fn take_invisible(slot: &mut Slot) -> Vec<Image> {
     let lease = slot.lease.clone();
-    slot.images
-        .retain(|(_, _, epoch)| visible(lease.as_ref(), epoch.as_ref()));
+    let mut kept = VecDeque::new();
+    let mut dropped = Vec::new();
+    for (id, image, epoch) in slot.images.drain(..) {
+        if visible(lease.as_ref(), epoch.as_ref()) {
+            kept.push_back((id, image, epoch));
+        } else {
+            dropped.push(image);
+        }
+    }
+    slot.images = kept;
+    dropped
 }
