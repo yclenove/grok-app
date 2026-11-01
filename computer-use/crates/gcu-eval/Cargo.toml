@@ -60,3 +60,8 @@ required-features = ["test-support"]
 name = "offline_admission"
 path = "tests/offline_admission.rs"
 harness = false
+
+[[test]]
+name = "tart_offline"
+path = "tests/tart_offline.rs"
+harness = false

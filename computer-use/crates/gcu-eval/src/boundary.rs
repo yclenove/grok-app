@@ -338,12 +338,48 @@ mod tests {
         assert!(!provider_gate_allows_process(true));
     }
 
+    /// Substring guard for Tart sources. It recognizes these spellings,
+    /// including a grouped `process::Command` import. An arbitrary rename
+    /// that avoids every spelling is outside this guard.
+    fn tart_source_mentions_process(text: &str) -> bool {
+        const NEEDLES: &[&str] = &[
+            "Command::new",
+            "std::process",
+            "process::Command",
+            "tokio::process",
+            "AdmittedLaunch",
+        ];
+        NEEDLES.iter().any(|needle| text.contains(needle))
+    }
+
+    #[test]
+    fn tart_scan_hits_grouped_and_aliased_process_spellings() {
+        let hits = [
+            "use std::{ffi::OsStr, process::Command as Process};",
+            "use std::process;",
+            "process::Command",
+            "tokio::process",
+            "Command::new",
+            "std::process::Command",
+            "tokio::process::Command",
+            "AdmittedLaunch",
+        ];
+        for sample in hits {
+            assert!(
+                tart_source_mentions_process(sample),
+                "tart scan missed {sample}"
+            );
+        }
+        assert!(!tart_source_mentions_process("fn ready() -> i32 { 1 }"));
+    }
+
     #[test]
     fn command_new_is_only_in_the_admission_module() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let mut command_hits = Vec::new();
         let mut lifecycle_hits = Vec::new();
         let mut fixture_hits = Vec::new();
+        let mut tart_files = 0u32;
         let mut visit = |path: &Path, text: &str| {
             let rel = path
                 .strip_prefix(&root)
@@ -358,7 +394,17 @@ mod tests {
                 .unwrap_or("");
             let test_module = name == "tests.rs" || name.ends_with("_tests.rs");
             let admission = rel.ends_with("src/boundary.rs");
-            if !test_module
+            // S11a lives under src/ and must stay inside this scan, including
+            // any later test module. It cannot mint a launch or build a process.
+            let tart = rel.starts_with("src/disposable/tart/");
+            if tart {
+                tart_files += 1;
+                // Spelling guard only. Grouped imports and a `Command` alias
+                // are covered. This is not a proof against an arbitrary rename.
+                if tart_source_mentions_process(text) {
+                    command_hits.push(rel.clone());
+                }
+            } else if !test_module
                 && !admission
                 && !rel.starts_with("tests/")
                 && text.contains("Command::new")
@@ -386,8 +432,9 @@ mod tests {
         walk(&root.join("tests"), &mut visit);
         assert!(
             command_hits.is_empty(),
-            "Command::new outside the admission module: {command_hits:?}"
+            "process launch outside the admission module: {command_hits:?}"
         );
+        assert!(tart_files > 0, "tart interface module was not scanned");
         assert!(
             lifecycle_hits.is_empty(),
             "lifecycle mint escaped its test: {lifecycle_hits:?}"

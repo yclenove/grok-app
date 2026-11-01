@@ -211,3 +211,26 @@ H1/H2 的具体组件若需另造通道或包过滤器，先拆独立设计卡�
 决策规则：若实测显示 Softnet 单独已满足 §5 的拒绝类别，则 §5 第 3 点的“宿主网络 guard”不进入范围；若不满足，**先把具体 guard 方案（影响范围、回滚、是否只作用于该 Tart/Softnet 实例）提交 owner 审阅，批准前不安装任何网络规则**。若 H1 无可用通道，暂停 S11 并回到 owner，不为凑通道开放 gateway 上的 IP 服务。
 
 另：S11a–g 工作量较大。首个可验收目标是 **S11f（无模型的真实 clone / 探针 / 身份 / Stop / 清理）**；S11g（真实模型）在其回执齐全并经 owner 审阅前不排期。每一步评审最多三轮，超限按单一原则简化（本项目在 S4 退役机制上刚经历过一次：观察者 / 线程 / 所有者生命周期类机制优先改成同步、调用方持有、有界的做法）。
+
+## 11. S11a 离线接口状态
+
+状态：接口与 fake 已落地（2026-11-01）。这不是 provider，不改变 S6 门禁，不批准真实运行。
+
+已定义（`gcu-eval/src/disposable/tart/`，每个构建都编译；没有 `tart-disposable` feature，没有 env/CLI/config 启门）：
+
+- `TartCommand`、`RunId`、`CloneId`、`GoldenImage`、`SoftnetFlags`：固定操作。身份拒绝空、超长、路径、`--` 和 golden 名前缀。Softnet 只有固定 block `0.0.0.0/0` 加最多 16 个公网 IPv4 `/32`，没有自由字符串。公网校验用一张显式前缀表拒绝非全局和特殊用途地址，包括 `0/8`、`10/8`、`100.64/10`、`127/8`、`169.254/16`、`172.16/12`、整段 `192.0.0.0/24`（含 `192.0.0.1`、`.8`、`.170`、`.171`，不把该段里的少数全局例外当成公网）、`192.0.2/24`、`192.88.99/24`、`192.168/16`、`198.18/15`、`198.51.100/24`、`203.0.113/24`、`224/4`、`240/4` 和 `255.255.255.255`。地址语法通过不证明策略已安装，也不代替 S11c 的 owner 批准、网关排除或探针。
+- `TartRunner`：`clone`/`start`/`stop`/`delete`/`list`/`status`。每个调用带有上限的 deadline，返回至多 1MiB。`clone` 消费 `ClonePermit`。有效截止是调用截止和 permit 绝对截止中较早的一个；到达或超过绝对截止时仍然消费 permit，返回过期，且不消费脚本化回复。已到期的 deadline 只在入口前拒绝，不是对已开始操作的一般取消。
+- `HostClock`、`FakeClock`：单调钟注入。fake 前进不睡眠。
+- `AttemptLedger`、`FakeLedger`：`reserve` 先写入 run id、clone id、绝对截止，才返回一次性 permit。`query`/`append`/`seal` 按完整 id 精确匹配，没有前缀查找。`FakeLedger::reserve` 产出的 `ClonePermit` 只是离线 fake；未来真实适配器不得把持有 permit 当作持久登记的证明，须经可信账本或实例核验。
+- `GuestChannel`、`FakeGuestChannel`：版本 1 的 inventory/probe/bootstrap/login/run/lease/revoke。没有地址、路径、套接字或密钥字段。已到期的 deadline 只在入口前拒绝，不是对已开始操作的一般取消。
+- `InstallManifest`：程序、golden、策略三份 32 字节摘要，只是数据。摘要相同不建立信任或安装事实。
+- `FakeTartRunner` 记录结构化命令，并可注入成功、失败、超时、畸形、超长。不调用系统 `tart`，不创建进程。
+
+未决，本卡不选择：
+
+- **H1**：宿主到 guest 的具体通道未定。接口不假设 SSH、virtio、共享盘或网关端口。取决于 **S11-0**。
+- **H2**：宿主出站 guard 是否需要、以及哪一个实现，取决于 **S11-0**。`SoftnetFlags` 只描述 §5 的字段形状，不证明策略生效。
+- 状态机（S11b）、真实适配器、网络探针（S11c）都没有实现。长操作的完成等待，以及有界轮询或让出以保证 ≤1s 续租和 ≤3s guest 存活，留给 S11b 明确。固定操作可以只确认已经发起，由有界轮询取结果。本卡不为此选择传输、后台线程或状态机。
+- `accepting_provider_linked` / `scoped_provider_ack` 仍恒拒绝。本模块不铸造 `AdmittedLaunch`。
+
+S11b 在 S11-0 给出通道事实之前只应接这些 fake，不得选定真实传输。fake 通过不改变矩阵的 native 状态。
