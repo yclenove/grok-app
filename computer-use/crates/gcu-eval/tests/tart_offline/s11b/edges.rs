@@ -148,10 +148,10 @@ fn reason_for(step: Step, inject: Inject) -> NotRunReason {
     }
 }
 
-fn vm_present(step: Step, inject: Inject) -> bool {
+fn vm_present(step: Step, _inject: Inject) -> bool {
     match step {
-        Step::Reserve => false,
-        Step::Clone => !matches!(inject, Inject::Cancel),
+        // A failed clone stores no incarnation, so cleanup must not see a VM to delete.
+        Step::Reserve | Step::Clone => false,
         _ => true,
     }
 }
@@ -225,18 +225,39 @@ fn queue_fault(io: &harness::Handles, step: Step, inject: Inject) {
     }
     if matches!(inject, Inject::Lost) {
         // A lost ledger reply is a fault. A lost Tart or guest reply is an empty script.
-        if matches!(step, Step::Reserve) {
-            io.ledger.borrow_mut().push_fault(LedgerFault::ReplyLost);
+        // The list and status that precede the operation stay successful, so the fault
+        // lands on that operation rather than on the ownership check.
+        match step {
+            Step::Reserve => {
+                harness::push_clear(io);
+                io.ledger.borrow_mut().push_fault(LedgerFault::ReplyLost);
+            }
+            Step::Clone => harness::push_clear(io),
+            Step::Start => {
+                harness::push_named(io, CLONE);
+                harness::push_status(io, "running", harness::RUN, "up", "up");
+            }
+            _ => {}
         }
         return;
     }
     if matches!(step, Step::Reserve) {
+        harness::push_clear(io);
         io.ledger.borrow_mut().push_fault(ledger_fault(inject));
         return;
     }
     let reply = fault_reply(inject);
     match step {
-        Step::Clone | Step::Start | Step::Destroy => push_runner(io, reply),
+        Step::Clone => {
+            harness::push_clear(io);
+            push_runner(io, reply);
+        }
+        Step::Start => {
+            harness::push_named(io, CLONE);
+            harness::push_status(io, "running", harness::RUN, "up", "up");
+            push_runner(io, reply);
+        }
+        Step::Destroy => push_runner(io, reply),
         Step::Isolate | Step::Bootstrap | Step::Login | Step::Ready | Step::Run | Step::Revoke => {
             harness::push_guest(io, reply);
         }
@@ -384,7 +405,11 @@ fn follow_up(
     let mut attempt = world.attempt();
     let absolute = AttemptDeadline::after(io.clock.now(), AttemptDeadline::CAP).unwrap();
     if follow {
-        push_runner(io, harness::ok_body("ok"));
+        harness::push_clear(io);
+        harness::push_clear(io);
+        harness::push_clone_ok(io);
+        harness::push_named(io, CLONE_2);
+        harness::push_status(io, "running", RUN_2, "up", "up");
         push_runner(io, harness::ok_body("ok"));
         reserve_named(
             &mut attempt,

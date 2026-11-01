@@ -17,15 +17,14 @@ mod steps;
 
 use std::time::Duration;
 
-use super::super::CleanupDisposition;
 use super::budgets::PhaseBudgets;
 use super::deadline::{HostClock, MonoInstant, QueryDeadline};
 use super::guest::GuestChannel;
 use super::identity::{CloneId, RunId};
-use super::ledger::{AttemptLedger, ClonePermit, LedgerError, LedgerFact};
+use super::ledger::{AttemptLedger, ClonePermit, LedgerError, LedgerFact, VmIdentity};
 use super::lock::{CleanupLock, LockError};
 use super::output::CallError;
-use super::receipt::{AttemptOutcome, AttemptReceipt, Evidence, NotRunReason, Phase, TaskScore};
+use super::receipt::{AttemptReceipt, Evidence, NotRunReason, Phase, TaskScore};
 use super::runner::TartRunner;
 
 pub use cleanup::CleanupDeadlines;
@@ -88,6 +87,9 @@ pub enum StepError {
     /// The owner lease expired. The VM was not deleted.
     #[error("owner lease expired")]
     OwnerDead,
+    /// The clone name is already in the authoritative list. The row was not written.
+    #[error("clone destination already exists")]
+    DestinationExists,
     /// A noted crash or cancel moved the attempt into cleanup.
     #[error("attempt moved into cleanup")]
     Lost(NotRunReason),
@@ -155,6 +157,9 @@ pub struct Attempt<'a, R, G, L, K, C> {
     pub(super) client_starts: u8,
     pub(super) lease_until: Option<MonoInstant>,
     pub(super) lease_seq: u64,
+    pub(super) identity: Option<VmIdentity>,
+    /// The ledger row was observed sealed. An allocated unsealed row needs recovery.
+    pub(super) sealed: bool,
     pub(super) receipt: Option<AttemptReceipt>,
 }
 
@@ -204,6 +209,8 @@ where
             client_starts: 0,
             lease_until: None,
             lease_seq: 0,
+            identity: None,
+            sealed: false,
             receipt: None,
         }
     }
@@ -230,11 +237,12 @@ where
         if self.phase.closed() {
             return Err(StepError::Terminal);
         }
+        if self.lease_expired() {
+            self.expire_owner(None);
+            return Err(StepError::OwnerDead);
+        }
         if expected.contains(&self.phase) {
             return Ok(());
-        }
-        if matches!(self.phase, Phase::Revoking | Phase::Destroying) {
-            return Err(StepError::Unexpected);
         }
         self.fail(NotRunReason::Unexpected);
         Err(StepError::Unexpected)
@@ -251,6 +259,10 @@ where
         prep: bool,
     ) -> Result<MonoInstant, StepError> {
         let now = self.clock.now();
+        if self.lease_expired() {
+            self.expire_owner(Some(requested));
+            return Err(StepError::OwnerDead);
+        }
         let budget_end = now.checked_add(budget).map_err(|_| StepError::Overflow)?;
         if requested > budget_end {
             return Err(StepError::AboveBudget);
@@ -282,6 +294,9 @@ where
                 return Err(StepError::Expired);
             }
             effective = effective.min(absolute);
+        }
+        if let Some(group) = self.group_limit(now).map_err(|_| StepError::Overflow)? {
+            effective = effective.min(group);
         }
         if now >= effective {
             self.fail(NotRunReason::Deadline);
@@ -324,10 +339,52 @@ where
             }
             effective = effective.min(absolute);
         }
+        if let Some(group) = self.group_limit(now)? {
+            effective = effective.min(group);
+        }
         if now >= effective {
             Err(NotRunReason::Deadline)
         } else {
             Ok(effective)
+        }
+    }
+
+    /// Prep end, cleanup end, or the earlier of the two when both are still ahead.
+    ///
+    /// A prep end that has already passed does not clip cleanup. Recovery has
+    /// neither origin and is not clipped to a dead row.
+    fn group_limit(&self, now: MonoInstant) -> Result<Option<MonoInstant>, NotRunReason> {
+        let mut limit = None;
+        if let Some(origin) = self.origin {
+            let prep_end = origin
+                .checked_add(self.budgets.prep)
+                .map_err(|_| NotRunReason::Deadline)?;
+            if now < prep_end {
+                limit = Some(prep_end);
+            }
+        }
+        if let Some(started) = self.cleanup_origin {
+            let cleanup_end = started
+                .checked_add(self.budgets.cleanup)
+                .map_err(|_| NotRunReason::Deadline)?;
+            if now < cleanup_end {
+                limit = Some(match limit {
+                    Some(prep_end) => prep_end.min(cleanup_end),
+                    None => cleanup_end,
+                });
+            }
+        }
+        Ok(limit)
+    }
+
+    pub(super) fn lease_expired(&self) -> bool {
+        self.lease_until
+            .is_some_and(|until| self.clock.now() >= until)
+    }
+
+    pub(super) fn set_open(&mut self, phase: Phase) {
+        if !self.phase.closed() {
+            self.phase = phase;
         }
     }
 
@@ -395,65 +452,6 @@ where
         Err(StepError::Lost(reason))
     }
 
-    pub(super) fn make_receipt(
-        &self,
-        confirmed: bool,
-        quarantine: Option<NotRunReason>,
-    ) -> AttemptReceipt {
-        let client_started = self.client_starts > 0;
-        let quarantine_reason = quarantine.or(if confirmed {
-            None
-        } else if self.trigger == Some(NotRunReason::IdentityConflict) {
-            Some(NotRunReason::IdentityConflict)
-        } else if self.trigger == Some(NotRunReason::LockBusy) {
-            Some(NotRunReason::LockBusy)
-        } else if self.trigger == Some(NotRunReason::ReceiptFailed) {
-            Some(NotRunReason::ReceiptFailed)
-        } else {
-            Some(NotRunReason::CleanupFailed)
-        });
-        let outcome = if let Some(reason) = quarantine_reason {
-            AttemptOutcome::Quarantined {
-                reason,
-                client_started,
-            }
-        } else if let Some(reason) = self.trigger {
-            AttemptOutcome::NotRun {
-                reason,
-                client_started,
-            }
-        } else if self.evidence.complete() {
-            match self.evidence.provisional {
-                Some(score) => AttemptOutcome::Scored(score),
-                None => AttemptOutcome::NotRun {
-                    reason: NotRunReason::MissingProof,
-                    client_started,
-                },
-            }
-        } else {
-            AttemptOutcome::NotRun {
-                reason: NotRunReason::MissingProof,
-                client_started,
-            }
-        };
-        let quarantined = matches!(outcome, AttemptOutcome::Quarantined { .. });
-        let followups = !quarantined && !self.halted;
-        let disposition = if self.no_allocation {
-            CleanupDisposition::NoAllocation
-        } else {
-            CleanupDisposition::Allocated
-        };
-        AttemptReceipt::new(
-            self.run.clone(),
-            self.clone_id.clone(),
-            outcome,
-            followups,
-            disposition,
-            confirmed && !quarantined,
-            false,
-        )
-    }
-
     pub(super) fn query_deadline(
         &self,
         effective: MonoInstant,
@@ -476,6 +474,20 @@ where
             .query_deadline(effective)
             .map_err(|_| LedgerError::Expired)?;
         self.ledger.append(&clone, fact, call)
+    }
+
+    pub(super) fn note_identity(
+        &mut self,
+        identity: &VmIdentity,
+        effective: MonoInstant,
+    ) -> Result<(), LedgerError> {
+        let Some(clone) = self.clone_id.clone() else {
+            return Err(LedgerError::NotFound);
+        };
+        let call = self
+            .query_deadline(effective)
+            .map_err(|_| LedgerError::Expired)?;
+        self.ledger.note_identity(&clone, identity, call)
     }
 }
 

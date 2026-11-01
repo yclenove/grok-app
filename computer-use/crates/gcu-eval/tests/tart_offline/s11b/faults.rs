@@ -27,8 +27,8 @@ pub(super) const TESTS: &[(&str, fn() -> Result<(), String>)] = &[
         unexpected_start_from_idle_does_not_clone,
     ),
     (
-        "second_run_does_not_issue_another_client",
-        second_run_does_not_issue_another_client,
+        "second_run_stays_not_run_after_seal",
+        second_run_stays_not_run_after_seal,
     ),
     (
         "second_revoke_does_not_send_again",
@@ -71,8 +71,8 @@ pub(super) const TESTS: &[(&str, fn() -> Result<(), String>)] = &[
         super::recovery::recovery_deletes_after_the_absolute_deadline,
     ),
     (
-        "idempotent_absent_stop_and_delete_leave_golden",
-        super::recovery::idempotent_absent_stop_and_delete_leave_golden,
+        "listed_absence_does_not_stop_or_delete",
+        super::recovery::listed_absence_does_not_stop_or_delete,
     ),
     (
         "status_timeout_does_not_delete_and_halts",
@@ -212,8 +212,14 @@ fn success_trace_keeps_pass_and_rejects_later_events() -> Result<(), String> {
     let clone = id_clone(CLONE);
     let flags = harness::flags();
     let expected = [
+        TartCommand::List,
+        TartCommand::List,
         TartCommand::Clone {
             golden: gcu_eval::disposable::tart::GoldenImage::MacosS2Eval,
+            clone: clone.clone(),
+        },
+        TartCommand::List,
+        TartCommand::Status {
             clone: clone.clone(),
         },
         TartCommand::Start {
@@ -302,7 +308,7 @@ fn unexpected_start_from_idle_does_not_clone() -> Result<(), String> {
     Ok(())
 }
 
-fn second_run_does_not_issue_another_client() -> Result<(), String> {
+fn second_run_stays_not_run_after_seal() -> Result<(), String> {
     let mut world = harness::World::new(PhaseBudgets::adr());
     let io = world.open();
     scripts_to_reach(&io, Phase::Running);
@@ -316,7 +322,8 @@ fn second_run_does_not_issue_another_client() -> Result<(), String> {
     if attempt.run(deadline).is_ok() || run_count(&io) != 1 {
         return Err(format!("runs {}", run_count(&io)));
     }
-    Ok(())
+    let receipt = finish(&mut attempt, &io, true)?;
+    expect_not_run(&receipt, NotRunReason::Unexpected, true, true)
 }
 
 fn second_revoke_does_not_send_again() -> Result<(), String> {

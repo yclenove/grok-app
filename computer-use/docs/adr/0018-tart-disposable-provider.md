@@ -237,16 +237,18 @@ S11b 在 S11-0 给出通道事实之前只应接这些 fake，不得选定真实
 
 ## 12. S11b 状态
 
-状态：调用方顺序驱动的同步状态机与账本清理已在 fake 上落地（2026-11-01）。这不是 provider，不铸造 `AdmittedLaunch`，不改变 S6 门禁，不批准真实运行。§11 里“状态机尚未实现”是 S11a 当时的记录；本节覆盖该句。
+状态：调用方顺序驱动的同步状态机与账本清理已在 fake 上落地（2026-11-01），并按当轮评审收紧所有权、停止证明、租约和截止（同日）。这不是 provider，不铸造 `AdmittedLaunch`，不改变 S6 门禁，不批准真实运行。§11 里“状态机尚未实现”是 S11a 当时的记录；本节覆盖该句。
 
 已实现（`gcu-eval/src/disposable/tart/`，无后台线程、无观察者、无 async、无新依赖）：
 
-- 阶段：`Idle → Reserved → Cloned → Booting → Isolated → Bootstrapped → CredentialReady → Ready → Running → Revoking → Destroying → Final`。`Quarantined` 是 `not_run/cleanup_failed`，停后续 task/arm/repeat。`Suspended` 只表示外层 owner 租约到期：不删除 VM、不封存，回执 cleanup 为 unknown，下次启动先 `recover`。
-- 每步一个同步方法，调用方持有 runner、guest、账本、锁和钟。`Drop` 不 stop、不 delete、不 seal。reserve 之后的步骤取调用 deadline、阶段预算和绝对截止中最早的一个。阶段预算集中在 `budgets.rs`（§2 的上限），测试只能缩小。Stop 常量未改。
+- 阶段：`Idle → Reserved → Cloned → Booting → Isolated → Bootstrapped → CredentialReady → Ready → Running → Revoking → Destroying → Final`。`Quarantined` 是清理或回执失败，停后续 task/arm/repeat。`Suspended` 只由已经到期的 owner 租约在调用入口同步进入：晚到的 renew、之后的转移和发布门看到 `lease_until` 已过，都进入 `Suspended`，禁止该 owner 删除，不封存，回执 cleanup 为 unknown，下次启动先 `recover`。没有计时器，也没有自动恢复。进入之后，arm、run、revoke、destroy、seal 都不能把阶段改回或续租。
+- 每步一个同步方法，调用方持有 runner、guest、账本、锁和钟。`Drop` 不 stop、不 delete、不 seal。reserve 之后的步骤取调用 deadline、阶段预算、准备阶段结束、清理阶段结束和绝对截止中最早的一个。stop 之后的 status 不超过 stop 的有效截止；delete 之后的缺席确认不超过 delete 的有效截止。恢复只用本次调用的 deadline，不用已死行的绝对截止。阶段预算集中在 `budgets.rs`（§2 的上限），测试只能缩小。Stop 常量未改。
+- 所有权：clone 正文里的化身和配置写入预约记录。同名目的地在 reserve 和 clone 之前拒绝。start、stop、delete 和恢复在动手前要求权威清单里的身份与记录一致；缺失或歧义进入隔离，不按名字或 run 标签认领。guest boot 变化使本次分数失效，但清理仍可销毁已经正向识别为自己所有的 VM。
+- 停止与缺席：`state=absent` 不是进程已退出的证明。tart 或 softnet 仍为 up 的 absent 正文是畸形，不能当清理成功。资源“不存在”只来自一份完整且成功的 list；这份 list 已经证明某个名字不在其中之后，不再对这个名字发 stop 或 delete。
 - `Bootstrapped` / `CredentialReady` / `Ready` 只推进状态并记录证据。login/run 仍是 fake。不选 H1 传输，不安装 H2 guard。
-- 清理：非预期转移、超时和故障进入 `Revoking → Destroying`（stop → 确认 → delete → 权威 list 确认不存在 → 封存）。查询失败或不完整不是“已消失”。只处理账本里的精确 clone id；不按前缀删除，不删 golden 或外部 VM，不重启孤儿。登记仍先于 clone。
-- 恢复：`recover` 只读未封存行，先追加 `RecoveryNoted` 再 stop/delete。它用本次调用的 deadline，不用已死行的绝对截止，否则绝对截止已过的孤儿无法删除。旧 attempt 仍永久 `not_run`，不恢复分数。带 `CleanupUnknown` 的行记 `OwnerDeath`，其余未封存行记 `HostCrash`。
-- 环境违约、缺证明、边界崩溃、清理失败一律 `not_run`，即使 fake 曾返回 pass。只有证据完整且清理确认成功才保留分数。
+- 清理：非预期转移（含 `Revoking` / `Destroying` 上的 run、start）记录 `Unexpected` 并永久 `not_run`。超时和故障进入 `Revoking → Destroying`（stop → 确认 → delete → 权威 list 确认不存在 → 封存）。查询失败或不完整不是“已消失”。只处理账本里的精确 clone id；不按前缀删除，不删 golden 或外部 VM，不重启孤儿。登记仍先于 clone。边矩阵是每条正向边上的一种故障注入，不是每个中断前缀。
+- 恢复：`recover` 只读未封存行，先追加 `RecoveryNoted`，再按记录中的化身 stop/delete。它用本次调用的 deadline，不用已死行的绝对截止，否则绝对截止已过的孤儿无法删除。旧 attempt 仍永久 `not_run`，不恢复分数。带 `CleanupUnknown` 的行记 `OwnerDeath`，其余未封存行记 `HostCrash`。没有化身记录时，同名 VM 不删。
+- 环境违约、缺证明、边界崩溃、清理阶段的非法调用一律 `not_run`，即使 fake 曾返回 pass。只有证据完整、身份未变、且清理确认成功才保留分数。回执只记录当前原因；原先的 provisional 分数和第一因的保留留给 S11d。例如 provider 崩溃之后清理又失败，发布出去的是 `CleanupFailed`，不是两条原因。`recovery_required` 由这一行是否已分配且未封存推导。
 
 仍依赖后续卡，本卡不实现：
 

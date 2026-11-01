@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::time::Duration;
 
 use super::command::TartCommand;
 use super::deadline::{
@@ -78,6 +79,8 @@ pub struct FakeTartRunner {
     clock: FakeClock,
     script: VecDeque<ScriptedReply>,
     trace: Vec<TraceEntry<TartCommand>>,
+    advance_after_stop: Option<Duration>,
+    advance_after_delete: Option<Duration>,
 }
 
 impl FakeTartRunner {
@@ -90,7 +93,24 @@ impl FakeTartRunner {
             clock,
             script: VecDeque::new(),
             trace: Vec::new(),
+            advance_after_stop: None,
+            advance_after_delete: None,
         }
+    }
+
+    /// After each `stop`, move the shared fake clock forward by `step`.
+    ///
+    /// Does not sleep. The next call in the same machine step sees the new
+    /// instant. A zero step is ignored.
+    pub fn advance_after_stop(&mut self, step: Duration) {
+        self.advance_after_stop = Some(step);
+    }
+
+    /// After each `delete`, move the shared fake clock forward by `step`.
+    ///
+    /// Does not sleep. See [`Self::advance_after_stop`].
+    pub fn advance_after_delete(&mut self, step: Duration) {
+        self.advance_after_delete = Some(step);
     }
 
     /// Queue one reply. Overlong success bodies are rejected before they are queued.
@@ -110,11 +130,19 @@ impl FakeTartRunner {
         deadline: MonoInstant,
     ) -> Result<BoundedOutput, CallError> {
         let result = dispatch_script(&mut self.script, self.clock.now(), deadline);
+        let step = match &command {
+            TartCommand::Stop { .. } => self.advance_after_stop,
+            TartCommand::Delete { .. } => self.advance_after_delete,
+            _ => None,
+        };
         self.trace.push(TraceEntry {
             command,
             deadline,
             outcome: script_outcome(&result),
         });
+        if let Some(step) = step {
+            let _ = self.clock.advance(step);
+        }
         result
     }
 }

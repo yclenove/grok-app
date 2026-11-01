@@ -66,6 +66,7 @@ pub(super) fn owner_death_leaves_cleanup_unknown_until_recovery() -> Result<(), 
         return Err("recovery restarted the orphan".into());
     }
     let absolute = AttemptDeadline::after(io.clock.now(), AttemptDeadline::CAP).unwrap();
+    harness::push_clear(&io);
     reserve_named(
         &mut again,
         &io.clock,
@@ -103,6 +104,7 @@ pub(super) fn host_crash_recovers_orphan_without_reviving_the_score() -> Result<
     drop(again);
     let mut reject = world.attempt();
     let absolute = AttemptDeadline::after(io.clock.now(), AttemptDeadline::CAP).unwrap();
+    harness::push_clear(&io);
     let err = reserve_named(
         &mut reject,
         &io.clock,
@@ -124,6 +126,7 @@ pub(super) fn host_crash_recovers_orphan_without_reviving_the_score() -> Result<
     drop(reject);
     let mut fresh = world.attempt();
     let absolute = AttemptDeadline::after(io.clock.now(), AttemptDeadline::CAP).unwrap();
+    harness::push_clear(&io);
     reserve_named(
         &mut fresh,
         &io.clock,
@@ -180,7 +183,7 @@ pub(super) fn recovery_deletes_after_the_absolute_deadline() -> Result<(), Strin
     Ok(())
 }
 
-pub(super) fn idempotent_absent_stop_and_delete_leave_golden() -> Result<(), String> {
+pub(super) fn listed_absence_does_not_stop_or_delete() -> Result<(), String> {
     let mut world = harness::World::new(PhaseBudgets::adr());
     let io = world.open();
     scripts_to_reach(&io, Phase::Cloned);
@@ -193,8 +196,8 @@ pub(super) fn idempotent_absent_stop_and_delete_leave_golden() -> Result<(), Str
     let receipt = finish(&mut attempt, &io, false)?;
     expect_not_run(&receipt, NotRunReason::Cancelled, false, true)?;
     assert_ids(&runner_commands(&io), &[CLONE])?;
-    if !stopped(&io) {
-        return Err("absent vm was not stopped".into());
+    if stopped(&io) || !receipt.cleanup_confirmed() {
+        return Err(format!("listed absence still deleted: {receipt:?}"));
     }
     Ok(())
 }
@@ -251,7 +254,9 @@ pub(super) fn identity_conflict_does_not_stop_or_delete() -> Result<(), String> 
     );
     push_runner(
         &io,
-        ok_body("status v1 state=running run=other-run boot=boot1 tart=up softnet=up"),
+        ok_body(
+            "status v1 state=running run=other-run boot=boot1 inc=inc1 cfg=cfg1 tart=up softnet=up",
+        ),
     );
     let mut attempt = world.attempt();
     drive_to(&mut attempt, &io, Phase::Revoking)?;
@@ -288,12 +293,16 @@ pub(super) fn delete_confirmation_still_present_is_quarantine() -> Result<(), St
     push_runner(&io, ok_body(listed));
     push_runner(
         &io,
-        ok_body("status v1 state=running run=run-1 boot=boot1 tart=up softnet=up"),
+        ok_body(
+            "status v1 state=running run=run-1 boot=boot1 inc=inc1 cfg=cfg1 tart=up softnet=up",
+        ),
     );
     push_runner(&io, ok_body("ok"));
     push_runner(
         &io,
-        ok_body("status v1 state=stopped run=run-1 boot=boot1 tart=exited softnet=exited"),
+        ok_body(
+            "status v1 state=stopped run=run-1 boot=boot1 inc=inc1 cfg=cfg1 tart=exited softnet=exited",
+        ),
     );
     push_runner(&io, ok_body("ok"));
     push_runner(&io, ok_body(listed));
@@ -324,6 +333,9 @@ pub(super) fn seal_fault_drops_the_score_and_requires_recovery() -> Result<(), S
     }
     let receipt = attempt.receipt().cloned().ok_or("no receipt")?;
     expect_quarantine(&receipt, NotRunReason::ReceiptFailed)?;
+    if !receipt.recovery_required() {
+        return Err("unsealed seal failure hid recovery".into());
+    }
     drop(attempt);
     let row = io
         .ledger
@@ -402,7 +414,8 @@ pub(super) fn shrunk_clone_budget_rejects_without_consuming_the_script() -> Resu
         .unwrap();
     let mut world = harness::World::new(budgets);
     let io = world.open();
-    push_runner(&io, ok_body("ok"));
+    harness::push_clear(&io);
+    harness::push_clone_ok(&io);
     let mut attempt = world.attempt();
     reserve_default(&mut attempt, &io.clock)?;
     let deadline = CloneDeadline::after(io.clock.now(), CloneDeadline::CAP).unwrap();
@@ -415,8 +428,12 @@ pub(super) fn shrunk_clone_budget_rejects_without_consuming_the_script() -> Resu
     ) {
         return Err("over-budget clone was issued".into());
     }
-    if attempt.phase() != Phase::Reserved || !runner_commands(&io).is_empty() {
-        return Err("script was consumed".into());
+    if attempt.phase() != Phase::Reserved
+        || runner_commands(&io)
+            .iter()
+            .any(|command| matches!(command, TartCommand::Clone { .. }))
+    {
+        return Err("clone script was consumed".into());
     }
     Ok(())
 }
@@ -427,7 +444,8 @@ pub(super) fn shrunk_prep_budget_expires_without_a_clone() -> Result<(), String>
         .unwrap();
     let mut world = harness::World::new(budgets);
     let io = world.open();
-    push_runner(&io, ok_body("ok"));
+    harness::push_clear(&io);
+    harness::push_clone_ok(&io);
     let mut attempt = world.attempt();
     reserve_default(&mut attempt, &io.clock)?;
     advance(&io.clock, Duration::from_millis(1))?;
@@ -441,7 +459,11 @@ pub(super) fn shrunk_prep_budget_expires_without_a_clone() -> Result<(), String>
     ) {
         return Err("prep window stayed open".into());
     }
-    if attempt.phase() != Phase::Revoking || !runner_commands(&io).is_empty() {
+    if attempt.phase() != Phase::Revoking
+        || runner_commands(&io)
+            .iter()
+            .any(|command| matches!(command, TartCommand::Clone { .. }))
+    {
         return Err(format!(
             "phase {:?} trace {:?}",
             attempt.phase(),
@@ -456,7 +478,9 @@ pub(super) fn absolute_deadline_clips_the_recorded_clone_deadline() -> Result<()
     let io = world.open();
     let absolute = AttemptDeadline::after(io.clock.now(), Duration::from_secs(30)).unwrap();
     let saved = absolute.at();
-    push_runner(&io, ok_body("ok"));
+    harness::push_clear(&io);
+    harness::push_clear(&io);
+    harness::push_clone_ok(&io);
     let mut attempt = world.attempt();
     reserve_named(
         &mut attempt,
@@ -477,7 +501,11 @@ pub(super) fn absolute_deadline_clips_the_recorded_clone_deadline() -> Result<()
         )
         .map_err(|err| format!("clone: {err:?}"))?;
     let trace = io.runner.borrow().trace().to_vec();
-    if trace.len() != 1 || trace[0].deadline != saved || trace[0].outcome != ScriptOutcome::Success
+    let clone = trace
+        .iter()
+        .find(|entry| matches!(entry.command, TartCommand::Clone { .. }));
+    if clone.map(|entry| entry.deadline) != Some(saved)
+        || clone.map(|entry| entry.outcome) != Some(ScriptOutcome::Success)
     {
         return Err(format!("trace {trace:?}"));
     }
@@ -544,6 +572,7 @@ pub(super) fn manifest_mismatch_is_not_run_without_a_clone() -> Result<(), Strin
 pub(super) fn unsealed_row_must_be_recovered_before_reserve() -> Result<(), String> {
     let mut world = harness::World::new(PhaseBudgets::adr());
     let io = world.open();
+    harness::push_clear(&io);
     {
         let mut attempt = world.attempt();
         reserve_default(&mut attempt, &io.clock)?;
@@ -551,6 +580,7 @@ pub(super) fn unsealed_row_must_be_recovered_before_reserve() -> Result<(), Stri
             return Err("did not reserve".into());
         }
     }
+    let listed = runner_commands(&io).len();
     let mut again = world.attempt();
     let absolute = AttemptDeadline::after(io.clock.now(), AttemptDeadline::CAP).unwrap();
     let err = reserve_named(
@@ -565,7 +595,7 @@ pub(super) fn unsealed_row_must_be_recovered_before_reserve() -> Result<(), Stri
     );
     if !matches!(err, Err(StepError::MustRecover))
         || again.phase() != Phase::Idle
-        || !runner_commands(&io).is_empty()
+        || runner_commands(&io).len() != listed
     {
         return Err(format!("recover gate: {err:?} phase {:?}", again.phase()));
     }
@@ -644,7 +674,7 @@ pub(super) fn late_owner_lease_does_not_extend() -> Result<(), String> {
         .iter()
         .filter(|command| matches!(command, GuestCommand::Lease { .. }))
         .count();
-    if leases != 1 || attempt.phase() != Phase::Running {
+    if leases != 1 || attempt.phase() != Phase::Suspended {
         return Err(format!("leases {leases} phase {:?}", attempt.phase()));
     }
     Ok(())

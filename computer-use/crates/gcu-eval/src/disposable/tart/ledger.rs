@@ -39,9 +39,14 @@ pub enum LedgerFault {
     Overlong,
     /// The call was issued and the reply did not arrive. Nothing is written.
     ReplyLost,
+    /// The write was stored, then the acknowledgement was lost.
+    ///
+    /// Unlike [`Self::ReplyLost`], the row does change. Callers still see
+    /// [`LedgerError::ReplyLost`] and must read the row to see the write.
+    CommittedLost,
 }
 
-/// Why a ledger call failed. The row is unchanged on failure.
+/// Why a ledger call failed. A [`LedgerFault::CommittedLost`] write is the exception.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LedgerError {
     /// The call deadline was already due. Nothing was written.
@@ -74,9 +79,43 @@ pub enum LedgerError {
     /// Scripted overlong reply. Nothing was stored.
     #[error("ledger reply exceeded the cap")]
     Overlong,
-    /// The reply was lost. Nothing was written.
+    /// The acknowledgement did not come back.
+    ///
+    /// [`LedgerFault::ReplyLost`] leaves the row unchanged.
+    /// [`LedgerFault::CommittedLost`] stores the write and then returns this error.
     #[error("ledger reply was lost")]
     ReplyLost,
+}
+
+/// Fake VM incarnation and configuration measured from a clone body.
+///
+/// This is not a host identity and not a boot id. Destruction matches it
+/// against a later authoritative status. A guest reboot is a separate fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VmIdentity {
+    incarnation: String,
+    config: String,
+}
+
+impl VmIdentity {
+    pub(crate) fn from_parts(incarnation: String, config: String) -> Self {
+        Self {
+            incarnation,
+            config,
+        }
+    }
+
+    /// Incarnation token from the clone body.
+    #[must_use]
+    pub fn incarnation(&self) -> &str {
+        &self.incarnation
+    }
+
+    /// Configuration token from the clone body.
+    #[must_use]
+    pub fn config(&self) -> &str {
+        &self.config
+    }
 }
 
 /// One reservation. The fake stores this value. Fields are a snapshot, not a live capability.
@@ -85,6 +124,8 @@ pub struct Reservation {
     run: RunId,
     clone_id: CloneId,
     absolute: MonoInstant,
+    /// Set from a clone body. `None` does not own a VM that happens to share the name.
+    expected: Option<VmIdentity>,
     facts: Vec<LedgerFact>,
     sealed: bool,
 }
@@ -106,6 +147,12 @@ impl Reservation {
     #[must_use]
     pub fn absolute_deadline(&self) -> MonoInstant {
         self.absolute
+    }
+
+    /// Incarnation measured from the clone body, once that body was stored.
+    #[must_use]
+    pub fn expected(&self) -> Option<&VmIdentity> {
+        self.expected.as_ref()
     }
 
     /// Facts appended since reserve, in order.
@@ -182,7 +229,9 @@ mod clone_permit_not_duplicated {
 pub trait AttemptLedger {
     /// Write `run`, `clone`, and `absolute`, then return the only permit for that row.
     ///
-    /// On error nothing is written and no permit is returned.
+    /// On error no permit is returned. [`LedgerFault::ReplyLost`] also writes
+    /// nothing. [`LedgerFault::CommittedLost`] stores the row and then returns
+    /// [`LedgerError::ReplyLost`].
     fn reserve(
         &mut self,
         run: RunId,
@@ -199,6 +248,17 @@ pub trait AttemptLedger {
         &mut self,
         clone: &CloneId,
         fact: LedgerFact,
+        call: QueryDeadline,
+    ) -> Result<(), LedgerError>;
+
+    /// Store the clone body's incarnation on the exact row.
+    ///
+    /// Does not block. A missing value means this reservation must not be
+    /// treated as the owner of a VM that merely shares the clone name.
+    fn note_identity(
+        &mut self,
+        clone: &CloneId,
+        identity: &VmIdentity,
         call: QueryDeadline,
     ) -> Result<(), LedgerError>;
 
@@ -233,7 +293,7 @@ impl FakeLedger {
         }
     }
 
-    /// Queue a fault for the next `reserve`, `append`, or `seal`.
+    /// Queue a fault for the next `reserve`, `append`, `note_identity`, or `seal`.
     ///
     /// An empty queue is the success path. A due deadline does not consume
     /// the fault. Does not block.
@@ -256,14 +316,24 @@ impl FakeLedger {
             .ok_or(LedgerError::NotFound)
     }
 
-    fn take_fault(&mut self) -> Result<(), LedgerError> {
+    /// `Ok(true)` means the write must be stored and then reported as lost.
+    fn take_fault(&mut self) -> Result<bool, LedgerError> {
         match self.faults.pop_front() {
-            None => Ok(()),
+            None => Ok(false),
+            Some(LedgerFault::CommittedLost) => Ok(true),
             Some(LedgerFault::Failed) => Err(LedgerError::Failed),
             Some(LedgerFault::TimedOut) => Err(LedgerError::TimedOut),
             Some(LedgerFault::Malformed) => Err(LedgerError::Malformed),
             Some(LedgerFault::Overlong) => Err(LedgerError::Overlong),
             Some(LedgerFault::ReplyLost) => Err(LedgerError::ReplyLost),
+        }
+    }
+
+    fn finish_write(committed_lost: bool) -> Result<(), LedgerError> {
+        if committed_lost {
+            Err(LedgerError::ReplyLost)
+        } else {
+            Ok(())
         }
     }
 }
@@ -280,7 +350,7 @@ impl AttemptLedger for FakeLedger {
         if absolute.at() <= self.clock.now() {
             return Err(LedgerError::AttemptAlreadyExpired);
         }
-        self.take_fault()?;
+        let committed_lost = self.take_fault()?;
         if self.rows.iter().any(|row| row.run == run) {
             return Err(LedgerError::DuplicateRun);
         }
@@ -292,9 +362,13 @@ impl AttemptLedger for FakeLedger {
             run: run.clone(),
             clone_id: clone.clone(),
             absolute: stored,
+            expected: None,
             facts: Vec::new(),
             sealed: false,
         });
+        if committed_lost {
+            return Err(LedgerError::ReplyLost);
+        }
         Ok(ClonePermit {
             run,
             clone_id: clone,
@@ -319,9 +393,25 @@ impl AttemptLedger for FakeLedger {
         if self.rows[index].sealed {
             return Err(LedgerError::Sealed);
         }
-        self.take_fault()?;
+        let committed_lost = self.take_fault()?;
         self.rows[index].facts.push(fact);
-        Ok(())
+        Self::finish_write(committed_lost)
+    }
+
+    fn note_identity(
+        &mut self,
+        clone: &CloneId,
+        identity: &VmIdentity,
+        call: QueryDeadline,
+    ) -> Result<(), LedgerError> {
+        self.ensure_call(call.at())?;
+        let index = self.row_index(clone)?;
+        if self.rows[index].sealed {
+            return Err(LedgerError::Sealed);
+        }
+        let committed_lost = self.take_fault()?;
+        self.rows[index].expected = Some(identity.clone());
+        Self::finish_write(committed_lost)
     }
 
     fn seal(&mut self, clone: &CloneId, call: SealDeadline) -> Result<(), LedgerError> {
@@ -330,9 +420,9 @@ impl AttemptLedger for FakeLedger {
         if self.rows[index].sealed {
             return Err(LedgerError::Sealed);
         }
-        self.take_fault()?;
+        let committed_lost = self.take_fault()?;
         self.rows[index].sealed = true;
-        Ok(())
+        Self::finish_write(committed_lost)
     }
 
     fn rows(&self, call: QueryDeadline) -> Result<Vec<Reservation>, LedgerError> {

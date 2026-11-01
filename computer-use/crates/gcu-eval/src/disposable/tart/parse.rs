@@ -26,8 +26,17 @@ pub(super) struct VmStatus {
     pub state: VmState,
     pub run: Option<String>,
     pub boot: Option<String>,
+    pub incarnation: Option<String>,
+    pub config: Option<String>,
     pub tart_up: Option<bool>,
     pub softnet_up: Option<bool>,
+}
+
+/// Identity measured from a successful clone body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CloneMark {
+    pub incarnation: String,
+    pub config: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +92,8 @@ pub(super) fn parse_status(body: &[u8]) -> Result<VmStatus, ParseError> {
     let mut state = None;
     let mut run = None;
     let mut boot = None;
+    let mut incarnation = None;
+    let mut config = None;
     let mut tart_up = None;
     let mut softnet_up = None;
     for token in text["status v1 ".len()..].split(' ') {
@@ -101,14 +112,26 @@ pub(super) fn parse_status(body: &[u8]) -> Result<VmStatus, ParseError> {
             }
             "run" if run.is_none() => run = Some(token_value(value)?),
             "boot" if boot.is_none() => boot = Some(token_value(value)?),
+            "inc" if incarnation.is_none() => incarnation = Some(token_value(value)?),
+            "cfg" if config.is_none() => config = Some(token_value(value)?),
             "tart" if tart_up.is_none() => tart_up = Some(up_down(value)?),
             "softnet" if softnet_up.is_none() => softnet_up = Some(up_down(value)?),
             _ => return Err(ParseError::Malformed),
         }
     }
     let state = state.ok_or(ParseError::Incomplete)?;
+    // A live process contradicts `absent`. Absence of the VM is a list fact,
+    // not a status fact, and it does not certify that Tart or Softnet exited.
+    if state == VmState::Absent && (tart_up == Some(true) || softnet_up == Some(true)) {
+        return Err(ParseError::Malformed);
+    }
     if state != VmState::Absent
-        && (run.is_none() || boot.is_none() || tart_up.is_none() || softnet_up.is_none())
+        && (run.is_none()
+            || boot.is_none()
+            || incarnation.is_none()
+            || config.is_none()
+            || tart_up.is_none()
+            || softnet_up.is_none())
     {
         return Err(ParseError::Incomplete);
     }
@@ -116,17 +139,44 @@ pub(super) fn parse_status(body: &[u8]) -> Result<VmStatus, ParseError> {
         state,
         run,
         boot,
+        incarnation,
+        config,
         tart_up,
         softnet_up,
     })
 }
 
+/// Stop is real only when the VM is stopped and both processes have exited.
+///
+/// `Absent` is not that proof. A missing tart/softnet field is not an exit.
 pub(super) fn stopped_clean(status: &VmStatus) -> bool {
-    match status.state {
-        VmState::Absent => true,
-        VmState::Stopped => status.tart_up == Some(false) && status.softnet_up == Some(false),
-        VmState::Running => false,
+    status.state == VmState::Stopped
+        && status.tart_up == Some(false)
+        && status.softnet_up == Some(false)
+}
+
+pub(super) fn parse_clone(body: &[u8]) -> Result<CloneMark, ParseError> {
+    let text = std::str::from_utf8(body).map_err(|_| ParseError::Malformed)?;
+    if text.contains('\n') || !text.starts_with("clone v1 ") {
+        return Err(ParseError::Malformed);
     }
+    let mut incarnation = None;
+    let mut config = None;
+    for token in text["clone v1 ".len()..].split(' ') {
+        if token.is_empty() {
+            return Err(ParseError::Malformed);
+        }
+        let (key, value) = token.split_once('=').ok_or(ParseError::Malformed)?;
+        match key {
+            "inc" if incarnation.is_none() => incarnation = Some(token_value(value)?),
+            "cfg" if config.is_none() => config = Some(token_value(value)?),
+            _ => return Err(ParseError::Malformed),
+        }
+    }
+    Ok(CloneMark {
+        incarnation: incarnation.ok_or(ParseError::Incomplete)?,
+        config: config.ok_or(ParseError::Incomplete)?,
+    })
 }
 
 pub(super) fn parse_guest(body: &[u8]) -> Result<GuestView, ParseError> {

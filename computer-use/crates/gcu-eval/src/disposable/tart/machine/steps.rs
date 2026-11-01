@@ -7,7 +7,7 @@ use super::super::deadline::{
 };
 use super::super::guest::{GuestChannel, GUEST_CHANNEL_VERSION};
 use super::super::identity::{CloneId, RunId};
-use super::super::ledger::AttemptLedger;
+use super::super::ledger::{AttemptLedger, VmIdentity};
 use super::super::lock::CleanupLock;
 use super::super::manifest::InstallManifest;
 use super::super::parse::{self, LoginMark};
@@ -94,6 +94,16 @@ where
             self.halted = true;
             return Err(StepError::Halted);
         }
+        let names = match self.names_at(effective, None) {
+            Ok(names) => names,
+            Err(reason) => {
+                self.fail(reason);
+                return Err(step_from_reason(reason));
+            }
+        };
+        if names.iter().any(|name| name == input.clone_id.as_str()) {
+            return Err(StepError::DestinationExists);
+        }
         match self.ledger.reserve(
             input.run.clone(),
             input.clone_id.clone(),
@@ -119,8 +129,9 @@ where
     /// Clone the golden image with the reserved permit.
     ///
     /// The permit is consumed on every path that reaches the runner, including
-    /// failure. The effective deadline is the earlier of `deadline` and the
-    /// absolute attempt deadline. A lost reply still owns the clone id.
+    /// failure. The effective deadline is the earlier of `deadline`, the phase
+    /// budget, prep end, and the absolute attempt deadline. A lost reply does
+    /// not store an incarnation, so a same-name VM is not owned.
     /// Does not block.
     pub fn clone_vm(
         &mut self,
@@ -133,22 +144,50 @@ where
             self.budgets.clone_limit,
             true,
         )?;
+        let Some(clone) = self.clone_id.clone() else {
+            self.fail(NotRunReason::Unexpected);
+            return Err(StepError::Unexpected);
+        };
+        let names = match self.names_at(effective, self.absolute) {
+            Ok(names) => names,
+            Err(reason) => {
+                self.permit.take();
+                self.fail(reason);
+                return Err(step_from_reason(reason));
+            }
+        };
+        if names.iter().any(|name| name == clone.as_str()) {
+            self.permit.take();
+            self.fail(NotRunReason::IdentityConflict);
+            return Err(StepError::Cleanup(NotRunReason::IdentityConflict));
+        }
         let Some(permit) = self.permit.take() else {
             self.fail(NotRunReason::Unexpected);
             return Err(StepError::Unexpected);
         };
         let call = CloneDeadline::from_instant(effective);
         let result = self.runner.clone_vm(permit, golden, call);
-        if !matches!(result, Err(super::super::output::CallError::Expired)) {
-            if let Err(err) =
-                self.append_fact(super::super::ledger::LedgerFact::CloneIssued, effective)
-            {
-                self.fail(ledger_reason(&err));
-                return Err(StepError::Ledger(err));
-            }
-        }
         match result {
-            Ok(_) => {
+            Ok(body) => {
+                let mark = match parse::parse_clone(body.as_bytes()) {
+                    Ok(mark) => mark,
+                    Err(_) => {
+                        self.fail(NotRunReason::Malformed);
+                        return Err(StepError::MalformedBody);
+                    }
+                };
+                let identity = VmIdentity::from_parts(mark.incarnation, mark.config);
+                if let Err(err) =
+                    self.append_fact(super::super::ledger::LedgerFact::CloneIssued, effective)
+                {
+                    self.fail(ledger_reason(&err));
+                    return Err(StepError::Ledger(err));
+                }
+                if let Err(err) = self.note_identity(&identity, effective) {
+                    self.fail(ledger_reason(&err));
+                    return Err(StepError::Ledger(err));
+                }
+                self.identity = Some(identity);
                 self.phase = Phase::Cloned;
                 Ok(())
             }
@@ -172,6 +211,18 @@ where
             self.fail(NotRunReason::Unexpected);
             return Err(StepError::Unexpected);
         };
+        let Some(run) = self.run.clone() else {
+            self.fail(NotRunReason::Unexpected);
+            return Err(StepError::Unexpected);
+        };
+        let Some(identity) = self.identity.clone() else {
+            self.fail(NotRunReason::IdentityConflict);
+            return Err(StepError::Cleanup(NotRunReason::IdentityConflict));
+        };
+        if let Err(reason) = self.confirm_owned(&clone, &run, &identity, effective) {
+            self.fail(reason);
+            return Err(step_from_reason(reason));
+        }
         let call = StartDeadline::from_instant(effective);
         match self.runner.start(&clone, flags, call) {
             Ok(_) => {
@@ -209,10 +260,7 @@ where
                 return Err(StepError::MalformedBody);
             }
         };
-        self.evidence.boot = Some(view.boot);
-        self.evidence.uid = Some(view.uid);
-        self.evidence.desktop = Some(view.desktop);
-        self.evidence.config = Some(view.config);
+        self.evidence.guest = Some(view);
         for probe in Probe::ALL {
             let at = match self.earlier(effective, self.budgets.probe, self.absolute) {
                 Ok(at) => at,
@@ -314,13 +362,17 @@ where
                 return Err(StepError::MalformedBody);
             }
         };
-        if self.evidence.boot.as_deref() != Some(view.boot.as_str()) {
+        let Some(previous) = self.evidence.guest.clone() else {
+            self.fail(NotRunReason::MissingProof);
+            return Err(StepError::MalformedBody);
+        };
+        if previous.boot != view.boot {
             self.fail(NotRunReason::BootChanged);
             return Err(StepError::Breach);
         }
-        if self.evidence.uid.as_deref() != Some(view.uid.as_str())
-            || self.evidence.desktop.as_deref() != Some(view.desktop.as_str())
-            || self.evidence.config.as_deref() != Some(view.config.as_str())
+        if previous.uid != view.uid
+            || previous.desktop != view.desktop
+            || previous.config != view.config
         {
             self.fail(NotRunReason::EnvironmentBreach);
             return Err(StepError::Breach);
@@ -376,12 +428,14 @@ where
     ///
     /// Does not block. The sequence starts at 1 and only increases.
     pub fn arm_owner_lease(&mut self, deadline: LeaseDeadline) -> Result<(), StepError> {
-        self.ensure_phase(&[Phase::Running])?;
-        if let Some(until) = self.lease_until {
-            if self.clock.now() >= until {
-                return Err(StepError::LeaseExpired);
-            }
+        if self.phase.closed() {
+            return Err(StepError::Terminal);
         }
+        if self.lease_expired() {
+            self.expire_owner(None);
+            return Err(StepError::LeaseExpired);
+        }
+        self.ensure_phase(&[Phase::Running])?;
         let effective = self.admit(deadline.at(), self.budgets.lease, false)?;
         let next = self.lease_seq.checked_add(1).ok_or(StepError::Overflow)?;
         let Some(seq) = NonZeroU64::new(next) else {
@@ -473,5 +527,13 @@ where
                 Err(StepError::Call(err))
             }
         }
+    }
+}
+
+fn step_from_reason(reason: NotRunReason) -> StepError {
+    match reason {
+        NotRunReason::Deadline => StepError::Expired,
+        NotRunReason::Malformed => StepError::MalformedBody,
+        other => StepError::Cleanup(other),
     }
 }

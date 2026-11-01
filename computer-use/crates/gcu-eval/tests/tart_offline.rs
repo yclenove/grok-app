@@ -153,7 +153,7 @@ fn run_checks() -> i32 {
     if !failures.is_empty() {
         panic!("{}", failures.join("\n"));
     }
-    eprintln!("tart_offline ok: {}", tests.len());
+    s11b::report(tests.len());
     0
 }
 

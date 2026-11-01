@@ -189,27 +189,4 @@ impl PhaseBudgets {
         }
         Ok(self)
     }
-
-    /// Limit stored for `field`.
-    #[must_use]
-    pub const fn get(self, field: BudgetField) -> Duration {
-        match field {
-            BudgetField::Query => self.query,
-            BudgetField::Clone => self.clone_limit,
-            BudgetField::Start => self.start,
-            BudgetField::Probe => self.probe,
-            BudgetField::ProbeGroup => self.probe_group,
-            BudgetField::Stage => self.stage,
-            BudgetField::Login => self.login,
-            BudgetField::Run => self.run,
-            BudgetField::Lease => self.lease,
-            BudgetField::Revoke => self.revoke,
-            BudgetField::Stop => self.stop,
-            BudgetField::Delete => self.delete,
-            BudgetField::Seal => self.seal,
-            BudgetField::Cleanup => self.cleanup,
-            BudgetField::Prep => self.prep,
-            BudgetField::Attempt => self.attempt,
-        }
-    }
 }

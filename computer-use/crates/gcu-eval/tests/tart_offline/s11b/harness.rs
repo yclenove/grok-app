@@ -15,7 +15,7 @@ use gcu_eval::disposable::tart::{
     GuestChannel, GuestCommand, HostClock, InstallManifest, LeaseDeadline, LoginDeadline, Phase,
     PhaseBudgets, QueryDeadline, ReserveInput, RevokeDeadline, RunDeadline, RunId, ScriptedReply,
     SealDeadline, SoftnetFlags, StageDeadline, StartDeadline, StepError, StopDeadline, TartCommand,
-    TartRunner,
+    TartRunner, VmIdentity,
 };
 use gcu_eval::disposable::Probe;
 
@@ -23,6 +23,8 @@ pub(super) const RUN: &str = "run-1";
 pub(super) const CLONE: &str = "clone-1";
 pub(super) const RUN_2: &str = "run-2";
 pub(super) const CLONE_2: &str = "clone-2";
+pub(super) const INC: &str = "inc1";
+pub(super) const CFG: &str = "cfg1";
 const GOLDEN: &str = "macos-s2-eval";
 const EXTERNAL: &str = "external-vm";
 
@@ -162,6 +164,15 @@ impl AttemptLedger for Share<FakeLedger> {
         self.inner.borrow_mut().append(clone, fact, call)
     }
 
+    fn note_identity(
+        &mut self,
+        clone: &CloneId,
+        identity: &VmIdentity,
+        call: QueryDeadline,
+    ) -> Result<(), gcu_eval::disposable::tart::LedgerError> {
+        self.inner.borrow_mut().note_identity(clone, identity, call)
+    }
+
     fn seal(
         &mut self,
         clone: &CloneId,
@@ -298,7 +309,13 @@ fn list(names: &[&str]) -> String {
 }
 
 fn status_line(state: &str, run: &str, tart: &str, softnet: &str) -> String {
-    format!("status v1 state={state} run={run} boot=boot1 tart={tart} softnet={softnet}")
+    format!(
+        "status v1 state={state} run={run} boot=boot1 inc={INC} cfg={CFG} tart={tart} softnet={softnet}"
+    )
+}
+
+pub(super) fn clone_body() -> String {
+    format!("clone v1 inc={INC} cfg={CFG}")
 }
 
 pub(super) fn push_runner(io: &Handles, reply: ScriptedReply) {
@@ -316,24 +333,34 @@ pub(super) fn push_isolate(io: &Handles, probe: &str) {
     }
 }
 
-pub(super) fn push_present(io: &Handles) {
-    push_runner(io, ok_body(&list(&[GOLDEN, EXTERNAL, CLONE])));
-    push_runner(io, ok_body(&status_line("running", RUN, "up", "up")));
-    push_runner(io, ok_body("ok"));
-    push_runner(
-        io,
-        ok_body(&status_line("stopped", RUN, "exited", "exited")),
-    );
-    push_runner(io, ok_body("ok"));
+pub(super) fn push_clear(io: &Handles) {
     push_runner(io, ok_body(&list(&[GOLDEN, EXTERNAL])));
 }
 
+pub(super) fn push_named(io: &Handles, clone: &str) {
+    push_runner(io, ok_body(&list(&[GOLDEN, EXTERNAL, clone])));
+}
+
+pub(super) fn push_status(io: &Handles, state: &str, run: &str, tart: &str, softnet: &str) {
+    push_runner(io, ok_body(&status_line(state, run, tart, softnet)));
+}
+
+pub(super) fn push_clone_ok(io: &Handles) {
+    push_runner(io, ok_body(&clone_body()));
+}
+
+pub(super) fn push_present(io: &Handles) {
+    push_named(io, CLONE);
+    push_status(io, "running", RUN, "up", "up");
+    push_runner(io, ok_body("ok"));
+    push_status(io, "stopped", RUN, "exited", "exited");
+    push_runner(io, ok_body("ok"));
+    push_clear(io);
+}
+
+/// One complete list that omits the clone. Absence is this list, not a status.
 pub(super) fn push_absent(io: &Handles) {
-    push_runner(io, ok_body(&list(&[GOLDEN, EXTERNAL])));
-    push_runner(io, fail_body("absent"));
-    push_runner(io, ok_body("status v1 state=absent"));
-    push_runner(io, fail_body("absent"));
-    push_runner(io, ok_body(&list(&[GOLDEN, EXTERNAL])));
+    push_clear(io);
 }
 
 fn rank(phase: Phase) -> u8 {
@@ -357,10 +384,16 @@ fn rank(phase: Phase) -> u8 {
 /// Queue the successes required to reach `target`, not the step after it.
 pub(super) fn scripts_to_reach(io: &Handles, target: Phase) {
     let target = rank(target);
+    if target >= rank(Phase::Reserved) {
+        push_clear(io);
+    }
     if target >= rank(Phase::Cloned) {
-        push_runner(io, ok_body("ok"));
+        push_clear(io);
+        push_clone_ok(io);
     }
     if target >= rank(Phase::Booting) {
+        push_named(io, CLONE);
+        push_status(io, "running", RUN, "up", "up");
         push_runner(io, ok_body("ok"));
     }
     if target >= rank(Phase::Isolated) {

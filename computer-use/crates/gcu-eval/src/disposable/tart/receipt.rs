@@ -5,6 +5,7 @@
 
 use super::super::{Check, CleanupDisposition, Probe};
 use super::identity::{CloneId, RunId};
+use super::parse::GuestView;
 
 /// Name of the current step.
 ///
@@ -245,10 +246,7 @@ impl AttemptReceipt {
 
 pub(super) struct Evidence {
     pub probes: Vec<(Probe, Check)>,
-    pub boot: Option<String>,
-    pub uid: Option<String>,
-    pub desktop: Option<String>,
-    pub config: Option<String>,
+    pub guest: Option<GuestView>,
     pub ack_generation: Option<u64>,
     pub login_ready: bool,
     pub provisional: Option<TaskScore>,
@@ -258,10 +256,7 @@ impl Evidence {
     pub(super) fn new() -> Self {
         Self {
             probes: Vec::new(),
-            boot: None,
-            uid: None,
-            desktop: None,
-            config: None,
+            guest: None,
             ack_generation: None,
             login_ready: false,
             provisional: None,
@@ -269,7 +264,7 @@ impl Evidence {
     }
 
     pub(super) fn complete(&self) -> bool {
-        if self.boot.is_none() || self.ack_generation.is_none() || !self.login_ready {
+        if self.guest.is_none() || self.ack_generation.is_none() || !self.login_ready {
             return false;
         }
         Probe::ALL.iter().all(|probe| {

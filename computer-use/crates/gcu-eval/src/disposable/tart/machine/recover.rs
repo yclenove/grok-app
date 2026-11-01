@@ -81,11 +81,20 @@ where
                 LedgerFact::RecoveryNoted,
                 QueryDeadline::from_instant(note_at),
             ) {
-                return self.stop_recovery(&run, &clone, NotRunReason::ReceiptFailed, true, err);
+                return self.stop_recovery(
+                    &run,
+                    &clone,
+                    NotRunReason::ReceiptFailed,
+                    StepError::Ledger(err),
+                );
             }
-            if let Err(reason) = self.reclaim(&run, &clone, deadlines, None) {
+            // Identity stays on the row. Copying it onto this Idle attempt would
+            // leak the dead reservation into the next reserve.
+            if let Err(reason) =
+                self.reclaim(&run, &clone, deadlines, None, row.expected().cloned())
+            {
                 self.mark_quarantine(&clone, deadlines);
-                return self.stop_recovery(&run, &clone, reason, true, reason);
+                return self.stop_recovery(&run, &clone, reason, StepError::Cleanup(reason));
             }
             let seal_at = self
                 .earlier(deadlines.seal.at(), self.budgets.seal, None)
@@ -95,7 +104,12 @@ where
                 .seal(&clone, SealDeadline::from_instant(seal_at))
             {
                 self.mark_quarantine(&clone, deadlines);
-                return self.stop_recovery(&run, &clone, NotRunReason::ReceiptFailed, true, err);
+                return self.stop_recovery(
+                    &run,
+                    &clone,
+                    NotRunReason::ReceiptFailed,
+                    StepError::Ledger(err),
+                );
             }
             receipts.push(AttemptReceipt::new(
                 Some(run),
@@ -110,7 +124,6 @@ where
                 false,
             ));
         }
-        self.clear_for_reserve();
         Ok(receipts)
     }
 
@@ -125,20 +138,17 @@ where
         );
     }
 
-    fn stop_recovery<E>(
+    fn stop_recovery(
         &mut self,
         run: &RunId,
         clone: &CloneId,
         reason: NotRunReason,
-        still_open: bool,
-        error: E,
-    ) -> Result<Vec<AttemptReceipt>, StepError>
-    where
-        E: IntoRecoveryError,
-    {
+        error: StepError,
+    ) -> Result<Vec<AttemptReceipt>, StepError> {
         self.halted = true;
         self.run = Some(run.clone());
         self.clone_id = Some(clone.clone());
+        self.sealed = self.row_is_sealed();
         if self.trigger.is_none() {
             self.trigger = Some(reason);
         }
@@ -153,47 +163,8 @@ where
             false,
             super::super::super::CleanupDisposition::Allocated,
             false,
-            still_open,
+            !self.sealed,
         ));
-        Err(error.into_step())
-    }
-
-    fn clear_for_reserve(&mut self) {
-        self.phase = Phase::Idle;
-        self.run = None;
-        self.clone_id = None;
-        self.permit = None;
-        self.absolute = None;
-        self.origin = None;
-        self.cleanup_origin = None;
-        self.evidence = super::super::receipt::Evidence::new();
-        self.trigger = None;
-        self.revoke_ok = false;
-        self.revoke_attempted = false;
-        self.vm_cleanup_ok = false;
-        self.no_allocation = false;
-        self.delete_forbidden = false;
-        self.halted = false;
-        self.client_starts = 0;
-        self.lease_until = None;
-        self.lease_seq = 0;
-        self.receipt = None;
-    }
-}
-
-/// Maps a recovery failure into [`StepError`] without a second copy of the row.
-trait IntoRecoveryError {
-    fn into_step(self) -> StepError;
-}
-
-impl IntoRecoveryError for super::super::ledger::LedgerError {
-    fn into_step(self) -> StepError {
-        StepError::Ledger(self)
-    }
-}
-
-impl IntoRecoveryError for NotRunReason {
-    fn into_step(self) -> StepError {
-        StepError::Cleanup(self)
+        Err(error)
     }
 }
