@@ -1,9 +1,10 @@
 //! S11a offline contract. No Tart binary, no sleep, no lock.
 //!
 //! The parent re-execs this binary and polls `try_wait` on a monotonic clock.
-//! Thirty seconds is the wall-clock ceiling if a check blocks (ADR 0018 §8).
-//! The parent kills and reaps that child. A child that does not return exists
-//! only so this parent can prove the kill. It is not a product flag.
+//! Each check child is capped at 30s (ADR 0018 §8). That cap is not the whole
+//! target. The parent kills a child that does not return and bounds the reap.
+//! A child that does not return exists only so this parent can prove the kill.
+//! It is not a product flag.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -41,25 +42,9 @@ mod watch;
 type Check = fn() -> Result<(), String>;
 
 fn main() {
-    match watch::child_mode().as_deref() {
-        Some(watch::HANG) => watch::hang(),
-        Some(watch::CHECKS) => std::process::exit(run_checks()),
-        Some(other) => panic!("unknown tart offline child mode: {other}"),
-        None => {
-            let hung = watch::supervise(watch::HANG, watch::HANG_LIMIT);
-            if !hung.killed || hung.code == 0 {
-                panic!(
-                    "watchdog did not kill the non-returning child: code {} killed {}",
-                    hung.code, hung.killed
-                );
-            }
-            let ran = watch::supervise(watch::CHECKS, watch::CHECK_LIMIT);
-            if ran.killed {
-                panic!("tart offline checks exceeded 30s");
-            }
-            std::process::exit(ran.code);
-        }
-    }
+    // Shared with the propagate probe: a check child that exits 7 must make
+    // this process exit 7, not 0.
+    std::process::exit(watch::entry(run_checks));
 }
 
 fn run_checks() -> i32 {
@@ -136,6 +121,14 @@ fn run_checks() -> i32 {
         (
             "clone_shorter_parent_deadline_is_recorded",
             review_fixes::clone_shorter_parent_deadline_is_recorded,
+        ),
+        (
+            "clone_shorter_call_deadline_is_recorded",
+            review_fixes::clone_shorter_call_deadline_is_recorded,
+        ),
+        (
+            "clone_at_call_deadline_expires_while_permit_is_live",
+            review_fixes::clone_at_call_deadline_expires_while_permit_is_live,
         ),
         (
             "expired_guest_call_keeps_the_queued_reply",

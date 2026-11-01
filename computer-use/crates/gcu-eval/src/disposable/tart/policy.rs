@@ -109,8 +109,8 @@ const NOT_PUBLIC: &[(u32, u8)] = &[
     net(198, 51, 100, 0, 24),
     net(203, 0, 113, 0, 24),
     net(224, 0, 0, 0, 4),
+    // 255.255.255.255/32 is inside this prefix, so it has no separate row.
     net(240, 0, 0, 0, 4),
-    net(255, 255, 255, 255, 32),
 ];
 
 const fn net(a: u8, b: u8, c: u8, d: u8, bits: u8) -> (u32, u8) {

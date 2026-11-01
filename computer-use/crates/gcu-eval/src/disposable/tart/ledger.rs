@@ -114,9 +114,9 @@ impl ClonePermit {
     }
 }
 
-// `Clone` or `Copy` on ClonePermit would let one reservation mint two clones.
-// The call below is ambiguous exactly when the bound holds (static_assertions
-// style, no extra crate).
+// `Clone` on ClonePermit would let one reservation mint two clones.
+// `Copy: Clone`, so this check covers both. The call below is ambiguous
+// exactly when the bound holds (static_assertions style, no extra crate).
 mod clone_permit_not_duplicated {
     use super::ClonePermit;
 
@@ -127,23 +127,11 @@ mod clone_permit_not_duplicated {
     struct CloneBound;
     impl<T: Clone> NotIfClone<CloneBound> for T {}
 
-    trait NotIfCopy<A> {
-        fn some_item() {}
-    }
-    impl<T: ?Sized> NotIfCopy<()> for T {}
-    struct CopyBound;
-    impl<T: Copy> NotIfCopy<CopyBound> for T {}
-
     fn assert_not_clone() {
         let _ = <ClonePermit as NotIfClone<_>>::some_item;
     }
 
-    fn assert_not_copy() {
-        let _ = <ClonePermit as NotIfCopy<_>>::some_item;
-    }
-
     const _: fn() = assert_not_clone;
-    const _: fn() = assert_not_copy;
 }
 
 /// Persistent reservation API.

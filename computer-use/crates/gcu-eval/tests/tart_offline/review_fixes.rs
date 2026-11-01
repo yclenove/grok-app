@@ -103,6 +103,103 @@ pub(super) fn clone_shorter_parent_deadline_is_recorded() -> Result<(), String> 
     Ok(())
 }
 
+pub(super) fn clone_shorter_call_deadline_is_recorded() -> Result<(), String> {
+    let clock = FakeClock::new();
+    let mut ledger = FakeLedger::new(clock.clone());
+    let mut runner = FakeTartRunner::new(clock.clone());
+    runner.push(ok!(ScriptedReply::success(b"cloned".to_vec())));
+    let absolute = ok!(AttemptDeadline::after(clock.now(), Duration::from_secs(90)));
+    let permit = noted(reserve_dyn(
+        &mut ledger,
+        ok!(RunId::new("run-call-short")),
+        ok!(CloneId::new("clone-call-short")),
+        absolute,
+        &clock,
+    ))?;
+    let permit_at = permit.absolute_deadline();
+    let call = ok!(CloneDeadline::after(clock.now(), Duration::from_secs(30)));
+    if call.at() >= permit_at {
+        return Err("call deadline was not shorter than the permit".into());
+    }
+    let call_at = call.at();
+    let body = ok!(runner.clone_vm(permit, GoldenImage::MacosS2Eval, call));
+    if body.as_bytes() != b"cloned" {
+        return Err("a live shorter call deadline rejected the clone".into());
+    }
+    let entry = runner
+        .trace()
+        .first()
+        .ok_or("shorter call deadline left no trace")?;
+    if entry.outcome != ScriptOutcome::Success || entry.deadline != call_at {
+        return Err(format!(
+            "effective deadline {:?} outcome {:?}",
+            entry.deadline, entry.outcome
+        ));
+    }
+    if entry.deadline == permit_at {
+        return Err("trace kept the longer permit deadline".into());
+    }
+    Ok(())
+}
+
+pub(super) fn clone_at_call_deadline_expires_while_permit_is_live() -> Result<(), String> {
+    let clock = FakeClock::new();
+    let mut ledger = FakeLedger::new(clock.clone());
+    let mut runner = FakeTartRunner::new(clock.clone());
+    runner.push(ok!(ScriptedReply::success(b"queued-call".to_vec())));
+    let absolute = ok!(AttemptDeadline::after(clock.now(), Duration::from_secs(90)));
+    let permit = noted(reserve_dyn(
+        &mut ledger,
+        ok!(RunId::new("run-call-edge")),
+        ok!(CloneId::new("clone-call-edge")),
+        absolute,
+        &clock,
+    ))?;
+    let permit_at = permit.absolute_deadline();
+    let call = ok!(CloneDeadline::after(clock.now(), Duration::from_secs(1)));
+    let call_at = call.at();
+    if call_at >= permit_at {
+        return Err("call deadline did not stay inside the permit".into());
+    }
+    ok!(clock.advance(Duration::from_secs(1)));
+    if clock.now() != call_at {
+        return Err("clock is not exactly on the call deadline".into());
+    }
+    if clock.now() >= permit_at {
+        return Err("permit was not still live at the call deadline".into());
+    }
+    {
+        let runner: &mut dyn TartRunner = &mut runner;
+        must_err(
+            runner.clone_vm(permit, GoldenImage::MacosS2Eval, call),
+            CallError::Expired,
+            "call boundary",
+        )?;
+    }
+    let clone = ok!(CloneId::new("clone-call-edge"));
+    let body = ok!(runner.status(
+        &clone,
+        ok!(QueryDeadline::after(clock.now(), QueryDeadline::CAP)),
+    ));
+    if body.as_bytes() != b"queued-call" {
+        return Err("call-boundary expiry consumed the queued reply".into());
+    }
+    let trace = runner.trace();
+    if trace.len() != 2 {
+        return Err(format!("call-boundary trace len {}", trace.len()));
+    }
+    if trace[0].outcome != ScriptOutcome::Expired || trace[0].deadline != call_at {
+        return Err(format!(
+            "call-boundary trace recorded {:?} at {:?}",
+            trace[0].outcome, trace[0].deadline
+        ));
+    }
+    if trace[0].deadline == permit_at {
+        return Err("trace recorded the longer permit deadline".into());
+    }
+    Ok(())
+}
+
 pub(super) fn expired_guest_call_keeps_the_queued_reply() -> Result<(), String> {
     let clock = FakeClock::new();
     let mut guest = FakeGuestChannel::new(clock.clone());
@@ -184,6 +281,8 @@ pub(super) fn softnet_rejects_special_use_at_prefix_boundaries() -> Result<(), S
         [224, 0, 0, 0],
         [239, 255, 255, 255],
         [240, 0, 0, 0],
+        [248, 0, 0, 0],
+        [255, 255, 255, 254],
         [255, 255, 255, 255],
     ];
     for octets in rejected {
