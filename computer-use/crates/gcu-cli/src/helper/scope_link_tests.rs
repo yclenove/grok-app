@@ -132,14 +132,17 @@ struct Ends {
     facts: Arc<ScriptedFacts>,
     hits: Arc<AtomicUsize>,
     stores: Arc<StoreLedger>,
+    lease: Arc<Mutex<Option<gcu_core::scope::ScopeLease>>>,
 }
 
 /// Parks the helper ACK flush so a test can change live code while the write
 /// is still outstanding. The first `allow` flushes pass. Later flushes wait
-/// until [`FlushHold::release`].
+/// until [`FlushHold::release`]. [`FlushHold::fail`] makes the next flush
+/// return an IO error instead of parking.
 struct FlushHold {
     allow: AtomicUsize,
     held: AtomicBool,
+    fail: AtomicBool,
     release: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
@@ -148,6 +151,7 @@ impl FlushHold {
         Self {
             allow: AtomicUsize::new(allow_flushes),
             held: AtomicBool::new(false),
+            fail: AtomicBool::new(false),
             release: Mutex::new(None),
         }
     }
@@ -156,6 +160,10 @@ impl FlushHold {
         if let Some(tx) = self.release.lock().unwrap().take() {
             let _ = tx.send(());
         }
+    }
+
+    fn fail(&self) {
+        self.fail.store(true, Ordering::SeqCst);
     }
 }
 
@@ -195,10 +203,16 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for HeldFlush<T> {
         loop {
             match std::mem::replace(&mut this.mode, FlushMode::Decide) {
                 FlushMode::Decide => {
+                    if this.hold.fail.load(Ordering::SeqCst) {
+                        return Poll::Ready(Err(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "ack flush failed",
+                        )));
+                    }
                     let parked = this
                         .hold
                         .allow
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                        .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
                             left.checked_sub(1)
                         })
                         .is_err();
@@ -236,12 +250,20 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for HeldFlush<T> {
     }
 }
 
+fn form_driver() -> gcu_driver_fake::FakeDriver {
+    gcu_driver_fake::FakeDriver::from_scene("form").expect("form scene")
+}
+
 fn start() -> Ends {
     let (supervisor, helper) = tokio::io::duplex(64 * 1024);
-    launch(supervisor, Box::new(helper))
+    launch(supervisor, Box::new(helper), form_driver())
 }
 
 fn start_held(allow_flushes: usize) -> (Ends, Arc<FlushHold>) {
+    start_with(form_driver(), allow_flushes)
+}
+
+fn start_with(driver: gcu_driver_fake::FakeDriver, allow_flushes: usize) -> (Ends, Arc<FlushHold>) {
     let (supervisor, helper) = tokio::io::duplex(64 * 1024);
     let hold = Arc::new(FlushHold::new(allow_flushes));
     let stream = HeldFlush {
@@ -249,18 +271,19 @@ fn start_held(allow_flushes: usize) -> (Ends, Arc<FlushHold>) {
         hold: Arc::clone(&hold),
         mode: FlushMode::Decide,
     };
-    (launch(supervisor, Box::new(stream)), hold)
+    (launch(supervisor, Box::new(stream), driver), hold)
 }
 
 fn launch(
     supervisor: tokio::io::DuplexStream,
     helper: gcu_host_protocol::transport::BoxStream,
+    driver: gcu_driver_fake::FakeDriver,
 ) -> Ends {
     let facts = primed();
     let plane = DataPlane::new();
     let hits = Arc::new(AtomicUsize::new(0));
     let stores = Arc::new(StoreLedger::new());
-    let driver = gcu_driver_fake::FakeDriver::from_scene("form").expect("form scene");
+    let lease = Arc::new(Mutex::new(None));
     let gate = HelperGate {
         facts: Arc::clone(&facts) as Arc<dyn gcu_driver_macos::ProcessFacts>,
         expected: identities(),
@@ -268,12 +291,14 @@ fn launch(
     };
     let serve_plane = plane.clone();
     let serve_hits = Arc::clone(&hits);
+    let serve_lease = Arc::clone(&lease);
     let task = tokio::spawn(super::run_helper(
         helper,
         driver.clone(),
         Arc::clone(&stores),
         gate,
-        move |_lease, _children| {
+        move |scope_lease, _children| {
+            *serve_lease.lock().unwrap() = Some(scope_lease);
             let serve_plane = serve_plane.clone();
             let serve_hits = Arc::clone(&serve_hits);
             async move {
@@ -292,6 +317,7 @@ fn launch(
         facts,
         hits,
         stores,
+        lease,
     }
 }
 
@@ -721,6 +747,122 @@ async fn unchanged_wire_live_code_is_refused_at_admit_ack_and_recheck() {
                 finish_revoked(live).await;
             }
         }
+    })
+    .await
+    .unwrap();
+}
+
+fn rebind(generation: u64) -> Control {
+    Control::Rebind {
+        run_id: "run".into(),
+        generation,
+        scope: scope_record(),
+    }
+}
+
+#[test]
+fn fresh_accept_uses_the_admitted_generation_gate() {
+    let source = include_str!("../scope/data.rs");
+    assert!(
+        source.contains("admit_data(&plane, &lease)"),
+        "a fresh connection must pass the admitted-generation gate"
+    );
+    assert_eq!(
+        source.matches("lease.arm_attempt()").count(),
+        2,
+        "only the factory startup and admit_data may arm"
+    );
+}
+
+#[tokio::test]
+async fn rebind_data_stays_closed_until_the_ack_flushes() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (mut ends, hold) = start_held(1);
+        codec::write_frame(&mut ends.supervisor, &good_hello(1))
+            .await
+            .unwrap();
+        let first = read_ack(&mut ends).await;
+        assert_eq!(first.generation, 1);
+        assert!(ends.plane.is_open());
+        codec::write_frame(&mut ends.supervisor, &rebind(2))
+            .await
+            .unwrap();
+        wait_held(&hold).await;
+        let lease = ends
+            .lease
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("data future holds the published lease");
+        assert_eq!(lease.current().expect("gen 2 is published").generation(), 2);
+        let effects = ends.plane.effects();
+        assert!(
+            crate::scope::admit_data(&ends.plane, &lease).is_err(),
+            "gen 2 is not data authority before its ACK flushes"
+        );
+        assert_eq!(ends.plane.effects(), effects, "a refusal is not an effect");
+        assert!(
+            ends.plane.request().is_err(),
+            "the previous generation's latch must be suspended"
+        );
+        assert_eq!(lease.arm_attempt().unwrap().scope().generation(), 2);
+        ends.facts.drop_process(11);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let published = ends.lease.lock().unwrap().clone();
+                let gone = published
+                    .as_ref()
+                    .is_some_and(|item| item.current().is_none());
+                if gone && ends.driver.release_calls() > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("peer loss during the ack write revokes and releases input");
+        finish_revoked(ends).await;
+    })
+    .await
+    .unwrap();
+}
+
+async fn held_keys() -> gcu_driver_fake::FakeDriver {
+    use gcu_core::driver::{Cancel, Driver, DriverAction, KeyRoute};
+    let driver = form_driver();
+    let win = driver.fixture_window("fake.form").await.unwrap();
+    driver
+        .inject_action(gcu_driver_fake::faults::Fault::Crash {
+            maybe_executed: true,
+        })
+        .await
+        .unwrap();
+    let req = DriverAction::PressKeys {
+        win,
+        chord: gcu_protocol::KeyChord::parse("ctrl+a").unwrap(),
+        route: KeyRoute::TargetedOnly,
+    };
+    assert!(driver.perform(&req, &Cancel::default()).await.is_err());
+    assert_ne!(driver.oracle().await.unwrap().held_input, 0);
+    driver
+}
+
+#[tokio::test]
+async fn rebind_ack_flush_failure_releases_held_input() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let driver = held_keys().await;
+        let observed = driver.clone();
+        let (mut ends, hold) = start_with(driver, 1);
+        codec::write_frame(&mut ends.supervisor, &good_hello(1))
+            .await
+            .unwrap();
+        let _ = read_ack(&mut ends).await;
+        hold.fail();
+        codec::write_frame(&mut ends.supervisor, &rebind(2))
+            .await
+            .unwrap();
+        finish_revoked(ends).await;
+        assert_eq!(observed.oracle().await.unwrap().held_input, 0);
     })
     .await
     .unwrap();

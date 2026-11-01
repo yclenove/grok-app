@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
+pub(crate) use data::admit_data;
 pub(crate) use plane::DataPlane;
 
 /// Encodes one control ACK. S3 writes the bare record. The scoped helper adds
@@ -73,11 +74,22 @@ pub(crate) async fn run(
         })
         .map_err(|_| Failure::arguments("Unknown fake scope scene"))?;
     let serving = driver.clone();
-    run_controlled(
+    let plane = DataPlane::new();
+    let data_plane = plane.clone();
+    run_linked(
         control,
         driver,
         Machine::new(Monotonic::default()),
-        move |lease, children| data::serve(serving, lease, children, profile.into(), mode),
+        move |lease, children| {
+            data::serve(serving, lease, children, profile.into(), mode, data_plane)
+        },
+        || Ok(()),
+        LinkCfg {
+            first: First::Read,
+            encoder: bare_encoder(),
+            plane,
+            label: ControlLabel::Engine,
+        },
     )
     .await
 }
@@ -251,22 +263,21 @@ where
             .ok_or_else(|| deny(Error::Invalid))?;
         let lease = machine.lease().ok_or_else(|| deny(Error::Invalid))?;
         let bytes = (cfg.encoder)(&ack).map_err(deny)?;
-        write_payload(&mut control, &bytes, machine.remaining())
+        // Peer and lease stay watched while this ACK is written. Data stays shut.
+        write_acked(&mut control, &bytes, machine, &mut peer)
             .await
             .map_err(deny)?;
-        // The peer can die while the ACK is in flight. Do not open data first.
-        peer().map_err(deny)?;
         // The latch must still be closed, and a closed request is not an effect.
         if plane.is_open() || plane.effects() != 0 || plane.request().is_ok() {
             return Err(Failure::arguments("ScopeDenied"));
         }
-        plane.open();
+        plane.open_generation(ack.generation);
         let encoder = cfg.encoder;
         // Always poll control before data. Data completion cannot select an
         // unscoped fallback; this process ends on the same revocation.
         tokio::select! {
             biased;
-            result = watch(&mut *machine, &mut control, &mut peer, &encoder) => {
+            result = watch(&mut *machine, &mut control, &mut peer, &encoder, &plane) => {
                 result.map_err(deny)
             }
             result = serve(lease, children) => result,
@@ -302,6 +313,7 @@ async fn watch<C, P>(
     control: &mut BoxStream,
     peer: &mut P,
     encoder: &AckEncoder,
+    plane: &DataPlane,
 ) -> Result<(), Error>
 where
     C: Clock,
@@ -357,18 +369,76 @@ where
             machine.revoke();
             return Err(error);
         }
+        let before = machine.generation();
         if let Some(ack) = machine.apply(frame)? {
-            let bytes = encoder(&ack)?;
-            if write_payload(control, &bytes, machine.remaining())
-                .await
-                .is_err()
-            {
+            // Rebind publishes the new generation inside apply. Suspend data
+            // before the first await so a fresh connection cannot arm it.
+            let rebound = before != Some(ack.generation);
+            if rebound {
+                plane.suspend();
+            }
+            let bytes = match encoder(&ack) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    machine.revoke();
+                    return Err(error);
+                }
+            };
+            if write_acked(control, &bytes, machine, peer).await.is_err() {
                 machine.revoke();
                 return Err(Error::Disconnected);
+            }
+            if rebound {
+                plane.open_generation(ack.generation);
             }
         }
     }
     Ok(())
+}
+
+/// Write one ACK while the peer and the lease deadline stay in force.
+///
+/// The write future is pinned so a pending flush is not restarted. A peer
+/// failure or a zero remaining lease returns without opening data. Memory for
+/// the check itself. The write keeps the caller's budget.
+async fn write_acked<C, P>(
+    control: &mut BoxStream,
+    bytes: &[u8],
+    machine: &Machine<C>,
+    peer: &mut P,
+) -> Result<(), Error>
+where
+    C: Clock,
+    P: FnMut() -> Result<(), Error>,
+{
+    peer()?;
+    let write = write_payload(control, bytes, machine.remaining());
+    tokio::pin!(write);
+    loop {
+        if machine.remaining().is_zero() {
+            return Err(Error::Disconnected);
+        }
+        let lease_wait = tokio::time::sleep(machine.remaining());
+        let peer_wait = tokio::time::sleep(PEER_RECHECK);
+        tokio::select! {
+            biased;
+            result = &mut write => {
+                result?;
+                peer()?;
+                if machine.remaining().is_zero() {
+                    return Err(Error::Disconnected);
+                }
+                return Ok(());
+            }
+            _ = lease_wait => return Err(Error::Disconnected),
+            _ = peer_wait => {
+                peer()?;
+                if machine.remaining().is_zero() {
+                    return Err(Error::Disconnected);
+                }
+            }
+        }
+    }
 }
 
 async fn write_payload(

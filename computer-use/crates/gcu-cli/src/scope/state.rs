@@ -72,6 +72,12 @@ impl<C: Clock> Machine<C> {
             _ => Duration::ZERO,
         }
     }
+    pub(super) fn generation(&self) -> Option<u64> {
+        match &self.state {
+            State::Active { generation, .. } => Some(*generation),
+            _ => None,
+        }
+    }
     pub(super) fn apply(&mut self, frame: Control) -> Result<Option<Ack>, Error> {
         self.check_time()?;
         let result = self.transition(frame);
@@ -139,6 +145,9 @@ impl<C: Clock> Machine<C> {
                 }
                 let next_scope = to_core(&run_id, next, &scope)?;
                 let digest = scope.digest(&run_id, next)?;
+                // The new generation is published now, before its ACK exists.
+                // Callers must suspend data admission until that ACK is flushed.
+                // Do not delay this publish: an old attempt must fail immediately.
                 lease
                     .rebind_with_deadline(next_scope, deadline)
                     .map_err(|_| Error::Invalid)?;

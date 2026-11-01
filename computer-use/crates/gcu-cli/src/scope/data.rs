@@ -1,6 +1,7 @@
 //! MCP data plane. This module can read a lease and arm attempts, never install,
 //! renew, rebind or revoke it. A generation change closes existing connections.
 use super::fake::FakeEvidence;
+use super::DataPlane;
 use crate::exit::Failure;
 use gcu_core::{
     driver::Driver,
@@ -25,6 +26,7 @@ pub(super) async fn serve(
     children: crate::script_children::Children,
     profile: gcu_mcp::Profile,
     mode: Option<String>,
+    plane: DataPlane,
 ) -> Result<(), Failure> {
     let mut initial = lease.arm_attempt().ok_or_else(closed)?;
     if !initial.confirm(&lease) {
@@ -63,17 +65,57 @@ pub(super) async fn serve(
             // workers if the private control future wins the outer select.
             _ = clients.join_next(), if !clients.is_empty() => {},
             accepted = listener.accept(), if clients.len() < 32 => {
-                let (socket,_) = accepted.map_err(|_|closed())?;
-                let authority = lease.arm_attempt().ok_or_else(closed)?;
-                let children = children.clone();
-                let driver=evidence.clone();let lease=lease.clone();let host=host.clone();
-                clients.spawn(async move {let _=serve_one(socket,driver,lease,authority,host,children,profile).await;});
+                let (socket, _) = accepted.map_err(|_| closed())?;
+                match admit_data(&plane, &lease) {
+                    Ok(authority) => {
+                        let children = children.clone();
+                        let driver = evidence.clone();
+                        let lease = lease.clone();
+                        let host = host.clone();
+                        clients.spawn(async move {
+                            let _ = serve_one(
+                                socket, driver, lease, authority, host, children, profile,
+                            )
+                            .await;
+                        });
+                    }
+                    Err(_) => {
+                        drop(socket);
+                        // A rebind gap still has a current lease. Keep serving.
+                        // A revoked lease has nothing left to admit.
+                        if lease.current().is_none() {
+                            return Err(closed());
+                        }
+                    }
+                }
             }
         }
     }
 }
 fn closed() -> Failure {
     Failure::internal("Scope data plane unavailable")
+}
+
+/// Arm one fresh connection only when `plane` already admits the lease's
+/// current generation.
+///
+/// A refusal does not arm an attempt and does not count an effect. Memory
+/// only. No timeout or cancellation. The published generation may be newer
+/// than the admitted one while its ACK is still being written.
+pub(crate) fn admit_data(
+    plane: &DataPlane,
+    lease: &ScopeLease,
+) -> Result<AttemptAuthority, Failure> {
+    let current = lease.current().ok_or_else(closed)?;
+    if !plane.allows(current.generation()) {
+        return Err(closed());
+    }
+    let mut authority = lease.arm_attempt().ok_or_else(closed)?;
+    if !authority.confirm(&lease) || !plane.allows(authority.scope().generation()) {
+        return Err(closed());
+    }
+    plane.request().map_err(|_| closed())?;
+    Ok(authority)
 }
 
 async fn serve_one(
