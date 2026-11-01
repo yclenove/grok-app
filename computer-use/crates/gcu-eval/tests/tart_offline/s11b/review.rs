@@ -212,6 +212,38 @@ pub(super) const TESTS: &[(&str, fn() -> Result<(), String>)] = &[
         "drop_after_committed_quarantine_halts_the_next_reserve",
         fix::drop_after_committed_quarantine_halts_the_next_reserve,
     ),
+    (
+        "prep_end_must_include_reserve",
+        fix::prep_end_must_include_reserve,
+    ),
+    (
+        "unconfirmed_start_note_must_not_start",
+        fix::unconfirmed_start_note_must_not_start,
+    ),
+    (
+        "unreadable_identity_readback_does_not_clone",
+        fix::unreadable_identity_readback_does_not_clone,
+    ),
+    (
+        "lease_must_not_renew_after_inner_expiry",
+        fix::lease_must_not_renew_after_inner_expiry,
+    ),
+    (
+        "recovery_committed_seal_must_match_followup_gate",
+        fix::recovery_committed_seal_must_match_followup_gate,
+    ),
+    (
+        "tart_still_up_does_not_delete",
+        fix::tart_still_up_does_not_delete,
+    ),
+    (
+        "login_dispatch_stays_inside_prep",
+        fix::login_dispatch_stays_inside_prep,
+    ),
+    (
+        "clone_config_mismatch_is_not_accepted",
+        fix::clone_config_mismatch_is_not_accepted,
+    ),
     ("drop_leaves_the_vm_running", drop_leaves_the_vm_running),
 ];
 

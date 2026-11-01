@@ -116,6 +116,8 @@ where
 
     fn aggregate(&self, now: MonoInstant, scope: Scope) -> Result<Option<MonoInstant>, Trip> {
         let (origin, budget) = match scope {
+            // Reserve stores its entry instant before any prep IO. A missing
+            // origin means this call is not inside a reserve that has started.
             Scope::Prep => (self.origin.unwrap_or(now), self.budgets.prep),
             Scope::Cleanup => (self.cleanup_origin.unwrap_or(now), self.budgets.cleanup),
             Scope::Task | Scope::Recovery => return Ok(None),
@@ -412,14 +414,16 @@ where
             Ok(()) => Ok(true),
             Err(LedgerError::ReplyLost) => match self.ledger_query(clone, caller, scope, None) {
                 Ok(row) => Ok(present(&row)),
+                // Not found is a completed read: the write is not there.
                 Err(LedgerError::NotFound) => Ok(false),
-                Err(_) => Ok(true),
+                Err(err) => Err(err),
             },
             Err(err) => Err(err),
         }
     }
 
-    /// `Ok(true)` when `fact` is on the row, including a committed lost append.
+    /// `Ok(true)` only when the write succeeded, or a lost reply reads back
+    /// with `fact` present. A readback error is unknown and stays an error.
     pub(super) fn fact_landed(
         &mut self,
         clone: &CloneId,

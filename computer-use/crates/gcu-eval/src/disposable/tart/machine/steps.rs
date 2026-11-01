@@ -49,7 +49,8 @@ where
     /// Does not clone. An unsealed or quarantined ledger row is refused and
     /// the phase stays `Idle`. A lost acknowledgement is read back inside the
     /// same deadline: a stored row keeps its ids and requires recovery, and a
-    /// missing row does not. Does not block.
+    /// missing row does not. The prep aggregate starts at this entry, before
+    /// the lock and the pre-reserve reads, and is not moved later. Does not block.
     pub fn reserve(
         &mut self,
         input: ReserveInput,
@@ -57,6 +58,9 @@ where
     ) -> Result<(), StepError> {
         let caller = deadline.at();
         let absolute = Some(input.absolute.at());
+        if self.origin.is_none() {
+            self.origin = Some(self.clock.now());
+        }
         self.gate(
             &[Phase::Idle],
             caller,
@@ -121,7 +125,6 @@ where
                 self.permit = Some(permit);
                 self.run = Some(input.run);
                 self.clone_id = Some(input.clone_id);
-                self.origin = Some(self.clock.now());
                 self.phase = Phase::Reserved;
                 Ok(())
             }
@@ -147,7 +150,6 @@ where
         self.run = Some(input.run);
         self.clone_id = Some(input.clone_id);
         self.absolute = Some(input.absolute.at());
-        self.origin = Some(self.clock.now());
         self.trigger = Some(NotRunReason::ReplyLost);
         self.phase = Phase::Revoking;
         if self.cleanup_origin.is_none() {
@@ -171,8 +173,10 @@ where
     /// Clone the golden image with the reserved permit.
     ///
     /// The expected fake incarnation is written before the runner is called.
-    /// The permit is taken only for that call. A success body that does not
-    /// match the stored expectation is not written over it. Does not block.
+    /// The permit is taken only for that call. A lost identity write is cloned
+    /// only when a successful read shows that exact pair. An unreadable read
+    /// does not clone. A success body that does not match the stored
+    /// expectation, including config alone, is not written over it. Does not block.
     pub fn clone_vm(
         &mut self,
         golden: GoldenImage,
@@ -237,7 +241,8 @@ where
     /// Start the clone with the required Softnet flags.
     ///
     /// Records [`LedgerFact::StartIssued`] before the runner call. There is no
-    /// start without those flags and no restart. Does not block.
+    /// start without those flags and no restart. If that fact cannot be
+    /// confirmed, the runner is not called. Does not block.
     pub fn start(
         &mut self,
         flags: &SoftnetFlags,
@@ -453,7 +458,10 @@ where
     /// Send one owner lease. A late call does not extend or revive it.
     ///
     /// Does not block. The sequence starts at 1 and only increases. The lease
-    /// end is the clipped instant of this call, not a second budget.
+    /// end is the clipped instant of this call, not a second budget. The
+    /// previous end is checked again immediately before the send and again
+    /// before that instant is stored. Expiry enters [`Phase::Suspended`] and
+    /// leaves the old end in place.
     pub fn arm_owner_lease(&mut self, deadline: LeaseDeadline) -> Result<(), StepError> {
         let caller = deadline.at();
         if self.phase.closed() {
@@ -465,11 +473,19 @@ where
         }
         self.ensure_phase(&[Phase::Running], Some(caller), Scope::Task)?;
         self.admit(caller, self.budgets.lease, Scope::Task, None)?;
+        if self.lease_expired() {
+            self.expire_owner(Some(caller), Scope::Task);
+            return Err(StepError::LeaseExpired);
+        }
         let next = self.lease_seq.checked_add(1).ok_or(StepError::Overflow)?;
         let Some(seq) = NonZeroU64::new(next) else {
             return Err(StepError::Overflow);
         };
         let until = self.guest_lease(seq, caller, Scope::Task)?;
+        if self.lease_expired() {
+            self.expire_owner(Some(caller), Scope::Task);
+            return Err(StepError::LeaseExpired);
+        }
         self.lease_seq = next;
         self.lease_until = Some(until);
         Ok(())

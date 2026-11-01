@@ -299,6 +299,10 @@ pub struct FakeLedger {
     clock: FakeClock,
     rows: Vec<Reservation>,
     faults: VecDeque<LedgerFault>,
+    /// Consumed by `seal` before [`Self::faults`]. Other writes ignore it.
+    seal_faults: VecDeque<LedgerFault>,
+    /// Consumed by `query` only. `query` takes `&self`.
+    read_faults: RefCell<VecDeque<LedgerFault>>,
     /// `query` and `rows` take `&self`, so the trace sits behind a cell.
     trace: RefCell<Vec<TraceEntry<LedgerOp>>>,
 }
@@ -313,6 +317,8 @@ impl FakeLedger {
             clock,
             rows: Vec::new(),
             faults: VecDeque::new(),
+            seal_faults: VecDeque::new(),
+            read_faults: RefCell::new(VecDeque::new()),
             trace: RefCell::new(Vec::new()),
         }
     }
@@ -326,9 +332,26 @@ impl FakeLedger {
     /// Queue a fault for the next `reserve`, `append`, `note_identity`, or `seal`.
     ///
     /// An empty queue is the success path. A due deadline does not consume
-    /// the fault. Does not block.
+    /// the fault. Does not block. `query` does not consume this queue.
     pub fn push_fault(&mut self, fault: LedgerFault) {
         self.faults.push_back(fault);
+    }
+
+    /// Queue a fault that the next `seal` consumes before [`Self::push_fault`].
+    ///
+    /// Earlier writes in the same call keep the shared queue. A due deadline
+    /// does not consume it. An already sealed row does not consume it. Does not block.
+    pub fn push_seal_fault(&mut self, fault: LedgerFault) {
+        self.seal_faults.push_back(fault);
+    }
+
+    /// Queue a fault for the next `query`. The row is not changed.
+    ///
+    /// `rows` and every write ignore this queue. A due deadline does not
+    /// consume it. [`LedgerFault::CommittedLost`] is reported as
+    /// [`LedgerError::ReplyLost`] because a query stores nothing. Does not block.
+    pub fn push_read_fault(&mut self, fault: LedgerFault) {
+        self.read_faults.borrow_mut().push_back(fault);
     }
 
     fn stamp(&self, op: LedgerOp, at: MonoInstant) -> Result<(), LedgerError> {
@@ -360,12 +383,25 @@ impl FakeLedger {
     fn take_fault(&mut self) -> Result<bool, LedgerError> {
         match self.faults.pop_front() {
             None => Ok(false),
-            Some(LedgerFault::CommittedLost) => Ok(true),
-            Some(LedgerFault::Failed) => Err(LedgerError::Failed),
-            Some(LedgerFault::TimedOut) => Err(LedgerError::TimedOut),
-            Some(LedgerFault::Malformed) => Err(LedgerError::Malformed),
-            Some(LedgerFault::Overlong) => Err(LedgerError::Overlong),
-            Some(LedgerFault::ReplyLost) => Err(LedgerError::ReplyLost),
+            Some(fault) => Self::fault_committed(fault),
+        }
+    }
+
+    fn fault_committed(fault: LedgerFault) -> Result<bool, LedgerError> {
+        match fault {
+            LedgerFault::CommittedLost => Ok(true),
+            LedgerFault::Failed => Err(LedgerError::Failed),
+            LedgerFault::TimedOut => Err(LedgerError::TimedOut),
+            LedgerFault::Malformed => Err(LedgerError::Malformed),
+            LedgerFault::Overlong => Err(LedgerError::Overlong),
+            LedgerFault::ReplyLost => Err(LedgerError::ReplyLost),
+        }
+    }
+
+    fn read_error(fault: LedgerFault) -> LedgerError {
+        match Self::fault_committed(fault) {
+            Ok(_) | Err(LedgerError::ReplyLost) => LedgerError::ReplyLost,
+            Err(err) => err,
         }
     }
 
@@ -418,6 +454,9 @@ impl AttemptLedger for FakeLedger {
 
     fn query(&self, clone: &CloneId, call: QueryDeadline) -> Result<Reservation, LedgerError> {
         self.stamp(LedgerOp::Query, call.at())?;
+        if let Some(fault) = self.read_faults.borrow_mut().pop_front() {
+            return Err(Self::read_error(fault));
+        }
         let index = self.row_index(clone)?;
         Ok(self.rows[index].clone())
     }
@@ -460,7 +499,10 @@ impl AttemptLedger for FakeLedger {
         if self.rows[index].sealed {
             return Err(LedgerError::Sealed);
         }
-        let committed_lost = self.take_fault()?;
+        let committed_lost = match self.seal_faults.pop_front() {
+            Some(fault) => Self::fault_committed(fault)?,
+            None => self.take_fault()?,
+        };
         self.rows[index].sealed = true;
         Self::finish_write(committed_lost)
     }

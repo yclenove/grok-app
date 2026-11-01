@@ -3,17 +3,19 @@
 use std::time::Duration;
 
 use gcu_eval::disposable::tart::{
-    AttemptDeadline, AttemptLedger, AttemptOutcome, CleanupDeadlines, CloneDeadline, HostClock,
-    LedgerError, LedgerFact, LedgerFault, LedgerOp, NotRunReason, Phase, PhaseBudgets,
-    QueryDeadline, RevokeDeadline, RunDeadline, SealDeadline, StepError, TartCommand, TaskScore,
+    AttemptDeadline, AttemptLedger, AttemptOutcome, BudgetField, CleanupDeadlines, CloneDeadline,
+    GuestCommand, HostClock, LeaseDeadline, LedgerError, LedgerFact, LedgerFault, LedgerOp,
+    LoginDeadline, NotRunReason, Phase, PhaseBudgets, QueryDeadline, RevokeDeadline, RunDeadline,
+    SealDeadline, StartDeadline, StepError, TartCommand, TaskScore,
 };
 
 use super::super::faults::expect_not_run;
 use super::super::harness::{
-    self, cleanup_deadlines, id_clone, ok_body, push_clear, push_guest, push_named, push_runner,
-    push_status, query, reserve_default, reserve_named, runner_commands, CLONE, INC, RUN, RUN_2,
+    self, cleanup_deadlines, id_clone, ok_body, push_clear, push_clone_ok, push_guest, push_named,
+    push_runner, push_status, query, reserve_default, reserve_named, runner_commands, CLONE, INC,
+    RUN, RUN_2,
 };
-use super::{is_delete, is_stop, not_scored, opened, saw};
+use super::{is_clone, is_delete, is_start, is_stop, not_scored, opened, saw};
 
 fn trace_len(io: &harness::Handles) -> usize {
     runner_commands(io).len()
@@ -676,6 +678,288 @@ pub(super) fn drop_after_committed_quarantine_halts_the_next_reserve() -> Result
         Err(StepError::Halted)
     ) {
         return Err("sealed quarantine did not halt".into());
+    }
+    Ok(())
+}
+
+fn above_one_second(nanos: u64) -> bool {
+    nanos > 1_000_000_000
+}
+
+pub(super) fn prep_end_must_include_reserve() -> Result<(), String> {
+    let budgets = PhaseBudgets::adr()
+        .shrink(BudgetField::Prep, Duration::from_secs(1))
+        .unwrap();
+    let (mut world, io) = opened(budgets);
+    push_clear(&io);
+    push_clear(&io);
+    push_clone_ok(&io);
+    io.lock
+        .borrow_mut()
+        .advance_on_acquire(Duration::from_millis(500));
+    let mut attempt = world.attempt();
+    reserve_default(&mut attempt, &io.clock)?;
+    harness::advance(&io.clock, Duration::from_millis(600))?;
+    let cloned = attempt.clone_vm(
+        gcu_eval::disposable::tart::GoldenImage::MacosS2Eval,
+        CloneDeadline::after(io.clock.now(), CloneDeadline::CAP).unwrap(),
+    );
+    let ledger_late = io
+        .ledger
+        .borrow()
+        .trace()
+        .iter()
+        .any(|entry| above_one_second(entry.deadline.nanos()));
+    let runner_late = io
+        .runner
+        .borrow()
+        .trace()
+        .iter()
+        .any(|entry| above_one_second(entry.deadline.nanos()));
+    if cloned.is_ok() || ledger_late || runner_late || saw(&io, is_clone) {
+        return Err(format!(
+            "prep=1s from reserve entry; at {}ns clone={cloned:?} ledger={:?} runner={:?}",
+            io.clock.now().nanos(),
+            io.ledger.borrow().trace(),
+            io.runner.borrow().trace()
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn unconfirmed_start_note_must_not_start() -> Result<(), String> {
+    let (mut world, io) = opened(PhaseBudgets::adr());
+    let start = {
+        let mut attempt = super::drive(&mut world, &io, Phase::Cloned)?;
+        push_named(&io, CLONE);
+        push_status(&io, "running", RUN, "up", "up");
+        push_runner(&io, ok_body("ok"));
+        push_clear(&io);
+        io.ledger.borrow_mut().push_fault(LedgerFault::ReplyLost);
+        io.ledger
+            .borrow_mut()
+            .push_read_fault(LedgerFault::TimedOut);
+        attempt.start(
+            &harness::flags(),
+            StartDeadline::after(io.clock.now(), StartDeadline::CAP).unwrap(),
+        )
+    };
+    let stored = row(&io)?;
+    let mut recovery = world.attempt();
+    let receipts = recovery.recover(&cleanup_deadlines(&io.clock));
+    if start.is_ok()
+        || stored.facts().contains(&LedgerFact::StartIssued)
+        || saw(&io, is_start)
+        || receipts
+            .as_ref()
+            .is_ok_and(|items| items.iter().any(|receipt| receipt.cleanup_confirmed()))
+    {
+        return Err(format!(
+            "unconfirmed start={start:?} facts={:?} recovery={receipts:?}",
+            stored.facts()
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn unreadable_identity_readback_does_not_clone() -> Result<(), String> {
+    let (mut world, io) = opened(PhaseBudgets::adr());
+    push_clear(&io);
+    let mut attempt = world.attempt();
+    reserve_default(&mut attempt, &io.clock)?;
+    push_clear(&io);
+    push_clone_ok(&io);
+    io.ledger
+        .borrow_mut()
+        .push_fault(LedgerFault::CommittedLost);
+    io.ledger
+        .borrow_mut()
+        .push_read_fault(LedgerFault::TimedOut);
+    let cloned = attempt.clone_vm(
+        gcu_eval::disposable::tart::GoldenImage::MacosS2Eval,
+        CloneDeadline::after(io.clock.now(), CloneDeadline::CAP).unwrap(),
+    );
+    let stored = row(&io)?;
+    let expected = stored.expected().ok_or("identity was not written")?;
+    if cloned.is_ok()
+        || saw(&io, is_clone)
+        || expected.incarnation() != INC
+        || expected.config() != harness::CFG
+    {
+        return Err(format!("clone={cloned:?} row={stored:?}"));
+    }
+    Ok(())
+}
+
+pub(super) fn lease_must_not_renew_after_inner_expiry() -> Result<(), String> {
+    let (mut world, io) = opened(PhaseBudgets::adr());
+    let mut attempt = super::drive(&mut world, &io, Phase::Running)?;
+    push_guest(&io, ok_body("ok"));
+    attempt
+        .arm_owner_lease(LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap())
+        .map_err(|err| format!("arm: {err:?}"))?;
+    harness::advance(&io.clock, Duration::from_millis(2500))?;
+    io.lock
+        .borrow_mut()
+        .advance_on_acquire(Duration::from_secs(1));
+    push_guest(&io, ok_body("ok"));
+    let renewed =
+        attempt.arm_owner_lease(LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap());
+    let leases: Vec<_> = io
+        .guest
+        .borrow()
+        .trace()
+        .iter()
+        .filter(|entry| matches!(entry.command, GuestCommand::Lease { .. }))
+        .cloned()
+        .collect();
+    if renewed.is_ok()
+        || attempt.phase() != Phase::Suspended
+        || leases.len() != 1
+        || leases[0].deadline.nanos() != 3_000_000_000
+    {
+        return Err(format!(
+            "renewed={renewed:?} phase={:?} leases={leases:?}",
+            attempt.phase()
+        ));
+    }
+    let run = RunDeadline::after(io.clock.now(), RunDeadline::CAP).unwrap();
+    if !matches!(attempt.run(run), Err(StepError::Terminal))
+        || !matches!(
+            attempt.destroy(&cleanup_deadlines(&io.clock)),
+            Err(StepError::DeleteForbidden)
+        )
+        || saw(&io, is_stop)
+        || saw(&io, is_delete)
+        || attempt.phase() != Phase::Suspended
+    {
+        return Err(format!("work after expiry phase {:?}", attempt.phase()));
+    }
+    Ok(())
+}
+
+pub(super) fn recovery_committed_seal_must_match_followup_gate() -> Result<(), String> {
+    let (mut world, io) = opened(PhaseBudgets::adr());
+    push_clear(&io);
+    {
+        let mut attempt = world.attempt();
+        reserve_default(&mut attempt, &io.clock)?;
+    }
+    push_clear(&io);
+    io.ledger
+        .borrow_mut()
+        .push_seal_fault(LedgerFault::CommittedLost);
+    let mut attempt = world.attempt();
+    let recovered = attempt
+        .recover(&cleanup_deadlines(&io.clock))
+        .map_err(|err| format!("recover: {err:?}"))?;
+    let receipt = recovered.first().ok_or("no receipt")?;
+    expect_not_run(receipt, NotRunReason::HostCrash, false, true)?;
+    let stored = row(&io)?;
+    if !receipt.cleanup_confirmed()
+        || receipt.recovery_required()
+        || attempt.phase() != Phase::Idle
+        || attempt.receipt().is_some()
+        || !stored.is_sealed()
+        || stored.facts().contains(&LedgerFact::Quarantined)
+    {
+        return Err(format!(
+            "receipt={receipt:?} phase={:?} row={stored:?}",
+            attempt.phase()
+        ));
+    }
+    drop(attempt);
+    push_clear(&io);
+    let mut next = world.attempt();
+    let absolute = AttemptDeadline::after(io.clock.now(), AttemptDeadline::CAP).unwrap();
+    reserve_named(
+        &mut next,
+        &io.clock,
+        RUN_2,
+        harness::CLONE_2,
+        absolute,
+        false,
+        true,
+        harness::manifest(),
+    )
+    .map_err(|err| format!("next reserve: {err:?}"))?;
+    Ok(())
+}
+
+pub(super) fn tart_still_up_does_not_delete() -> Result<(), String> {
+    let (mut world, io) = opened(PhaseBudgets::adr());
+    let mut attempt = super::drive(&mut world, &io, Phase::Revoking)?;
+    super::push_until_stop(&io);
+    push_status(&io, "stopped", RUN, "up", "exited");
+    if !matches!(
+        attempt.destroy(&cleanup_deadlines(&io.clock)),
+        Err(StepError::Cleanup(NotRunReason::CleanupFailed))
+    ) || saw(&io, is_delete)
+    {
+        return Err("live tart was deleted".into());
+    }
+    Ok(())
+}
+
+pub(super) fn login_dispatch_stays_inside_prep() -> Result<(), String> {
+    let budgets = PhaseBudgets::adr()
+        .shrink(BudgetField::Prep, Duration::from_secs(1))
+        .unwrap();
+    let (mut world, io) = opened(budgets);
+    let mut attempt = super::drive(&mut world, &io, Phase::Bootstrapped)?;
+    push_guest(&io, ok_body("login v1 ready"));
+    let caller = LoginDeadline::after(io.clock.now(), Duration::from_secs(30)).unwrap();
+    attempt
+        .login(caller)
+        .map_err(|err| format!("login: {err:?}"))?;
+    let got = io
+        .guest
+        .borrow()
+        .trace()
+        .iter()
+        .find(|entry| matches!(entry.command, GuestCommand::Login))
+        .map(|entry| entry.deadline.nanos());
+    if got != Some(1_000_000_000) {
+        return Err(format!("login deadline {got:?} caller {:?}", caller.at()));
+    }
+    drop(attempt);
+    let (mut world, io) = opened(budgets);
+    let mut attempt = super::drive(&mut world, &io, Phase::Bootstrapped)?;
+    harness::advance(&io.clock, Duration::from_secs(1))?;
+    let before = io.guest.borrow().trace().len();
+    let caller = LoginDeadline::after(io.clock.now(), Duration::from_secs(30)).unwrap();
+    if !matches!(attempt.login(caller), Err(StepError::Expired))
+        || io.guest.borrow().trace().len() != before
+    {
+        return Err("login after prep end was dispatched".into());
+    }
+    Ok(())
+}
+
+pub(super) fn clone_config_mismatch_is_not_accepted() -> Result<(), String> {
+    let (mut world, io) = opened(PhaseBudgets::adr());
+    push_clear(&io);
+    let mut attempt = world.attempt();
+    reserve_default(&mut attempt, &io.clock)?;
+    push_clear(&io);
+    push_runner(&io, ok_body(&format!("clone v1 inc={INC} cfg=cfg-other")));
+    let deadline = CloneDeadline::after(io.clock.now(), CloneDeadline::CAP).unwrap();
+    if !matches!(
+        attempt.clone_vm(
+            gcu_eval::disposable::tart::GoldenImage::MacosS2Eval,
+            deadline
+        ),
+        Err(StepError::Cleanup(NotRunReason::IdentityConflict))
+    ) {
+        return Err("config-only body was accepted".into());
+    }
+    let stored = row(&io)?;
+    let expected = stored.expected().ok_or("identity missing")?;
+    if expected.incarnation() != INC
+        || expected.config() != harness::CFG
+        || attempt.phase() == Phase::Cloned
+    {
+        return Err(format!("stored {stored:?} phase {:?}", attempt.phase()));
     }
     Ok(())
 }

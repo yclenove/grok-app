@@ -29,8 +29,10 @@ where
     /// [`LedgerFact::CleanupUnknown`] is [`NotRunReason::OwnerDeath`]; any
     /// other unsealed row is [`NotRunReason::HostCrash`]. A row whose start
     /// was issued is not treated as cleaned up just because a list omits the
-    /// name. Neither keeps a score. Does not block. The returned receipts are
-    /// not kept on the machine, so a later reserve is a new attempt.
+    /// name. A seal error whose readback shows the row already sealed is
+    /// success and does not publish `Quarantined(ReceiptFailed)`. Neither
+    /// keeps a score. Does not block. The returned receipts are not kept on
+    /// the machine, so a later reserve is a new attempt.
     pub fn recover(
         &mut self,
         deadlines: &CleanupDeadlines,
@@ -104,14 +106,21 @@ where
                 );
             }
             if let Err(err) = self.ledger_seal(&clone, deadlines.seal.at(), Scope::Recovery) {
-                self.mark_quarantine(&clone, deadlines);
-                return self.stop_recovery(
-                    &run,
-                    &clone,
-                    deadlines.query.at(),
-                    NotRunReason::ReceiptFailed,
-                    StepError::Ledger(err),
-                );
+                // This machine has no clone id yet, so read the row just sealed.
+                let sealed = self
+                    .ledger_query(&clone, deadlines.seal.at(), Scope::Recovery, None)
+                    .map(|stored| stored.is_sealed())
+                    .unwrap_or(false);
+                if !sealed {
+                    self.mark_quarantine(&clone, deadlines);
+                    return self.stop_recovery(
+                        &run,
+                        &clone,
+                        deadlines.query.at(),
+                        NotRunReason::ReceiptFailed,
+                        StepError::Ledger(err),
+                    );
+                }
             }
             receipts.push(AttemptReceipt::new(
                 Some(run),

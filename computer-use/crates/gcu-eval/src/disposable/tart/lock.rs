@@ -5,6 +5,7 @@
 //! returns, so a Tart or guest call cannot run while the guard is held.
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use super::deadline::{FakeClock, HostClock, MonoInstant};
 
@@ -40,6 +41,8 @@ pub trait CleanupLock {
 pub struct FakeCleanupLock {
     mutex: Mutex<()>,
     clock: FakeClock,
+    /// Consumed by the next `try_acquire` that is still inside its deadline.
+    acquire_advance: Duration,
 }
 
 impl FakeCleanupLock {
@@ -51,7 +54,17 @@ impl FakeCleanupLock {
         Self {
             mutex: Mutex::new(()),
             clock,
+            acquire_advance: Duration::ZERO,
         }
+    }
+
+    /// On the next in-time `try_acquire`, move the shared clock forward by `step`.
+    ///
+    /// Does not sleep. The step is consumed once. Zero clears a previously
+    /// armed step. A step that lands on or past the supplied deadline makes
+    /// that acquire [`LockError::Expired`].
+    pub fn advance_on_acquire(&mut self, step: Duration) {
+        self.acquire_advance = step;
     }
 
     /// Lock and never unlock.
@@ -74,6 +87,13 @@ impl CleanupLock for FakeCleanupLock {
     fn try_acquire(&mut self, deadline: MonoInstant) -> Result<(), LockError> {
         if self.clock.now() >= deadline {
             return Err(LockError::Expired);
+        }
+        let step = std::mem::take(&mut self.acquire_advance);
+        if !step.is_zero() {
+            // The acquire must still return inside the deadline it was given.
+            if self.clock.advance(step).is_err() || self.clock.now() >= deadline {
+                return Err(LockError::Expired);
+            }
         }
         match self.mutex.try_lock() {
             Ok(guard) => {

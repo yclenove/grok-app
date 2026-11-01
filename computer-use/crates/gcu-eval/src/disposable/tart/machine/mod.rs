@@ -8,7 +8,8 @@
 //! work the fake has already started. Runner, guest, and ledger calls go
 //! through one dispatch: the earlier of the caller deadline, that call's phase
 //! budget, the attempt absolute deadline, and the aggregate that encloses the
-//! phase. Prep encloses reserve through ready. Run and the owner lease are not
+//! phase. Prep encloses reserve through ready and starts at the reserve entry,
+//! including the reads before reserve returns. Run and the owner lease are not
 //! shortened by a finished prep. Cleanup encloses revoke, destroy, and seal.
 //! Recovery uses only the new call's deadlines.
 
