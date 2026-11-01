@@ -562,19 +562,86 @@ async fn revoke_after_image_commit_hides_the_published_batch() {
 }
 
 fn artifact_paths(rendered: &str) -> Vec<std::path::PathBuf> {
+    // Tool JSON escapes `\`, so a Windows path is not a raw `C:\...` substring.
+    // Parse first, then classify with `Path::is_absolute` (drive prefix or `/`).
+    let text = rendered_text(rendered);
     let mut paths = Vec::new();
     for marker in ["full text: ", "Screenshot file: "] {
-        for chunk in rendered.split(marker).skip(1) {
+        for chunk in text.split(marker).skip(1) {
             let stop = chunk
-                .find(|ch: char| ch.is_whitespace() || matches!(ch, ']' | '\\' | '"' | ','))
+                .find(|ch: char| ch.is_whitespace() || matches!(ch, ']' | '"' | ','))
                 .unwrap_or(chunk.len());
-            let path = chunk[..stop].trim();
-            if path.starts_with('/') {
-                paths.push(std::path::PathBuf::from(path));
+            let path = std::path::Path::new(chunk[..stop].trim());
+            if path.is_absolute() {
+                paths.push(path.to_path_buf());
             }
         }
     }
     paths
+}
+
+fn rendered_text(rendered: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(rendered) else {
+        return rendered.to_string();
+    };
+    let mut text = String::new();
+    push_json_strings(&value, &mut text);
+    text
+}
+
+fn push_json_strings(value: &serde_json::Value, text: &mut String) {
+    match value {
+        serde_json::Value::String(item) => {
+            text.push_str(item);
+            text.push('\n');
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                push_json_strings(item, text);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values() {
+                push_json_strings(item, text);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn artifact_paths_parse_json_strings_before_taking_absolute_paths() {
+    let logical = "full text: C:\\session\\0.png\nScreenshot file: /tmp/shot.png\nScreenshot file: /tmp/ses\\sion/0.png\n";
+    let rendered = serde_json::to_string(&serde_json::json!({
+        "content": [{ "text": logical }]
+    }))
+    .unwrap();
+    assert!(
+        rendered.contains(r"C:\\session\\0.png"),
+        "fixture must keep the escaped backslash: {rendered}"
+    );
+    assert!(
+        rendered.contains(r"/tmp/ses\\sion/0.png"),
+        "fixture must keep the escaped backslash: {rendered}"
+    );
+    let paths = artifact_paths(&rendered);
+    let shot = std::path::Path::new("/tmp/shot.png");
+    let nested = std::path::Path::new(r"/tmp/ses\sion/0.png");
+    let windows = std::path::Path::new(r"C:\session\0.png");
+    if shot.is_absolute() {
+        assert!(paths.iter().any(|path| path == shot), "{paths:?}");
+    }
+    if nested.is_absolute() {
+        assert!(
+            paths.iter().any(|path| path == nested),
+            "unescape skipped or backslash still ends the path: {paths:?} from {rendered}"
+        );
+    }
+    if windows.is_absolute() {
+        assert!(paths.iter().any(|path| path == windows), "{paths:?}");
+    } else {
+        assert!(paths.iter().all(|path| path != windows), "{paths:?}");
+    }
 }
 
 async fn wait_until_gone(paths: &[std::path::PathBuf]) {
