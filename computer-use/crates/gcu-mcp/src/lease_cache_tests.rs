@@ -145,7 +145,7 @@ async fn delivered_file_is_unreadable_after_lease_expiry() {
         admission.stamp(Some(epoch(1)));
         admission.commit(std::slice::from_mut(&mut staged));
     }
-    let path = staged.path.clone();
+    let path = staged.path().to_path_buf();
     assert_eq!(files.export().unwrap().len(), 1);
     for _ in 0..8 {
         tokio::task::yield_now().await;
@@ -182,7 +182,7 @@ async fn rebind_deletes_artifacts_while_the_session_stays_open() {
         admission.stamp(Some(epoch(1)));
         admission.commit();
     }
-    let path = staged.path.clone();
+    let path = staged.path().to_path_buf();
     assert!(path.exists());
     assert!(cache.resident("shot"));
     let next = FixtureScope::try_new("run", 2, "engine", "desktop", "control", vec![]).unwrap();

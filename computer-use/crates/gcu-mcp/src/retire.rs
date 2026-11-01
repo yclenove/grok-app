@@ -32,10 +32,11 @@ pub(crate) fn arm(flag: &AtomicBool, lease: ScopeLease, retire: impl Fn() + Send
 async fn drive(lease: ScopeLease, retire: Arc<dyn Fn() + Send + Sync>) {
     let mut epoch = lease.subscribe();
     loop {
-        // Expiry publishes only when the lease is read. A zero remainder is
-        // already revoked, including a paused clock that advanced first.
-        if lease.remaining() == Some(Duration::ZERO) {
-            retire();
+        // `subscribe` already shows a publish that happened before this task
+        // was polled. Retire that generation before waiting, or the change is
+        // lost. Expiry itself publishes only when the lease is read.
+        retire();
+        if lease.current().is_none() {
             break;
         }
         tokio::select! {
@@ -47,10 +48,6 @@ async fn drive(lease: ScopeLease, retire: Arc<dyn Fn() + Send + Sync>) {
                 }
             }
             _ = sleep_remaining(&lease), if lease.remaining().is_some_and(|left| !left.is_zero()) => {}
-        }
-        retire();
-        if lease.current().is_none() {
-            break;
         }
     }
 }
