@@ -206,7 +206,7 @@ H1/H2 的具体组件若需另造通道或包过滤器，先拆独立设计卡�
 
 | 顺序 / 小卡 | 交付与审阅重点 | owner 动作 |
 | --- | --- | --- |
-| **S11-0**（先于 S11a，无代码） | 在 owner 完成 Softnet 授权后，对一份一次性 clone 做**无模型**的实测并归档为短报告：①Softnet 默认策略下 guest 能否到达 gateway 上的服务（宿主 DNS/SSH/其它端口）、能否走 IPv6、能否发 UDP/QUIC 到放行地址；②加 `--net-softnet-block=0.0.0.0/0 --net-softnet-allow=<模型端点 /32>` 后上述每一项的结果，以及宿主 → guest 的控制通道（ssh/其它）是否仍可用、需要放行什么；③`tart` 是否提供不经 IP 网络的宿主 ↔ guest 通道（H1）。结论只记事实，不记推断 | 无（Softnet 授权已由 owner 做）；实测期间不改宿主网络/防火墙设置 |
+| **S11-0**（先于 S11a，无代码） | 在 owner 完成 Softnet 授权后，对一份一次性 clone 做**无模型**的实测并归档为短报告：①Softnet 默认策略下 guest 能否到达 gateway 上的服务（宿主 DNS/SSH/其它端口）、能否走 IPv6、能否发 UDP/QUIC 到放行地址；②加 `--net-softnet-block=0.0.0.0/0 --net-softnet-allow=<模型端点 /32>` 后上述每一项的结果，以及宿主 → guest 的控制通道（ssh/其它）是否仍可用、需要放行什么；③`tart` 是否提供不经 IP 网络的宿主 ↔ guest 通道（H1）。结论只记事实，不记推断。脚本与手册见 [s11-0-probe.sh](../../scripts/s11-0-probe.sh) 与 [s11-0-probe-runbook.md](../s11-0-probe-runbook.md)（已写，未运行）。 | 无（Softnet 授权已由 owner 做）；实测期间不改宿主网络/防火墙设置 |
 
 决策规则：若实测显示 Softnet 单独已满足 §5 的拒绝类别，则 §5 第 3 点的“宿主网络 guard”不进入范围；若不满足，**先把具体 guard 方案（影响范围、回滚、是否只作用于该 Tart/Softnet 实例）提交 owner 审阅，批准前不安装任何网络规则**。若 H1 无可用通道，暂停 S11 并回到 owner，不为凑通道开放 gateway 上的 IP 服务。
 
