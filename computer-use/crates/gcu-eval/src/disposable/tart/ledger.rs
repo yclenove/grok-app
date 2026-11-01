@@ -1,23 +1,73 @@
 //! Ledger that records a reservation before any clone permit exists.
 //!
 //! The fake keeps rows in memory. That is not a durability proof. Dropping a
-//! permit does not clone, delete, or seal.
+//! permit does not clone, delete, or seal. `rows` returns the exact owned
+//! records. It is not a VM inventory and it has no prefix lookup.
+
+use std::cell::RefCell;
+use std::collections::VecDeque;
 
 use super::deadline::{
     AttemptDeadline, FakeClock, HostClock, MonoInstant, QueryDeadline, SealDeadline,
 };
 use super::identity::{CloneId, RunId};
+use super::output::{ScriptOutcome, TraceEntry};
 
 /// Closed notes a caller may append. There is no free-text field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LedgerFact {
     /// Clone was issued for this exact reservation.
     CloneIssued,
-    /// A recovery pass saw this exact reservation. This is not a deletion.
+    /// Start was issued for this reservation. Not a process-exit proof.
+    StartIssued,
+    /// A recovery pass saw this exact reservation. This is not a deletion and not a score.
     RecoveryNoted,
+    /// Owner death left cleanup unconfirmed. Not a deletion and not a score.
+    CleanupUnknown,
+    /// This row forbids another attempt. Not a task score.
+    Quarantined,
 }
 
-/// Why a ledger call failed. The row is unchanged on failure.
+/// One ledger call recorded with the deadline the fake enforced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LedgerOp {
+    /// `reserve`.
+    Reserve,
+    /// `rows`.
+    Rows,
+    /// `query`.
+    Query,
+    /// `append` of this fact.
+    Append(LedgerFact),
+    /// `note_identity`.
+    NoteIdentity,
+    /// `seal`.
+    Seal,
+}
+
+/// Scripted ledger fault. An empty queue keeps the success path.
+///
+/// An already-due deadline does not consume a queued fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerFault {
+    /// Command failed. The row is unchanged.
+    Failed,
+    /// Timed out. The fake does not sleep.
+    TimedOut,
+    /// The reply cannot be used. The row is unchanged.
+    Malformed,
+    /// The reply was over the cap. Nothing is stored.
+    Overlong,
+    /// The call was issued and the reply did not arrive. Nothing is written.
+    ReplyLost,
+    /// The write was stored, then the acknowledgement was lost.
+    ///
+    /// Unlike [`Self::ReplyLost`], the row does change. Callers still see
+    /// [`LedgerError::ReplyLost`] and must read the row to see the write.
+    CommittedLost,
+}
+
+/// Why a ledger call failed. A [`LedgerFault::CommittedLost`] write is the exception.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LedgerError {
     /// The call deadline was already due. Nothing was written.
@@ -38,6 +88,55 @@ pub enum LedgerError {
     /// The row is sealed. Append and a second seal are refused.
     #[error("reservation is sealed")]
     Sealed,
+    /// Scripted failure. The row is unchanged.
+    #[error("ledger command failed")]
+    Failed,
+    /// Scripted timeout. The fake did not sleep.
+    #[error("ledger command timed out")]
+    TimedOut,
+    /// Scripted unusable reply. The row is unchanged.
+    #[error("ledger reply was malformed")]
+    Malformed,
+    /// Scripted overlong reply. Nothing was stored.
+    #[error("ledger reply exceeded the cap")]
+    Overlong,
+    /// The acknowledgement did not come back.
+    ///
+    /// [`LedgerFault::ReplyLost`] leaves the row unchanged.
+    /// [`LedgerFault::CommittedLost`] stores the write and then returns this error.
+    #[error("ledger reply was lost")]
+    ReplyLost,
+}
+
+/// Fake VM incarnation and configuration measured from a clone body.
+///
+/// This is not a host identity and not a boot id. Destruction matches it
+/// against a later authoritative status. A guest reboot is a separate fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VmIdentity {
+    incarnation: String,
+    config: String,
+}
+
+impl VmIdentity {
+    pub(crate) fn from_parts(incarnation: String, config: String) -> Self {
+        Self {
+            incarnation,
+            config,
+        }
+    }
+
+    /// Incarnation token from the clone body.
+    #[must_use]
+    pub fn incarnation(&self) -> &str {
+        &self.incarnation
+    }
+
+    /// Configuration token from the clone body.
+    #[must_use]
+    pub fn config(&self) -> &str {
+        &self.config
+    }
 }
 
 /// One reservation. The fake stores this value. Fields are a snapshot, not a live capability.
@@ -46,6 +145,8 @@ pub struct Reservation {
     run: RunId,
     clone_id: CloneId,
     absolute: MonoInstant,
+    /// Set from a clone body. `None` does not own a VM that happens to share the name.
+    expected: Option<VmIdentity>,
     facts: Vec<LedgerFact>,
     sealed: bool,
 }
@@ -67,6 +168,12 @@ impl Reservation {
     #[must_use]
     pub fn absolute_deadline(&self) -> MonoInstant {
         self.absolute
+    }
+
+    /// Incarnation measured from the clone body, once that body was stored.
+    #[must_use]
+    pub fn expected(&self) -> Option<&VmIdentity> {
+        self.expected.as_ref()
     }
 
     /// Facts appended since reserve, in order.
@@ -143,7 +250,9 @@ mod clone_permit_not_duplicated {
 pub trait AttemptLedger {
     /// Write `run`, `clone`, and `absolute`, then return the only permit for that row.
     ///
-    /// On error nothing is written and no permit is returned.
+    /// On error no permit is returned. [`LedgerFault::ReplyLost`] also writes
+    /// nothing. [`LedgerFault::CommittedLost`] stores the row and then returns
+    /// [`LedgerError::ReplyLost`].
     fn reserve(
         &mut self,
         run: RunId,
@@ -163,8 +272,25 @@ pub trait AttemptLedger {
         call: QueryDeadline,
     ) -> Result<(), LedgerError>;
 
+    /// Store the clone body's incarnation on the exact row.
+    ///
+    /// Does not block. A missing value means this reservation must not be
+    /// treated as the owner of a VM that merely shares the clone name.
+    fn note_identity(
+        &mut self,
+        clone: &CloneId,
+        identity: &VmIdentity,
+        call: QueryDeadline,
+    ) -> Result<(), LedgerError>;
+
     /// Seal the exact row. A second seal fails and leaves the row sealed.
     fn seal(&mut self, clone: &CloneId, call: SealDeadline) -> Result<(), LedgerError>;
+
+    /// Every owned row, in insertion order.
+    ///
+    /// The ids are complete. This is not a prefix search and not a VM list.
+    /// An expired call returns [`LedgerError::Expired`] and no rows.
+    fn rows(&self, call: QueryDeadline) -> Result<Vec<Reservation>, LedgerError>;
 }
 
 /// Memory ledger. Not durable, and not evidence that a VM was reserved.
@@ -172,6 +298,13 @@ pub trait AttemptLedger {
 pub struct FakeLedger {
     clock: FakeClock,
     rows: Vec<Reservation>,
+    faults: VecDeque<LedgerFault>,
+    /// Consumed by `seal` before [`Self::faults`]. Other writes ignore it.
+    seal_faults: VecDeque<LedgerFault>,
+    /// Consumed by `query` only. `query` takes `&self`.
+    read_faults: RefCell<VecDeque<LedgerFault>>,
+    /// `query` and `rows` take `&self`, so the trace sits behind a cell.
+    trace: RefCell<Vec<TraceEntry<LedgerOp>>>,
 }
 
 impl FakeLedger {
@@ -183,11 +316,56 @@ impl FakeLedger {
         Self {
             clock,
             rows: Vec::new(),
+            faults: VecDeque::new(),
+            seal_faults: VecDeque::new(),
+            read_faults: RefCell::new(VecDeque::new()),
+            trace: RefCell::new(Vec::new()),
         }
     }
 
-    fn ensure_call(&self, at: MonoInstant) -> Result<(), LedgerError> {
-        if self.clock.now() >= at {
+    /// Recorded calls, in order. Deadlines are the instants the fake enforced.
+    #[must_use]
+    pub fn trace(&self) -> Vec<TraceEntry<LedgerOp>> {
+        self.trace.borrow().clone()
+    }
+
+    /// Queue a fault for the next `reserve`, `append`, `note_identity`, or `seal`.
+    ///
+    /// An empty queue is the success path. A due deadline does not consume
+    /// the fault. Does not block. `query` does not consume this queue.
+    pub fn push_fault(&mut self, fault: LedgerFault) {
+        self.faults.push_back(fault);
+    }
+
+    /// Queue a fault that the next `seal` consumes before [`Self::push_fault`].
+    ///
+    /// Earlier writes in the same call keep the shared queue. A due deadline
+    /// does not consume it. An already sealed row does not consume it. Does not block.
+    pub fn push_seal_fault(&mut self, fault: LedgerFault) {
+        self.seal_faults.push_back(fault);
+    }
+
+    /// Queue a fault for the next `query`. The row is not changed.
+    ///
+    /// `rows` and every write ignore this queue. A due deadline does not
+    /// consume it. [`LedgerFault::CommittedLost`] is reported as
+    /// [`LedgerError::ReplyLost`] because a query stores nothing. Does not block.
+    pub fn push_read_fault(&mut self, fault: LedgerFault) {
+        self.read_faults.borrow_mut().push_back(fault);
+    }
+
+    fn stamp(&self, op: LedgerOp, at: MonoInstant) -> Result<(), LedgerError> {
+        let expired = self.clock.now() >= at;
+        self.trace.borrow_mut().push(TraceEntry {
+            command: op,
+            deadline: at,
+            outcome: if expired {
+                ScriptOutcome::Expired
+            } else {
+                ScriptOutcome::Success
+            },
+        });
+        if expired {
             Err(LedgerError::Expired)
         } else {
             Ok(())
@@ -200,6 +378,40 @@ impl FakeLedger {
             .position(|row| &row.clone_id == clone)
             .ok_or(LedgerError::NotFound)
     }
+
+    /// `Ok(true)` means the write must be stored and then reported as lost.
+    fn take_fault(&mut self) -> Result<bool, LedgerError> {
+        match self.faults.pop_front() {
+            None => Ok(false),
+            Some(fault) => Self::fault_committed(fault),
+        }
+    }
+
+    fn fault_committed(fault: LedgerFault) -> Result<bool, LedgerError> {
+        match fault {
+            LedgerFault::CommittedLost => Ok(true),
+            LedgerFault::Failed => Err(LedgerError::Failed),
+            LedgerFault::TimedOut => Err(LedgerError::TimedOut),
+            LedgerFault::Malformed => Err(LedgerError::Malformed),
+            LedgerFault::Overlong => Err(LedgerError::Overlong),
+            LedgerFault::ReplyLost => Err(LedgerError::ReplyLost),
+        }
+    }
+
+    fn read_error(fault: LedgerFault) -> LedgerError {
+        match Self::fault_committed(fault) {
+            Ok(_) | Err(LedgerError::ReplyLost) => LedgerError::ReplyLost,
+            Err(err) => err,
+        }
+    }
+
+    fn finish_write(committed_lost: bool) -> Result<(), LedgerError> {
+        if committed_lost {
+            Err(LedgerError::ReplyLost)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl AttemptLedger for FakeLedger {
@@ -210,10 +422,11 @@ impl AttemptLedger for FakeLedger {
         absolute: AttemptDeadline,
         call: QueryDeadline,
     ) -> Result<ClonePermit, LedgerError> {
-        self.ensure_call(call.at())?;
+        self.stamp(LedgerOp::Reserve, call.at())?;
         if absolute.at() <= self.clock.now() {
             return Err(LedgerError::AttemptAlreadyExpired);
         }
+        let committed_lost = self.take_fault()?;
         if self.rows.iter().any(|row| row.run == run) {
             return Err(LedgerError::DuplicateRun);
         }
@@ -225,9 +438,13 @@ impl AttemptLedger for FakeLedger {
             run: run.clone(),
             clone_id: clone.clone(),
             absolute: stored,
+            expected: None,
             facts: Vec::new(),
             sealed: false,
         });
+        if committed_lost {
+            return Err(LedgerError::ReplyLost);
+        }
         Ok(ClonePermit {
             run,
             clone_id: clone,
@@ -236,7 +453,10 @@ impl AttemptLedger for FakeLedger {
     }
 
     fn query(&self, clone: &CloneId, call: QueryDeadline) -> Result<Reservation, LedgerError> {
-        self.ensure_call(call.at())?;
+        self.stamp(LedgerOp::Query, call.at())?;
+        if let Some(fault) = self.read_faults.borrow_mut().pop_front() {
+            return Err(Self::read_error(fault));
+        }
         let index = self.row_index(clone)?;
         Ok(self.rows[index].clone())
     }
@@ -247,22 +467,48 @@ impl AttemptLedger for FakeLedger {
         fact: LedgerFact,
         call: QueryDeadline,
     ) -> Result<(), LedgerError> {
-        self.ensure_call(call.at())?;
+        self.stamp(LedgerOp::Append(fact), call.at())?;
         let index = self.row_index(clone)?;
         if self.rows[index].sealed {
             return Err(LedgerError::Sealed);
         }
+        let committed_lost = self.take_fault()?;
         self.rows[index].facts.push(fact);
-        Ok(())
+        Self::finish_write(committed_lost)
+    }
+
+    fn note_identity(
+        &mut self,
+        clone: &CloneId,
+        identity: &VmIdentity,
+        call: QueryDeadline,
+    ) -> Result<(), LedgerError> {
+        self.stamp(LedgerOp::NoteIdentity, call.at())?;
+        let index = self.row_index(clone)?;
+        if self.rows[index].sealed {
+            return Err(LedgerError::Sealed);
+        }
+        let committed_lost = self.take_fault()?;
+        self.rows[index].expected = Some(identity.clone());
+        Self::finish_write(committed_lost)
     }
 
     fn seal(&mut self, clone: &CloneId, call: SealDeadline) -> Result<(), LedgerError> {
-        self.ensure_call(call.at())?;
+        self.stamp(LedgerOp::Seal, call.at())?;
         let index = self.row_index(clone)?;
         if self.rows[index].sealed {
             return Err(LedgerError::Sealed);
         }
+        let committed_lost = match self.seal_faults.pop_front() {
+            Some(fault) => Self::fault_committed(fault)?,
+            None => self.take_fault()?,
+        };
         self.rows[index].sealed = true;
-        Ok(())
+        Self::finish_write(committed_lost)
+    }
+
+    fn rows(&self, call: QueryDeadline) -> Result<Vec<Reservation>, LedgerError> {
+        self.stamp(LedgerOp::Rows, call.at())?;
+        Ok(self.rows.clone())
     }
 }

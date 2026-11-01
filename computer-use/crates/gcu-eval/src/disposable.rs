@@ -5,8 +5,8 @@
 //! The fake implementation exists only in unit tests. This module never starts
 //! a credentialed process, configures a firewall, or provisions a VM.
 //!
-//! [`tart`] is the S11a offline interface only: typed commands, explicit
-//! deadlines, bounded output, and fakes. It does not admit a launch.
+//! [`tart`] is the S11a offline interface and the S11b caller-driven fake
+//! state machine. It does not admit a launch.
 
 pub mod tart;
 
