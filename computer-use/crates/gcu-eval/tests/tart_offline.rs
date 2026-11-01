@@ -42,8 +42,7 @@ mod watch;
 type Check = fn() -> Result<(), String>;
 
 fn main() {
-    // Shared with the propagate probe: a check child that exits 7 must make
-    // this process exit 7, not 0.
+    // The checks child's exit status becomes this process's status.
     std::process::exit(watch::entry(run_checks));
 }
 
