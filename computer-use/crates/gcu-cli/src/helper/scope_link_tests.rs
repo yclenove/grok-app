@@ -133,7 +133,6 @@ struct Ends {
     driver: gcu_driver_fake::FakeDriver,
     facts: Arc<ScriptedFacts>,
     hits: Arc<AtomicUsize>,
-    stores: Arc<StoreLedger>,
     lease: Arc<Mutex<Option<gcu_core::scope::ScopeLease>>>,
 }
 
@@ -284,7 +283,6 @@ fn launch(
     let facts = primed();
     let plane = DataPlane::new();
     let hits = Arc::new(AtomicUsize::new(0));
-    let stores = Arc::new(StoreLedger::new());
     let lease = Arc::new(Mutex::new(None));
     let gate = HelperGate {
         facts: Arc::clone(&facts) as Arc<dyn gcu_driver_macos::ProcessFacts>,
@@ -297,7 +295,6 @@ fn launch(
     let task = tokio::spawn(super::run_helper(
         helper,
         driver.clone(),
-        Arc::clone(&stores),
         gate,
         move |scope_lease, _children| {
             *serve_lease.lock().unwrap() = Some(scope_lease);
@@ -318,7 +315,6 @@ fn launch(
         driver,
         facts,
         hits,
-        stores,
         lease,
     }
 }
@@ -337,8 +333,6 @@ async fn finish(ends: Ends, never_opened: bool) {
         assert_eq!(ends.hits.load(Ordering::SeqCst), 0);
     }
     assert!(ends.driver.release_calls() > 0);
-    assert_eq!(ends.stores.ordinary_total(), 0);
-    assert!(ends.stores.scoped_total() >= 3);
 }
 
 async fn finish_never_opened(ends: Ends) {
@@ -400,8 +394,9 @@ fn identities_do_not_share_socket_or_state_roots() {
     let ledger = StoreLedger::new();
     ledger.touch(StoreRole::Ordinary, false);
     ledger.touch(StoreRole::Ordinary, true);
+    ledger.touch(StoreRole::Scoped, true);
     assert_eq!(ledger.ordinary_total(), 2);
-    assert_eq!(ledger.scoped_total(), 0);
+    assert_eq!(ledger.scoped_total(), 1);
 }
 
 #[tokio::test]
@@ -868,4 +863,53 @@ async fn rebind_ack_flush_failure_releases_held_input() {
     })
     .await
     .unwrap();
+}
+
+/// Scoped sources must not name ordinary helper stores, launchers, or sockets.
+///
+/// `scope/data.rs` stays out of this list: the engine host opens there.
+/// Comments count. Path comparisons and `CodeSignature` checks are not needles.
+/// Memory only. No timeout or cancellation.
+#[test]
+fn scoped_modules_do_not_reference_ordinary_helper_stores() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let files = [
+        "src/helper/scope_link.rs",
+        "src/helper/identity.rs",
+        "src/scope/mod.rs",
+        "src/scope/plane.rs",
+    ];
+    let needles = [
+        "config::load",
+        "LocalHost::new",
+        "open_local_host",
+        "stop_reason::state_dir",
+        "stop_reason::write_marker",
+        "private::state_dir",
+        "policy_store::",
+        "HostPolicy",
+        "launch_helper",
+        "launch_for_onboarding",
+        "run_agent",
+        "run_stdio_proxy",
+        "client_attach",
+        "start_listener",
+        "UnixListener::bind",
+        "UnixListener::from_std",
+        "std::os::unix::net::UnixListener",
+        "launch_command",
+    ];
+    let mut hits = Vec::new();
+    for file in files {
+        let text = std::fs::read_to_string(root.join(file)).expect(file);
+        for needle in needles {
+            if text.contains(needle) {
+                hits.push(format!("{file}: {needle}"));
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "scoped modules reference ordinary helper stores: {hits:?}"
+    );
 }

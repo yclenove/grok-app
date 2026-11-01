@@ -6,7 +6,7 @@
 //! and it never calls the ordinary helper.
 
 use super::auth::CodeSignature;
-use super::identity::{self, StoreLedger, StoreRole};
+use super::identity;
 use crate::exit::Failure;
 use crate::scope::{release_unbound, run_ready, AckEncoder, DataPlane, ReadyLink};
 use gcu_driver_macos::{ProcessFacts, ScriptedFacts};
@@ -102,7 +102,6 @@ pub(crate) async fn run_scoped_agent() -> Result<u8, Failure> {
     run_helper(
         Box::new(local),
         driver,
-        Arc::new(StoreLedger::new()),
         HelperGate {
             facts: Arc::new(ScriptedFacts::new()),
             expected: closed_identities(),
@@ -119,7 +118,6 @@ pub(crate) async fn run_scoped_agent() -> Result<u8, Failure> {
 async fn run_helper<F, D>(
     mut control: BoxStream,
     driver: gcu_driver_fake::FakeDriver,
-    stores: Arc<StoreLedger>,
     gate: HelperGate,
     serve: F,
 ) -> Result<u8, Failure>
@@ -127,15 +125,7 @@ where
     F: FnOnce(gcu_core::scope::ScopeLease, crate::script_children::Children) -> D,
     D: std::future::Future<Output = Result<(), Failure>>,
 {
-    // Scoped stores only. The ordinary socket, auth file, and Stop root are
-    // not opened here. A recorded ordinary touch fails closed.
-    stores.touch(StoreRole::Scoped, false);
-    stores.touch(StoreRole::Scoped, false);
-    stores.touch(StoreRole::Scoped, false);
     let plane = gate.plane.clone();
-    if stores.ordinary_total() != 0 || stores.scoped_total() < 3 {
-        return release_unbound(driver, plane).await;
-    }
     let value = match tokio::time::timeout(
         std::time::Duration::from_secs(5),
         codec::read_frame_limited::<_, Value>(&mut control, MAX_CONTROL_FRAME),

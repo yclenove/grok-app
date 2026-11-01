@@ -1,8 +1,8 @@
 //! Ordinary and scoped helper identities. Path strings only. No store IO.
 //!
-//! The scoped helper never reads or writes the ordinary socket, auth store,
-//! Stop marker, or config. A session [`StoreLedger`] counts the stores it
-//! records. The ordinary total must stay zero.
+//! The scoped helper does not open the ordinary socket, the auth store, the
+//! Stop marker, or helper config. Isolation is a source scan of the scoped
+//! modules, not a touch counter.
 
 use std::path::{Path, PathBuf};
 
@@ -32,8 +32,8 @@ pub(super) fn scoped_bundle(debug: bool) -> &'static str {
     }
 }
 
-/// Shape of the ordinary Stop and auth root. Does not create it and does not
-/// call [`gcu_host_protocol::stop_reason::state_dir`].
+/// Shape of the ordinary Stop and auth root. Path math only. Does not create
+/// the directory and does not open the host Stop store.
 pub(super) fn ordinary_state_root() -> PathBuf {
     state_root("grok-computer-use")
 }
@@ -93,18 +93,21 @@ pub(crate) fn local_uid() -> u32 {
 }
 
 /// Which helper identity a store operation belongs to.
+///
+/// Test-only. Production isolation is the scoped-module source scan.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StoreRole {
     /// Owner's ordinary helper. The scoped path must not construct this.
-    ///
-    /// Production never builds it. Tests do, to prove a touch would count.
-    #[cfg_attr(not(test), allow(dead_code))]
     Ordinary,
     /// Dedicated scoped helper stores.
     Scoped,
 }
 
 /// Read and write counts for the two identities. Not process-global.
+///
+/// Test-only arithmetic. It does not observe production I/O.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct StoreLedger {
     ordinary_reads: std::sync::atomic::AtomicUsize,
@@ -113,6 +116,7 @@ pub(crate) struct StoreLedger {
     scoped_writes: std::sync::atomic::AtomicUsize,
 }
 
+#[cfg(test)]
 impl StoreLedger {
     /// Empty counters. Memory only. No timeout or cancellation.
     #[must_use]
