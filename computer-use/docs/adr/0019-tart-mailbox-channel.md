@@ -247,6 +247,7 @@ C1–C10 纯机械部分可用一次性 DEFAULT-Softnet clone + key-only SSH；a
 SSH **仅部署代码/驱动**，不传被测邮箱流量、逐样本预期答案、lease 或权威结果；上传例外仅程序产物。
 两端固定摘要程序按同一经审阅规格独立生成图样、各用本地时钟；guest 摘要经同卷固定 ASCII/≤4096-byte 测试结果槽读回（独立测试白名单，不混生产帧），宿主直接读文件/设备/挂载/账本。
 SSH 摘要仅验证可信实验室部署，stdout 仅诊断；均不证明邮箱发布/mount/cleanup。结果标 **DEFAULT-network / mechanics-only**，不证明生产 egress、S11e、控制存活或 real-eval；自主终止及全部 transport/liveness 须§6 M7/M9 重测。
+C7 自主终止及所有 transport/liveness 验收移到 M7/M9，在 block-all 下用无害替身树重测。
 
 每个**子例独立 attempt**：绑定精确账本与合成 canary（卷内/跨 export/卷外无个人内容）；负载≤60s、teardown≤60s，并取§2更短命令/阶段 cap。
 先到工作量/时间上限即停，未完成 unknown，watchdog 非文件系统失败；报样本数/观测点/max/错误/完整性，少量样本不报可信 p99；诊断/输出亦限量。
