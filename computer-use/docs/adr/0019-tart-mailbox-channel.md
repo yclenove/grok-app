@@ -222,7 +222,7 @@ S3 install/renew/revoke 走 guest 内继承 FD，S4 最终 ACK/S12 活代码身�
 
 ## 5. Mini 探针卡 S11-0c（机械实验，先于 S11e）
 
-C1–C10 纯机械部分可用一次性 DEFAULT-Softnet clone + key-only SSH；argv `TART run CLONE_ID --net-softnet --dir <N>:<M>/mailbox`（无 block/allow）。
+C1–C10 纯机械部分可用一次性 DEFAULT-Softnet clone + key-only SSH；argv `TART run CLONE_ID --no-graphics --net-softnet --dir <N>:<M>/mailbox`（无 block/allow；`--no-graphics` 必需，Mini 上绝不起图形界面）。
 最小入口为经审阅固定摘要确定性探针；controller 经同一受限 key-only SSH 向每个无个人数据/无登录态 DEFAULT clone 上传固定大小上限程序，按下列检查表核验/执行。
 不改 golden、无需 owner 安装，不依赖 M7 supervisor/golden/sandbox；复制/执行不安全即 unknown，禁扩权/新增服务。
 已有两个非管理员主体各仅操作自身对象；跨 UID/chown 无权记 permission-denied，缺第二身份/需权限则 unknown/后移；上传不授权建账户/提权。
@@ -314,6 +314,24 @@ C7 自主终止及所有 transport/liveness 验收移到 M7/M9，在 block-all �
 - 判定：看不到系统服务、阶段缺覆盖、无实际备份作业/仅空闲均 unknown，不能证明无读取/备份；需提权或全局变更则配方阻断。
 
 <a id="admission"></a>
+
+### S11-0c 拆分与首轮实测事实（2026-11-11）
+
+**拆分**：S11-0c 分为 **M2a**（邮箱目录机制 C1/C2/C8，导出为宿主普通 0700 私有目录，不是限容 HFSX 卷）与 **M2c**（卷实验 C4/C5/C6/C7/C9/C10，含 hdiutil 流程与本节原有卷相关约束，尚未实现）。M2a 的私有根规则：叶子目录为当前 UID 所有且 0700，祖先由 root 或当前 UID 所有、无组/其他写权限、无 ACL 写授权（逐段 FD 遍历，类似 ssh StrictModes），替代“每段 0700”的字面要求（Mini 的家目录与临时目录祖先不是 0700）。
+
+**实测**（Mac mini，Tart 2.41.1，一次性 DEFAULT-Softnet clone + 受限 SSH 实验室 driver，无模型、无凭据；每例结束确认 clone 删除且缺席、无 tart/softnet 残留进程；证据标签 `DEFAULT-network/mechanics-only`，导出为普通私有目录）：
+
+| 实验 | 结果（只记事实） |
+| --- | --- |
+| C1 双向 8 帧发布/读取 | 两方向完整性 ok，撕裂/混合帧 0，收到对端摘要；**可见延迟/往返未测得**（工具未产生 `vis_us`/`rtt_us`），故判 `unknown/partial-coverage`，不是通过 |
+| C2 file-sync 边界（写者在文件 fsync 后、rename 前退出） | 计划 3 次、尝试 3 次、rename 2 次、可见 2 次；未 rename 的 `part` 文件内容完整；判 `not-ack`（未完成的发布不当 ACK） |
+| C2 dir-sync 边界 | 3 次均 rename 且可见，目录同步 1 次；`not-ack` |
+| C2 rename 边界 | 3 次均 rename 且可见；`not-ack` |
+| C8 主体映射 | `unknown: principal-unknown`（未能确定 guest 非管理员主体数），未做任何创建/提权 |
+
+首次真机运行暴露一个工具缺陷：macOS arm64 上以内联汇编直接发 `openat` 系统调用、未声明内核会改写的寄存器，release 构建在真机段错误；已改为调用 libc 的可变参数 `openat`。debug 单测未能发现它，这一点也记为测试教训。
+
+**仍未测**：C1 延迟（需补工具）、C8 真正的双主体映射、全部卷实验（M2c）、block-all 下的自主运行与存活（M7/M9）。
 
 ## 6. 残余风险、not_run 与分步交付
 
