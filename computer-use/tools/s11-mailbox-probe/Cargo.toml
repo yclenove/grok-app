@@ -1,0 +1,15 @@
+[package]
+name = "s11-mailbox-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "S11-0c mechanical probe for the Tart mailbox (std only; real path is macOS-only)"
+
+[lib]
+name = "s11_mailbox_probe"
+path = "src/lib.rs"
+
+[[bin]]
+name = "s11-mailbox-probe"
+path = "src/main.rs"

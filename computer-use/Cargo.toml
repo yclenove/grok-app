@@ -17,6 +17,8 @@ members = [
     "apps/fixture",
     "xtask",
 ]
+# Independent Mini probe: own lockfile, no workspace deps, not in CI/check-deps.
+exclude = ["tools/s11-mailbox-probe"]
 
 [workspace.package]
 edition = "2021"
