@@ -90,10 +90,11 @@ run_bounded() {
   [[ "$secs" -gt "$left" ]] && secs=$left
   if [[ "$secs" -lt 1 ]]; then RB_TIMED_OUT=1; RB_STATUS=124; charge $((SECONDS - t0)); return 124; fi
   # Direct child only. Descendants inherit the files; nothing waits on them.
-  # ulimit -f on bash 3.2/macOS is 512-byte blocks: 64KiB = 128.
+  # No RLIMIT_FSIZE: it applies to every file the command writes, and on the
+  # real Mini it killed `tart ip` at once (SIGXFSZ). The poll below checks the
+  # capture files every 20ms and the post-exit check catches the rest.
   (
     ulimit -c 0 2>/dev/null || true
-    ulimit -f $((CAP / 512)) || exit 127
     exec "$@" <"$infile" >"$out" 2>"$err"
   ) &
   pid=$!
@@ -110,8 +111,6 @@ run_bounded() {
     sleep 0.02
   done
   if [[ "$reaped" != 1 ]]; then wait "$pid" 2>/dev/null; REAP_STATUS=$?; fi
-  # 153 = 128+SIGXFSZ. A full file is overflow even when the unit of ulimit -f differs.
-  [[ "$REAP_STATUS" -eq 153 ]] && RB_OVERFLOW=1
   capture_over "$out" "$err" && RB_OVERFLOW=1
   if [[ "$RB_OVERFLOW" == 1 ]]; then RB_STATUS=125
   elif [[ "$RB_TIMED_OUT" == 1 ]]; then RB_STATUS=124
