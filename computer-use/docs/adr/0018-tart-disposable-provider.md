@@ -282,3 +282,26 @@ S11b 在 S11-0 给出通道事实之前只应接这些 fake，不得选定真实
 **未测量（unmeasured）**：UDP/443 与 QUIC、UDP DNS（guest 内 `dig` 未给出可判读输出）、IPv6 的其余项、LAN 其它主机（未扫描）、DoT/DoH、端点 /32 的真实可达性（只用了文档保留地址）。nc 不带 `-v` 时拒绝与错误无法区分，脚本的该观察分类待改进（后续卡）。
 
 决策含义（按 §10 的决策规则）：Softnet 单独**不**满足 §5 的拒绝类别（宿主自身服务可达），“宿主网络 guard”或“不经 IP 的控制通道”二选一进入范围。具体方案须先交 owner 审阅，批准前不装任何网络规则。
+
+## 14. H1 决定：不经 IP 的控制通道（owner 2026-11-10 选择方案 2）
+
+**决定**：宿主 ↔ guest 的控制通道不走 IP（不用 ssh、不放行网关）。§13 的实测表明 Softnet 单独无法同时做到“有 IP 控制通道”与“guest 不能访问宿主自身服务”，owner 选择不经 IP 的方案，并保持 Softnet `block 0.0.0.0/0`（含网关）+ 仅放行模型端点 /32，不需要宿主网络 guard。
+
+**通道机制实测（一次性 clone，默认网络仅用于观察，无模型，2026-11-10）：**
+
+| 候选 | 结果 |
+| --- | --- |
+| `tart run --dir <name>:<宿主目录>`（virtiofs 共享） | **可用**：guest 在 `/Volumes/My Shared Files/<name>` 看到该目录；宿主运行中新写的文件 guest 约 1 秒内可读；guest 写入的文件宿主可读；guest 一次写入 3 MiB 成功（无配额）；**guest 可创建符号链接，宿主侧看到的是指向任意 guest 路径的符号链接**；文件在宿主侧的属主是宿主用户。 |
+| `tart run --disk <原始镜像>` | 未得出可用结论：8 MiB 原始镜像未出现在 guest 的 `diskutil list` 中；`/dev/rdisk*` 需要 root（`eval` 无免密 sudo）。**不采用**（需要 guest 内 root 与块协议，复杂度高于收益）。 |
+| `tart run --serial-path <路径>` | 路径必须是已存在的 PTY，否则 `Failed to open PTY` 退出；macOS guest 是否支持串口未验证。**不采用**。 |
+| `tart exec` | 超时（该 golden 无 guest agent 迹象，见 §13）。 |
+
+**拟采用：每次 attempt 一个专用“邮箱”目录（virtiofs），协议为固定文件名、固定大小上限、宿主只读不跟随链接**。约束（全部是宿主一侧的责任，guest 写入的一切内容视为不可信）：
+1. 邮箱放在**容量受限的专用卷**上（每个 attempt 新建一个小稀疏镜像并挂载，容量上限例如 16 MiB，attempt 结束卸载并删除），不是宿主任何现有目录；guest 无法写满宿主磁盘，也无法看到宿主其它文件。
+2. 宿主读取只用 `openat`+`O_NOFOLLOW`，`fstat` 确认普通文件、大小 ≤ 固定上限、名字在固定白名单内；遇到符号链接、硬链接异常、多余文件、超大文件一律判协议违规（`not_run`），不跟随、不解析名字。
+3. 消息为固定版本化操作（inventory / probe / bootstrap / login / run / lease / revoke），每条带 run_id 与单调序号；宿主写入的内容和 guest 写入的内容分在两个子目录（宿主只写前者、只读后者；guest 内可信 supervisor 只写后者），宿主对 guest 子目录里的内容不假设任何结构。
+4. 租约：宿主每 ≤1 秒写入递增的 lease 文件；guest 内可信 supervisor 把过期 ≤3 秒作为终止模型树的条件（沿用 §2）；宿主死亡后租约不再更新，guest 自行终止，VM 另由 §2 的外层回收流程处理。
+5. 邮箱不是共享宿主目录：ADR §1 的“永不提供宿主共享目录”仍成立，此处是唯一例外，且仅限上述专用卷。
+6. 模型进程不得访问邮箱（guest 内权限/沙箱，S11e 需证明）；模型的网络仍只有 Softnet 的端点 /32。
+
+**未验证 / 仍待做**：block 全部（含网关）时 virtiofs 邮箱与 guest 自主运行的组合（需 guest 内可信 supervisor，S11e）；邮箱延迟与丢更新语义（宿主写、guest 读的可见性只测了 1 秒量级）；guest 内 supervisor 的权限分离；容量受限专用卷的创建/挂载/清理（宿主侧 `hdiutil` 流程需单独设计与评审）。真实 Tart/Softnet 之外的任何宿主改动仍需 owner 审阅。H2（宿主 guard）因此不进入范围，除非后续实测显示 block 全部 + 邮箱仍不足。
