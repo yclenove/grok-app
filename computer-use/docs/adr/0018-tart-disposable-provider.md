@@ -255,3 +255,30 @@ S11b 在 S11-0 给出通道事实之前只应接这些 fake，不得选定真实
 - **S11-0**：H1 通道与 H2 guard 的实测。未选定传输和 guard。
 - **S11c**：真实探针、Softnet argv、宿主 guard。当前探针只消费 fake 回复。
 - 真实 Tart/Softnet、登录、模型、native Stop、TCC、父进程死亡和宿主重启仍是 `not_run`。fake 通过不改变矩阵的 native 状态。
+
+## 13. S11-0 真机实测事实（2026-11-10，Mac mini，Tart 2.41.1 + Softnet 0.19.0，一次性 clone，无模型）
+
+**只记事实，不记推断。** 探针脚本首次真机运行暴露两个脚本缺陷：①`tart list` 文本表在宽字符区域下列错位，已改用 `tart list --format json`（PR #195）；②用 `ulimit -f` 做输出限量会令 `tart ip` 立即被 SIGXFSZ 杀死，已移除（本 PR）。随后的实测由脚本（阶段 A）和三个一次性诊断脚本完成，诊断脚本不入库，其结论如下。每次运行结束都确认只剩 golden，无残留 VM / tart / softnet 进程。
+
+| 观察（guest 视角，除非注明） | 默认 `--net-softnet` | `--net-softnet-block=0.0.0.0/0 --net-softnet-allow=<端点>/32` | 上一行再放行 guest 所在 NAT /24 |
+| --- | --- | --- | --- |
+| guest 取得 IPv4 地址 | 是（约 10 秒） | 是（约 10 秒，DHCP 不受影响） | 是 |
+| 宿主 → guest 的 TCP/22（ssh，key 登录） | 通 | **不通（超时）** | 通 |
+| 宿主 → guest 的 `tart exec` | 超时（无 guest agent 迹象） | 超时 | 未测 |
+| guest → 网关（宿主）TCP 22 / 53 / 5900 / 445 / 7000 | 全部 connected | 不适用（无控制通道，未测） | **全部 connected** |
+| guest → 网关 TCP 80 / 443 | refused | 未测 | refused |
+| guest → 公网 TCP 443（三个公网地址） | timeout | 未测 | timeout |
+| guest → 公网 1.1.1.1 TCP 53 | **connected** | 未测 | timeout |
+| guest → 169.254.169.254 TCP 80 | timeout | 未测 | timeout |
+| guest 全局 IPv6 地址 | 无 | 未测 | 无 |
+| 额外：block 全部 + 放行 /24 + 再 block 网关 /32 | 不适用 | 不适用 | 宿主 → guest TCP/22 **不通**（block 网关 /32 同时阻断了宿主到 guest 的控制路径） |
+
+事实小结：
+1. 默认 Softnet 下 guest 能直接连到宿主自身的多个服务端口（ssh、DNS、屏幕共享、SMB、AirPlay）；这与本 ADR §5 第 3 点的担心一致，现已实测。
+2. block 全部会同时切断宿主到 guest 的 IP 控制路径；要保留 ssh 控制路径就必须放行含网关的 /24，于是宿主服务对 guest 保持可达。Softnet 单独无法同时做到“有 IP 控制通道”和“不让 guest 访问宿主自身服务”（网关 /32 的 block 会同时阻断两个方向）。
+3. 放行 /24 + block 全部之后，公网和元数据服务的 TCP 探测均为 timeout，1.1.1.1:53 从 connected 变为 timeout。
+4. `tart exec` 在该 golden 上不可用（超时）；未发现不经 IP 的宿主 ↔ guest 通道（H1 仍无可用通道）。
+
+**未测量（unmeasured）**：UDP/443 与 QUIC、UDP DNS（guest 内 `dig` 未给出可判读输出）、IPv6 的其余项、LAN 其它主机（未扫描）、DoT/DoH、端点 /32 的真实可达性（只用了文档保留地址）。nc 不带 `-v` 时拒绝与错误无法区分，脚本的该观察分类待改进（后续卡）。
+
+决策含义（按 §10 的决策规则）：Softnet 单独**不**满足 §5 的拒绝类别（宿主自身服务可达），“宿主网络 guard”或“不经 IP 的控制通道”二选一进入范围。具体方案须先交 owner 审阅，批准前不装任何网络规则。
