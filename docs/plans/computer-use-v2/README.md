@@ -46,6 +46,8 @@ B 只是给同一核心换一个 Host（审批/覆盖层/事件）。顺序与�
 | 08 | [08-grok-execution-protocol.md](08-grok-execution-protocol.md) | 给 Grok 的工作规程：怎么领卡、怎么提交、怎么汇报、何时停、禁止重演 v1 的反模式 | Grok |
 | 09 | [STATUS.md](STATUS.md) | **唯一**进度表（每个 PR 更新一行，不写检查点散文） | 全体 |
 
+一次性评测设计：[ADR 0017 · scope](../../../computer-use/docs/adr/0017-real-eval-fixture-scope.md)、[ADR 0018 · Tart provider](../../../computer-use/docs/adr/0018-tart-disposable-provider.md)、[ADR 0019 · 邮箱与宿主限容卷](../../../computer-use/docs/adr/0019-tart-mailbox-channel.md)（0018/0019 为 Proposed，真实运行门槛不变）。
+
 ## 不可动摇的设计原则（v2 宪法）
 
 1. **模型只说意图，服务端持有身份。** 模型传 `app` + `element_index`（或截图坐标）；snapshot、generation、窗口身份、
