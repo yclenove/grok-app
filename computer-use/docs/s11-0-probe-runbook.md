@@ -52,7 +52,7 @@ bash computer-use/scripts/s11-0-probe.sh --stage B --endpoint-placeholder --tart
 
 每次测量：gateway 的 TCP 22/53/80/443，gateway 与一个公网解析器的 DNS（guest 上只跑 `dig -r +notcp +ignore +time=2 +tries=1 @<解析器> example.com A`；`-r` 忽略 `.digrc`，`+notcp` 与 `+ignore` 禁止截断后改走 TCP），metadata `169.254.169.254` 的 TCP 80，是否有全局 IPv6 地址，以及到一个公网 IPv6 的一次 TCP。没有 `dig` 时该观察是 `tool-error`，`dns-udp-gateway` 和 `dns-udp-public` 进入 `unmeasured`，不换别的解析工具。阶段 B 另加获批或占位端点的 TCP 443。`tart ip` 没有地址、或 sshd 尚未接受固定的 key-only 就绪命令时，在启动预算内重试；采集命令只在就绪后跑一次。A 和 B 另外各给 `tart exec <clone> /usr/bin/true` 一段有界的启动机会，不依赖 ssh 是否成功，成功也不说明它不经 IP。阶段 C 只记录 `tart --help` 和 `tart exec --help` 里的子命令/选项事实，不 clone；其中任一失败则这次采集失败，退出码非零。
 
-`tart list` 按表头列起始偏移切分，不按空白切（`Disk Size` 这类值含空格）。解析只接受同时有 Name 和 State 的表头，不用 Running 顶替 State。空输出、缺 Name 或 State、或数据行短于 State 列，都是库存不可信（`list-untrusted`），不是“VM 不存在”。报告里的 `inventory_columns` 是表头里通过白名单的列名原文；缺 State 时库存不可信，这些列名仍会留下，方便对照真实表头再适配。
+库存来自 `tart list --format json`：空数组 `[]` 表示没有 VM；缺 `]`、缺 Name 或 State、重复 Name、未知 State，或任何其它偏离，都是 `list-untrusted`（不是“不存在”），不用 Running 顶替 State；`inventory_columns` 只记录 `json` 和出现过的白名单键名（Name、State、Source、Disk、Size、Running、Accessed），不记录值。
 
 `measured` / `unmeasured` 来自各阶段实际观察，不是事先填好的清单。dry-run、前置检查失败、ssh 未连上时，`measured` 为空或不含这次没采到的网络角色。宣布某阶段网络采集完成前，预期角色必须齐全且每个只出现一次。`route` 或 `ifconfig` 管道失败是 `tool-error`，不是“无网关 / 无地址”。
 
