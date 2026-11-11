@@ -1,36 +1,26 @@
-# S11-0c 邮箱机械探针
+# S11-0c 邮箱测量核心
 
-只在 Mini（macOS）上跑真实路径。其它平台打印 `unsupported` 并以 2 退出，而且不会创建 `--out`。`cargo test` 不调用 tart、ssh、ssh-keygen 或 ssh-keyscan。
+宿主编排在 `scripts/s11-0-probe.sh` 的阶段 M。这个二进制只测量一个目录。它不 clone，不做 SSH，也不调用 tart。只做 C1、C2、C8。只用标准库。生产代码不超过 1000 行，测试另计。
 
-本卡只做 C1、C2、C8。导出目录是宿主上的普通私有目录，不是 hdiutil 限容卷。报告字段是 `export: host-private-directory (not the capped HFSX volume)`。HFSX 上的差异由后续 M2c/M7 补测。卷、detach、C4 不在本卡。
+导出目录是宿主上的普通私有目录，不是限容卷。HFSX 上的差异由后续 M2c/M7 补测。
 
-## 跑之前
+## 子命令
 
-所有者先发一句话，确认这次是 **DEFAULT 网络**机械实验、网关会暴露。没有这句话就不要跑。不要 sudo，不要改 golden `macos-s2-eval`。
-
-`--pinned-host-key` 是总控一次性从已经验证过的 golden 访问里提取的同一把 ssh-ed25519 公钥。每个 clone 继承这把主机密钥。探针用 `StrictHostKeyChecking=yes`，只认这个文件，不做 TOFU，也不跑 ssh-keyscan。
-
-## 命令
-
-在 `computer-use/` 下：
+目录必须是绝对路径。每一级都用目录 fd 加 `O_NOFOLLOW` 打开。`.` 和 `..` 拒绝。
 
 ```text
-cargo run --manifest-path tools/s11-mailbox-probe/Cargo.toml -- \
-  host-run --case C1 --out /绝对路径/新目录 --pinned-host-key /绝对路径/golden_ed25519.pub
+s11-mailbox-probe writer --dir <绝对目录> --role host|guest --count N --timeout SEC
+s11-mailbox-probe reader --dir <绝对目录> --role host|guest --count N --timeout SEC
+s11-mailbox-probe c2 file-sync|dir-sync|rename --dir <绝对目录> --role host|guest --count N --timeout SEC
+s11-mailbox-probe c8 --dir <绝对目录> --role host|guest --count N --timeout SEC
 ```
 
-`--case` 只能是 `C1`、`C2`、`C8`。`--out` 必须是还不存在的绝对路径，父目录要满足私有根（叶子当前用户 0700，祖先由 root 或当前用户所有且没有组/其他写权限、没有 ACL 写授权）。tart 默认是 `$HOME/bin/tart`，可用 `--tart` 指定。`--tart-home` 会作为 `TART_HOME` 传给 tart。`--dry-run` 只写报告，不起 VM，也不读探针或公钥。
+`N` 是 1 到 8。`SEC` 是 0 到 120。标志顺序不限。每个子命令有自己的进程内绝对截止（`Instant`）。到点写 `unknown` / `deadline` 后退出。没测到的时间写成 `-`，不写成 0。
 
-整次运行有 240 秒绝对截止，其中 60 秒留给清理。命令截止是 `min(命令上限, 剩余时间)`，不会重新计时。四个 case 分开跑，不要并行。
+结果是固定格式的一行，不超过 4096 字节，写到 `result-host` 或 `result-guest`。读取同一目录 fd，并对这个 fd 做 fstat：普通文件、`nlink == 1`、大小不超过上限，读前后的 dev/inode 一致。符号链接、硬链接、FIFO 和超大文件都判失败。撕裂帧和混合帧是 `failed`。没有对端摘要不能报 `ok`。
 
-## 怎么读报告
+C1 双方各发布 `N` 帧。读者核对对端帧和对端 `summary-*` 的摘要。C2 的三个边界都是“写者在该点退出”。file-sync 完成的重命名是 `N-1`，第三次只 fsync 文件 `part`，不重命名，也不 fsync 数据目录；进度写在旁边的 `evidence` 目录。C2 的结论是 `not-ack` 或失败，不会报 `ok`。内容不对的 `part` 是 `failed` / `bad-part`。C8 只数非管理员主体。只有一个时是 `unknown` / `single-principal`。两个及以上仍是 `unknown` / `mapping-not-measured`。不建账户，不提权。
 
-`<out>/report.json` 是唯一结论。`evidence` 固定为 `DEFAULT-network/mechanics-only`。`ok` 是声明的观测完整完成。`failed` 是观测到违反。`unknown` 是证据缺失、不完整或超时。`quarantine` 是清理归属或 VM 缺席没有证实，之后的子例停止。没跑的子例是 `not_run`。`block` 只用于 C1 的 RTT。C2 的 `not-ack` 是一次完成的观测（故障边界上没有 ACK），进程退出码是 0；报告仍是结论。退出码：`ok` / `not-ack` / `dry_run` 为 0，`failed` / `unknown` / `quarantine` / `block` 为 1，用法错误为 64。
+退出码：`ok` 和 `not-ack` 是 0，其它测量结果是 1，用法错误是 2。
 
-## 清理
-
-清理只对本次创建并记录了 dev/inode 的文件和目录，通过目录 fd 做 `unlinkat` / `rmdir`。遇到未知条目、符号链接或身份不符就不删，整个目录留着，并记 `quarantine`。绝不递归删除。邮箱目录故意保留，客机写入的帧留在里面，这本身不是 quarantine。
-
-VM 只有在 clone 退出码 0 且 `tart list --format json` 出现这个名字时才算本次所有。有歧义就不删。stop 之后要看到状态正好是 `stopped`。delete 之后要用一份完整、可信的清单确认缺席。清单不完整或解析失败不算缺席。过了绝对截止就不再 delete、不再 unlink。
-
-`quarantine` 之后操作者留着 `--out`，先看 `tart list --format json`，再决定是否手工删除。不要按名字前缀删 VM。
+`cargo test` 使用真实临时目录覆盖帧格式、撕裂、符号链接、FIFO、硬链接、超大文件和截止。测试不调用 tart 或 ssh。

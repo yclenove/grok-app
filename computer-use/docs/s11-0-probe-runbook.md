@@ -34,7 +34,7 @@ bash computer-use/scripts/s11-0-probe.sh --stage all \
 bash computer-use/scripts/s11-0-probe.sh --stage B --endpoint-placeholder --tart-home '<路径>'
 ```
 
-常用参数：`--stage A|B|C|all`（默认 all），`--out`（必须是全新不存在的目录；默认 `./s11-0-out`。脚本拒绝已存在的目录或符号链接，避免把陈旧报告当成这次的证据），`--lan-ip <IPv4>`（不给则 LAN 记为未测量；不扫描），`--ssh-key`，`--tart-home <路径>`，`--dry-run`。没有 `--golden`、`--clone-name`、`--guest-user`、`--hostname`、`--softnet`，也没有可复用的 clone 名字参数或环境变量。拒绝 root。dry-run 走同一套 argv 构造，只打印，不 clone。
+常用参数：`--stage A|B|C|M|all`（默认 all；`all` 不含 M），`--out`（必须是全新不存在的目录；默认 `./s11-0-out`。脚本拒绝已存在的目录或符号链接，避免把陈旧报告当成这次的证据），`--lan-ip <IPv4>`（不给则 LAN 记为未测量；不扫描），`--ssh-key`，`--tart-home <路径>`，`--dry-run`。阶段 M 另要 `--case C1|C2|C8` 和 `--pinned-host-key <文件>`；非 dry-run 还要 `--probe <测量二进制>`。这些标志不能和 A/B/C 一起用。没有 `--golden`、`--clone-name`、`--guest-user`、`--hostname`、`--softnet`，也没有可复用的 clone 名字参数或环境变量。拒绝 root。dry-run 走同一套 argv 构造，只打印，不 clone。阶段 M 的 `--out` 要是绝对路径，路径上每一级都不是符号链接（Mini 上放在家目录；测量核心会拒绝符号链接组件）。
 
 ## 时长与清理
 
@@ -48,7 +48,7 @@ bash computer-use/scripts/s11-0-probe.sh --stage B --endpoint-placeholder --tart
 
 ## 测什么、不测什么
 
-阶段 A：`--net-softnet`。阶段 B：再加 `--net-softnet-block=0.0.0.0/0` 和 `--net-softnet-allow=<ip>/32`。报告里的 argv 就是传给 `tart run` 的那一个数组。
+阶段 A：`--net-softnet`。阶段 B：再加 `--net-softnet-block=0.0.0.0/0` 和 `--net-softnet-allow=<ip>/32`。报告里的 argv 就是传给 `tart run` 的那一个数组。阶段 M 见下一节，不进 `all`。
 
 每次测量：gateway 的 TCP 22/53/80/443，gateway 与一个公网解析器的 DNS（guest 上只跑 `dig -r +notcp +ignore +time=2 +tries=1 @<解析器> example.com A`；`-r` 忽略 `.digrc`，`+notcp` 与 `+ignore` 禁止截断后改走 TCP），metadata `169.254.169.254` 的 TCP 80，是否有全局 IPv6 地址，以及到一个公网 IPv6 的一次 TCP。没有 `dig` 时该观察是 `tool-error`，`dns-udp-gateway` 和 `dns-udp-public` 进入 `unmeasured`，不换别的解析工具。阶段 B 另加获批或占位端点的 TCP 443。`tart ip` 没有地址、或 sshd 尚未接受固定的 key-only 就绪命令时，在启动预算内重试；采集命令只在就绪后跑一次。A 和 B 另外各给 `tart exec <clone> /usr/bin/true` 一段有界的启动机会，不依赖 ssh 是否成功，成功也不说明它不经 IP。阶段 C 只记录 `tart --help` 和 `tart exec --help` 里的子命令/选项事实，不 clone；其中任一失败则这次采集失败，退出码非零。
 
@@ -94,6 +94,20 @@ bash computer-use/scripts/s11-0-probe.sh --stage B --endpoint-placeholder --tart
 若这份实测显示 Softnet 单独已满足 §5 的拒绝类别，则 §5 第 3 点的宿主网络 guard 不进入范围。若不满足，先把具体 guard 方案（影响范围、回滚、是否只作用于该 Tart/Softnet 实例）提交 owner 审阅，批准前不安装任何网络规则。若 H1 没有可用的非 IP 通道，暂停 S11 并回到 owner，不为凑通道去开放 gateway 上的 IP 服务。脚本不下这些结论。
 
 不要改宿主的 PF、防火墙、路由或 DNS。
+
+## 阶段 M（邮箱机械，C1 / C2 / C8）
+
+阶段 M 复用本脚本的 clone、启动、取地址、清理和报告，不起阶段 A/B 的网络采集。`tart run` 使用 `--no-graphics --net-softnet`，并加上 `--dir s11mbx:<本次导出>/mailbox`。这是 DEFAULT 网络的实验室例外，不加 block，也不加 allow。报告增加 `evidence` = `DEFAULT-network/mechanics-only`，以及 `export` = `host-private-directory (not the capped HFSX volume)`。导出目录是脚本在 `--out` 下用 `mktemp` 新建的 0700 私有目录，不是限容卷。
+
+真机跑阶段 M 之前必须先发一句，确认这次是 DEFAULT 网络机械实验、网关会暴露。没有这句话就不要跑。本段不构成运行授权。真实 VM 上的阶段 M 仍是 not_run。
+
+每个子例用 `/usr/bin/ssh-keygen` 在宿主私有目录生成一把一次性 ed25519。现有 eval 密钥只做两步：就绪命令 `/usr/bin/true`，以及一次固定初始化（客机新建 0700 目录、写入固定 dispatcher、客机 `shasum -a 256` 核对宿主算出的摘要、追加带 `restrict,command=` 的一次性公钥）。任何一步失败都停。之后的 upload、verify、run 只用一次性密钥。dispatcher 只按字面接受 `upload`、`verify` 加 64 位十六进制、`run C1`、`run C2`、`run C8`。`--pinned-host-key` 是 golden 的 ssh-ed25519 公钥，clone 继承同一把主机密钥。SSH 使用 `StrictHostKeyChecking=yes`、独立 known_hosts、只认这一把私钥、关闭转发、不用 TTY。每次连接前，本次 clone 必须是唯一正在运行的 VM。
+
+C2 对 `file-sync`、`dir-sync`、`rename` 各起一台新 clone。每个边界计划发布 3 次。file-sync 完成两次重命名；第三次只把文件 fsync 到 `part` 后退出，不重命名，也不同步被测数据目录。三个子例都是 `not-ack`，并且 VM 清理被证实时，聚合才是 `not-ack`、退出码 0。`unknown` 或没跑到的子例优先于 `not-ack`。C8 若客机只有一个非管理员主体，结果是 `unknown` / `single-principal`。不建账户，不提权。
+
+结束时只删除脚本自己创建的已知文件名，空目录用 `rmdir`。出现未知名字或符号链接时，一个都不删，整目录留存并记 `quarantine`，退出码非零。不递归删除。白名单里的客机帧可以留下，状态记 `retained`，这不是 quarantine。报告没写成功时，脚本非零退出（测量本来可以是 0 时，退出码是 2）。
+
+测量二进制是 `tools/s11-mailbox-probe`。它只接收目录、角色和计数/超时，子命令是 `writer`、`reader`、`c2 <boundary>`、`c8`。文件操作走目录 fd。它不负责 VM 或 SSH。
 
 ## 桩测试
 
