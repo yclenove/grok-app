@@ -1,264 +1,397 @@
-//! Fixed guest dispatcher. SSH_ORIGINAL_COMMAND must be one whitelist entry.
-//! The script is generated from the same table the host uses to send commands.
+//! Fixed init command and the literal-match dispatcher. No eval.
 
 use crate::budget::{DISPATCHER_CAP, GUEST_DIR, UPLOAD_CAP};
+use crate::sha256::{is_hex32, is_hex64};
 
-pub const CASES: &[&str] = &["C1", "C2", "C4", "C8"];
-
-pub fn whitelisted_remote(cmd: &str) -> bool {
-    if let Some(rest) = cmd.strip_prefix("upload ") {
-        return CASES.contains(&rest);
-    }
-    if let Some(rest) = cmd.strip_prefix("run ") {
-        return CASES.contains(&rest);
-    }
-    if cmd == "fetch-result" {
-        return true;
-    }
-    if let Some(rest) = cmd.strip_prefix("verify ") {
-        return crate::sha256::is_hex64(rest) && cmd == format!("verify {rest}");
-    }
-    false
-}
-
-pub fn dispatcher_script(dir: &str) -> Result<String, &'static str> {
-    if !dir.starts_with('/') || dir.contains('\'') || dir.contains('\n') || dir.contains(' ') {
-        return Err("dispatcher-dir");
-    }
-    // One case word: a quoted prefix plus a 64-hex glob. A bare space is a syntax error.
-    let verify_arm = format!("\"verify \"{}", "[0-9a-f]".repeat(64));
-    let script = format!(
-        r#"#!/bin/sh
+const INIT: &str = "\
 set -eu
 set -f
 umask 077
-DIR='{dir}'
-MAX={upload}
-PROBE="$DIR/probe"
-STAMP="$DIR/verified"
-cmd=${{SSH_ORIGINAL_COMMAND-}}
-case "$cmd" in
-  "upload C1"|"upload C2"|"upload C4"|"upload C8")
-    tmp="$DIR/probe.upload"
-    if [ -L "$DIR" ] || [ -L "$tmp" ] || [ -e "$tmp" ] || [ -e "$PROBE" ] || [ -L "$PROBE" ]; then
-      exit 1
-    fi
-    /bin/dd bs=4096 count=2049 of="$tmp" 2>/dev/null || exit 1
-    size=$(/usr/bin/wc -c < "$tmp")
-    if [ "$size" -gt "$MAX" ] || [ "$size" -lt 1 ]; then
-      /bin/rm -f "$tmp"
-      exit 1
-    fi
-    /bin/mv "$tmp" "$PROBE"
-    /bin/chmod 0700 "$PROBE"
-    exit 0
-    ;;
-  "run C1"|"run C2"|"run C4"|"run C8")
-    case_id=${{cmd#run }}
-    if [ -L "$STAMP" ] || [ ! -f "$STAMP" ] || [ -L "$PROBE" ] || [ ! -f "$PROBE" ]; then
-      exit 1
-    fi
-    stamp=$(/bin/cat "$STAMP")
-    got=$(/usr/bin/shasum -a 256 "$PROBE")
-    set -- $got
-    if [ "$1" != "$stamp" ]; then
-      exit 1
-    fi
-    exec "$PROBE" guest "$case_id"
-    ;;
-  "fetch-result")
-    status="$DIR/guest-status"
-    if [ -L "$status" ] || [ ! -f "$status" ]; then
-      echo absent
-      exit 0
-    fi
-    /bin/dd if="$status" bs=256 count=1 2>/dev/null
-    exit 0
-    ;;
-  {verify_arm})
-    hash=${{cmd#verify }}
-    case "$hash" in
-      *[!0-9a-f]*) exit 1 ;;
-    esac
-    if [ -L "$PROBE" ] || [ ! -f "$PROBE" ]; then
-      exit 1
-    fi
-    got=$(/usr/bin/shasum -a 256 "$PROBE")
-    set -- $got
-    if [ "$1" != "$hash" ]; then
-      exit 1
-    fi
-    printf '%s\n' "$hash" > "$STAMP"
-    /bin/chmod 0600 "$STAMP"
-    exit 0
-    ;;
-  *)
-    echo rejected >&2
-    exit 1
-    ;;
-esac
-exit 1
-"#,
-        dir = dir,
-        upload = UPLOAD_CAP,
-    );
-    if script.len() > DISPATCHER_CAP {
-        return Err("dispatcher-cap");
+d='__DIR__'
+digest='__DIGEST__'
+auth='__AUTH__'
+share='__SHARE__'
+sub='__SUB__'
+if [ -e \"$d\" ] || [ -L \"$d\" ]; then printf '%s\\n' fail-exists; exit 11; fi
+/bin/mkdir -m 0700 \"$d\" || { printf '%s\\n' fail-mkdir; exit 12; }
+/bin/dd if=/dev/stdin of=\"$d/dispatcher.upload\" bs=4096 count=64 >/dev/null 2>&1 || { printf '%s\\n' fail-dd; exit 13; }
+/bin/mv \"$d/dispatcher.upload\" \"$d/dispatcher\" || { printf '%s\\n' fail-mv; exit 14; }
+/bin/chmod 0700 \"$d/dispatcher\" || { printf '%s\\n' fail-chmod; exit 15; }
+got=$(/usr/bin/shasum -a 256 \"$d/dispatcher\") || { printf '%s\\n' fail-shasum; exit 16; }
+set -- $got
+[ \"$1\" = \"$digest\" ] || { printf '%s\\n' fail-digest; exit 17; }
+sshdir=\"$HOME/.ssh\"
+if [ -L \"$sshdir\" ]; then printf '%s\\n' fail-ssh; exit 18; fi
+if [ -e \"$sshdir\" ] && [ ! -d \"$sshdir\" ]; then printf '%s\\n' fail-ssh; exit 18; fi
+if [ ! -d \"$sshdir\" ]; then /bin/mkdir -m 0700 \"$sshdir\" || { printf '%s\\n' fail-ssh; exit 18; }; fi
+ak=\"$sshdir/authorized_keys\"
+if [ -L \"$ak\" ]; then printf '%s\\n' fail-auth; exit 19; fi
+if [ ! -e \"$ak\" ]; then : > \"$ak\" || { printf '%s\\n' fail-auth; exit 19; }; fi
+/bin/chmod 0600 \"$ak\" || { printf '%s\\n' fail-auth; exit 19; }
+printf '%s\\n' \"$auth\" >> \"$ak\" || { printf '%s\\n' fail-auth; exit 19; }
+printf '%s\\n' \"$share\" > \"$d/share-name\" || { printf '%s\\n' fail-share; exit 20; }
+/bin/chmod 0600 \"$d/share-name\" || { printf '%s\\n' fail-share; exit 20; }
+printf '%s\\n' \"$sub\" > \"$d/subcase\" || { printf '%s\\n' fail-sub; exit 21; }
+/bin/chmod 0600 \"$d/subcase\" || { printf '%s\\n' fail-sub; exit 21; }
+printf 'init-ok\\n'
+";
+
+pub fn subcase_ok(s: &str) -> bool {
+    matches!(
+        s,
+        "rename-latency" | "file-sync" | "dir-sync" | "rename-boundary" | "subjects"
+    )
+}
+
+pub fn path_token(s: &str) -> bool {
+    s.starts_with('/')
+        && s.len() <= 200
+        && !s.contains("..")
+        && !s.chars().any(|c| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '\'' | '"' | '\\' | '$' | '`' | ';' | '&' | '|' | '<' | '>'
+                )
+        })
+}
+
+pub fn build_init(
+    dir: &str,
+    digest: &str,
+    auth: &str,
+    share: &str,
+    sub: &str,
+) -> Result<String, &'static str> {
+    if !path_token(dir) || !is_hex64(digest) || !is_hex32(share) || !subcase_ok(sub) {
+        return Err("init");
     }
-    static_check(&script)?;
+    if auth.contains('\'') || auth.contains('\n') || !auth.contains("restrict,command=") {
+        return Err("init");
+    }
+    let script = INIT
+        .replace("__DIR__", dir)
+        .replace("__DIGEST__", digest)
+        .replace("__AUTH__", auth)
+        .replace("__SHARE__", share)
+        .replace("__SUB__", sub);
+    if script.contains("__DIR__")
+        || script.contains("__DIGEST__")
+        || script.len() > crate::budget::REMOTE_CAP
+    {
+        return Err("init");
+    }
     Ok(script)
 }
 
-pub fn production_script() -> Result<String, &'static str> {
-    dispatcher_script(GUEST_DIR)
+pub fn is_init_script(script: &str) -> bool {
+    let Some(dir) = assign(script, "d") else {
+        return false;
+    };
+    let Some(digest) = assign(script, "digest") else {
+        return false;
+    };
+    let Some(auth) = assign(script, "auth") else {
+        return false;
+    };
+    let Some(share) = assign(script, "share") else {
+        return false;
+    };
+    let Some(sub) = assign(script, "sub") else {
+        return false;
+    };
+    build_init(&dir, &digest, &auth, &share, &sub)
+        .ok()
+        .as_deref()
+        == Some(script)
 }
 
-/// Shellcheck-style scan of the generated script. This is not a full shell parser.
-pub fn static_check(script: &str) -> Result<(), &'static str> {
-    if !script.starts_with("#!/bin/sh\n") {
-        return Err("dispatcher-shebang");
+fn assign(script: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}='");
+    let line = script.lines().find(|l| l.starts_with(&prefix))?;
+    let rest = line.strip_prefix(&prefix)?;
+    let value = rest.strip_suffix('\'')?;
+    if value.contains('\'') {
+        return None;
     }
-    for needle in ["set -eu\n", "set -f\n", "umask 077\n"] {
-        if !script.contains(needle) {
-            return Err("dispatcher-flags");
-        }
+    Some(value.to_string())
+}
+
+pub fn production_init(
+    digest: &str,
+    auth: &str,
+    share: &str,
+    sub: &str,
+) -> Result<String, &'static str> {
+    build_init(GUEST_DIR, digest, auth, share, sub)
+}
+
+pub fn whitelisted_remote(remote: &str) -> bool {
+    matches!(
+        remote,
+        "upload C1" | "upload C2" | "upload C8" | "run C1" | "run C2" | "run C8"
+    ) || verify_arg(remote).is_some()
+}
+
+pub fn verify_arg(remote: &str) -> Option<&str> {
+    let hex = remote.strip_prefix("verify ")?;
+    if is_hex64(hex) {
+        Some(hex)
+    } else {
+        None
     }
-    let lower = script.to_ascii_lowercase();
-    for banned in [
-        "eval ",
-        "eval\t",
-        "`",
-        "sudo",
-        "osascript",
-        "sysadminctl",
-        "dscl",
-        "curl",
-        "wget",
-        "hdiutil",
-        " tart",
-        "ssh ",
-        "rm -rf",
-        "chmod 777",
-        "chmod 666",
-    ] {
-        if lower.contains(banned) {
-            return Err("dispatcher-banned");
-        }
+}
+
+pub fn remote_allowed(remote: &str, init: &str) -> bool {
+    crate::ssh::remote_fits(remote) && (remote == init || whitelisted_remote(remote))
+}
+
+const DISPATCHER: &str = "\
+#!/bin/sh
+set -eu
+set -f
+umask 077
+cmd=${SSH_ORIGINAL_COMMAND-}
+action=''
+case_name=''
+hex=''
+case \"$cmd\" in
+\"upload C1\") action=upload; case_name=C1 ;;
+\"upload C2\") action=upload; case_name=C2 ;;
+\"upload C8\") action=upload; case_name=C8 ;;
+\"run C1\") action=run; case_name=C1 ;;
+\"run C2\") action=run; case_name=C2 ;;
+\"run C8\") action=run; case_name=C8 ;;
+\"verify \"*)
+  action=verify
+  hex=${cmd#\"verify \"}
+  case \"$hex\" in
+    *[!0-9a-f]*) printf '%s\\n' reject; exit 2 ;;
+  esac
+  [ \"${#hex}\" -eq 64 ] || { printf '%s\\n' reject; exit 2; }
+  ;;
+*)
+  printf '%s\\n' reject
+  exit 2
+  ;;
+esac
+dir='__DIR__'
+probe=\"$dir/probe\"
+stamp=\"$dir/probe.sha256\"
+tmp=\"$dir/probe.upload\"
+if [ \"$action\" = upload ]; then
+  if [ -L \"$dir\" ] || [ ! -d \"$dir\" ]; then printf '%s\\n' fail-dir; exit 3; fi
+  if [ -L \"$probe\" ] || [ -e \"$probe\" ]; then printf '%s\\n' fail-exists; exit 3; fi
+  if [ -L \"$tmp\" ] || [ -e \"$tmp\" ]; then printf '%s\\n' fail-exists; exit 3; fi
+  /bin/dd if=/dev/stdin of=\"$tmp\" bs=4096 count=2049 >/dev/null 2>&1 || { printf '%s\\n' fail-dd; exit 4; }
+  size=$(/usr/bin/wc -c < \"$tmp\") || { printf '%s\\n' fail-size; exit 4; }
+  if [ \"$size\" -lt 1 ] || [ \"$size\" -gt __CAP__ ]; then /bin/rm -f \"$tmp\"; printf '%s\\n' fail-size; exit 4; fi
+  /bin/mv \"$tmp\" \"$probe\" || { printf '%s\\n' fail-mv; exit 4; }
+  /bin/chmod 0700 \"$probe\" || { printf '%s\\n' fail-chmod; exit 4; }
+  printf '%s\\n' upload-ok
+  exit 0
+fi
+if [ \"$action\" = verify ]; then
+  if [ -L \"$probe\" ] || [ ! -f \"$probe\" ]; then printf '%s\\n' fail-probe; exit 5; fi
+  got=$(/usr/bin/shasum -a 256 \"$probe\") || { printf '%s\\n' fail-shasum; exit 5; }
+  set -- $got
+  [ \"$1\" = \"$hex\" ] || { printf '%s\\n' fail-digest; exit 5; }
+  printf '%s\\n' \"$hex\" > \"$stamp\" || { printf '%s\\n' fail-stamp; exit 5; }
+  /bin/chmod 0600 \"$stamp\" || { printf '%s\\n' fail-stamp; exit 5; }
+  printf '%s\\n' verify-ok
+  exit 0
+fi
+if [ \"$action\" = run ]; then
+  if [ -L \"$probe\" ] || [ ! -f \"$probe\" ]; then printf '%s\\n' fail-probe; exit 6; fi
+  if [ -L \"$stamp\" ] || [ ! -f \"$stamp\" ]; then printf '%s\\n' fail-stamp; exit 6; fi
+  live=$(/usr/bin/shasum -a 256 \"$probe\") || { printf '%s\\n' fail-shasum; exit 6; }
+  set -- $live
+  want=$(/bin/cat \"$stamp\") || { printf '%s\\n' fail-stamp; exit 6; }
+  [ \"$1\" = \"$want\" ] || { printf '%s\\n' fail-digest; exit 6; }
+  exec \"$probe\" guest \"$case_name\"
+fi
+printf '%s\\n' reject
+exit 2
+";
+
+pub fn dispatcher_script(dir: &str) -> Result<String, &'static str> {
+    let raw = DISPATCHER.replace("__CAP__", &UPLOAD_CAP.to_string());
+    if !path_token(dir) {
+        return Err("dispatcher");
     }
-    let reject_arms = script.matches("\n  *)\n").count();
-    if reject_arms != 1 {
-        return Err("dispatcher-default");
+    let script = raw.replace("__DIR__", dir);
+    if script.contains("__DIR__") || script.contains("__CAP__") || script.len() > DISPATCHER_CAP {
+        return Err("dispatcher");
     }
-    for case_id in CASES {
-        if !script.contains(&format!("\"upload {case_id}\""))
-            || !script.contains(&format!("\"run {case_id}\""))
-        {
-            return Err("dispatcher-whitelist");
-        }
+    if script.contains("eval ") || script.contains("sh -c") || script.contains("fetch-result") {
+        return Err("dispatcher");
     }
-    if !script.contains("\"fetch-result\"") || !script.contains("[0-9a-f]".repeat(64).as_str()) {
-        return Err("dispatcher-whitelist");
-    }
-    if !script.contains(&format!("MAX={UPLOAD_CAP}")) {
-        return Err("dispatcher-cap");
-    }
-    let mut rest = script;
-    while let Some(at) = rest.find("$(") {
-        let after = &rest[at + 2..];
-        let ok = after.starts_with("/usr/bin/shasum")
-            || after.starts_with("/usr/bin/wc")
-            || after.starts_with("/bin/cat");
-        if !ok {
-            return Err("dispatcher-subst");
-        }
-        rest = after;
-    }
-    let mut quotes = 0;
-    for ch in script.chars() {
-        if ch == '\'' {
-            quotes ^= 1;
-        }
-    }
-    if quotes != 0 {
-        return Err("dispatcher-quote");
-    }
-    Ok(())
+    Ok(script)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use std::process::{Command, Stdio};
+    use crate::sha256::hex_digest;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    #[test]
-    fn whitelist_and_static_check() {
-        let script = production_script().unwrap();
-        static_check(&script).unwrap();
-        assert!(script.contains("DIR='/Users/eval/.s11-0c'"));
-        assert!(whitelisted_remote("upload C1"));
-        assert!(whitelisted_remote("run C8"));
-        assert!(whitelisted_remote("fetch-result"));
-        assert!(whitelisted_remote(&format!("verify {}", "ab".repeat(32))));
-        assert!(!whitelisted_remote("upload C3"));
-        assert!(!whitelisted_remote("upload C1; id"));
-        assert!(!whitelisted_remote("run C1 extra"));
-        assert!(!whitelisted_remote("verify zz"));
-        assert!(!whitelisted_remote("sh -c id"));
-        assert!(static_check("#!/bin/sh\neval $cmd\n").is_err());
+    fn scratch() -> std::path::PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let home = std::env::var("HOME").unwrap();
+        let p = std::path::PathBuf::from(format!("{home}/.s11m2a-disp-{}-{n}", std::process::id()));
+        std::fs::create_dir(&p).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
+        p
     }
 
-    fn run_script(script: &str, cmd: &str, stdin: &[u8]) -> (i32, Vec<u8>) {
-        let dir = std::env::temp_dir().join(format!("s11-disp-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir(&dir).unwrap();
-        let path = dir.join("dispatcher");
-        std::fs::write(&path, script).unwrap();
-        let mut child = Command::new("/bin/sh")
-            .arg(&path)
+    fn run_disp(
+        script: &std::path::Path,
+        dir: &std::path::Path,
+        cmd: &str,
+        stdin: &[u8],
+    ) -> (i32, String) {
+        let mut child = Command::new("/bin/sh");
+        child
+            .arg(script)
             .env_clear()
             .env("SSH_ORIGINAL_COMMAND", cmd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        // A rejected command exits before reading stdin. EPIPE is that rejection, not a harness bug.
-        {
-            let mut input = child.stdin.take().unwrap();
-            match input.write_all(stdin) {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {}
-                Err(err) => panic!("dispatcher stdin: {err}"),
-            }
+            .env("PATH", "/usr/bin:/bin")
+            .current_dir(dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut proc = child.spawn().unwrap();
+        use std::io::Write;
+        if let Some(mut input) = proc.stdin.take() {
+            input.write_all(stdin).unwrap();
         }
-        let out = child.wait_with_output().unwrap();
-        let code = out.status.code().unwrap_or(127);
-        let _ = std::fs::remove_dir_all(&dir);
-        (code, out.stdout)
+        let out = proc.wait_with_output().unwrap();
+        (
+            out.status.code().unwrap_or(99),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
     }
 
     #[test]
-    fn shell_stub_accepts_only_the_whitelist() {
-        let dir = std::env::temp_dir().join(format!("s11-disp-dir-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir(&dir).unwrap();
-        let script = dispatcher_script(&dir.to_string_lossy()).unwrap();
-        let (code, _) = run_script(&script, "id", b"");
-        assert_ne!(code, 0);
-        let (code, _) = run_script(&script, "upload C1; rm -rf /", b"abc");
-        assert_ne!(code, 0);
-        let (code, _) = run_script(&script, "run C1", b"");
-        assert_ne!(code, 0);
-        let payload = b"probe-bytes";
-        let (code, _) = run_script(&script, "upload C1", payload);
-        assert_eq!(code, 0, "upload");
-        assert_eq!(std::fs::read(dir.join("probe")).unwrap(), payload);
-        let (code, _) = run_script(&script, "upload C9", b"nope");
-        assert_ne!(code, 0);
-        let (code, stdout) = run_script(&script, "fetch-result", b"");
-        assert_eq!(code, 0);
-        assert_eq!(stdout, b"absent\n");
-        let _ = std::fs::remove_dir_all(&dir);
+    fn rejects_shell_payloads_and_completes_upload_verify_run() {
+        let dir = scratch();
+        let src = dispatcher_script(dir.to_str().unwrap()).unwrap();
+        assert!(!src.contains("sh -c"));
+        assert!(!src.contains("fetch-result"));
+        assert!(!src.contains("guest-status"));
+        assert!(!src.contains("sudo"));
+        let script = dir.join("dispatcher");
+        std::fs::write(&script, &src).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for bad in [
+            "run C1; id",
+            "run C1\nid",
+            "run C1$(id)",
+            "run C1`id`",
+            &"A".repeat(9000),
+            "nope",
+            "diag echo PWNED",
+            "fetch-result C1",
+            "upload C4",
+            "upload C9",
+            "verify xyz",
+            "verify AABB",
+        ] {
+            let (code, out) = run_disp(&script, &dir, bad, b"");
+            assert_ne!(code, 0, "{bad}");
+            assert!(!out.contains("PWNED"), "{bad}: {out}");
+            assert!(!out.contains("uid="), "{bad}: {out}");
+        }
+        let marker = dir.join("marker");
+        let probe = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$2\" > '{}'\n",
+            marker.display()
+        );
+        let digest = hex_digest(probe.as_bytes());
+        let (code, out) = run_disp(&script, &dir, "upload C1", probe.as_bytes());
+        assert_eq!((code, out.as_str()), (0, "upload-ok\n"));
+        let (code, out) = run_disp(&script, &dir, &format!("verify {digest}"), b"");
+        assert_eq!((code, out.as_str()), (0, "verify-ok\n"), "{out}");
+        let (code, out) = run_disp(&script, &dir, "run C1", b"");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "C1\n");
+        let _ = std::fs::remove_file(&marker);
+        let _ = std::fs::remove_file(dir.join("probe"));
+        let _ = std::fs::remove_file(dir.join("probe.sha256"));
+        let _ = std::fs::remove_file(&script);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn init_script_is_exact_and_fails_closed() {
+        let body = "B".repeat(64);
+        let auth = crate::ssh::auth_line(&body).unwrap();
+        let share = "a".repeat(32);
+        let built = build_init(
+            "/Users/eval/.s11-0c",
+            &"ab".repeat(32),
+            &auth,
+            &share,
+            "file-sync",
+        )
+        .unwrap();
+        assert!(is_init_script(&built));
+        assert!(!is_init_script(&format!("{built}\necho extra\n")));
+        assert!(build_init("/tmp/a b", &"ab".repeat(32), &auth, &share, "file-sync").is_err());
+        let dir = scratch();
+        let home = dir.join("home");
+        std::fs::create_dir(&home).unwrap();
+        let guest = dir.join("guest");
+        let disp = dispatcher_script("/Users/eval/.s11-0c").unwrap();
+        let digest = hex_digest(disp.as_bytes());
+        let script =
+            build_init(guest.to_str().unwrap(), &digest, &auth, &share, "subjects").unwrap();
+        let path = dir.join("init.sh");
+        std::fs::write(&path, &script).unwrap();
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg(&path)
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(disp.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(
+            out.stdout,
+            b"init-ok\n",
+            "stderr {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success());
+        let again = Command::new("/bin/sh")
+            .arg(&path)
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        assert_eq!(again.stdout, b"fail-exists\n");
+        assert!(!again.status.success());
+        let _ = std::fs::remove_file(home.join(".ssh/authorized_keys"));
+        let _ = std::fs::remove_dir(home.join(".ssh"));
+        let _ = std::fs::remove_dir(&home);
+        for name in ["dispatcher", "share-name", "subcase", "init.sh"] {
+            let _ = std::fs::remove_file(guest.join(name));
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&guest);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

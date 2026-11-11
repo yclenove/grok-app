@@ -1,498 +1,364 @@
-//! C1 / C2 / C4 / C8 load, observation, and verdicts.
-//! Clocks are local `Instant` values. Patterns come from `pattern`, not from the peer.
+//! C1, C2, and C8 judgements. Torn frames stick. Missing evidence stays unknown.
 
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
+use std::fs::File;
+use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::budget::{is_code, C1_ITERS, FRAME_LEN, RTT_BLOCK_US, SLICE_NOTE_US};
-use crate::pattern;
-use crate::publish;
-use crate::slot::{self, SlotError};
+use crate::budget::{C1_ITERS, FRAME_LEN, RTT_BLOCK_US, SLICE_NOTE_US, SLOT_CAP, VISIBILITY_MS};
+use crate::jsonutil::{self, Buf, Limits, Val};
+use crate::osutil::{self, Held};
+use crate::pattern::{self, frame};
+use crate::publish::{self, Cursor, PubTimes};
+use crate::runner::{host_cmd, Runner};
+use crate::sha256::is_hex64;
+use crate::slot::{self, SlotError, TimedRead};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Case {
     C1,
     C2,
-    C4,
     C8,
 }
 
 impl Case {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "C1" => Some(Self::C1),
-            "C2" => Some(Self::C2),
-            "C4" => Some(Self::C4),
-            "C8" => Some(Self::C8),
+            "C1" => Some(Case::C1),
+            "C2" => Some(Case::C2),
+            "C8" => Some(Case::C8),
             _ => None,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::C1 => "C1",
-            Self::C2 => "C2",
-            Self::C4 => "C4",
-            Self::C8 => "C8",
+            Case::C1 => "C1",
+            Case::C2 => "C2",
+            Case::C8 => "C8",
         }
     }
 
     pub fn subcases(self) -> &'static [&'static str] {
         match self {
-            Self::C1 => &["rename-latency"],
-            Self::C2 => &["file-sync", "dir-sync", "rename-boundary"],
-            Self::C4 => &["create", "attach"],
-            Self::C8 => &["subjects"],
+            Case::C1 => &["rename-latency"],
+            Case::C2 => &["file-sync", "dir-sync", "rename-boundary"],
+            Case::C8 => &["subjects"],
         }
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct Sample {
-    pub direction: u8,
-    pub seq: u8,
-    pub open_us: u64,
-    pub read_us: u64,
-    pub publish_us: u64,
-    pub rtt_us: u64,
-    pub complete: bool,
-    pub torn: bool,
-    pub lost: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct Judgement {
+pub struct Row {
+    pub subcase: &'static str,
+    pub verdict: &'static str,
     pub samples: u64,
     pub observation_points: u64,
-    pub max_open_us: u64,
-    pub max_read_us: u64,
-    pub max_publish_us: u64,
-    pub max_rtt_us: u64,
+    pub open_us: Option<u64>,
+    pub write_us: Option<u64>,
+    pub fsync_us: Option<u64>,
+    pub rename_us: Option<u64>,
+    pub read_us: Option<u64>,
+    pub publish_us: Option<u64>,
+    pub rtt_us: Option<u64>,
+    pub guest_read_us: Option<u64>,
+    pub guest_publish_us: Option<u64>,
     pub errors: Vec<&'static str>,
     pub notes: Vec<&'static str>,
-    pub unknown_reason: &'static str,
-    pub verdict: &'static str,
-    pub stop_next: bool,
+    pub unknown_reason: Option<&'static str>,
 }
 
-impl Judgement {
-    fn blank(verdict: &'static str, reason: &'static str, stop: bool) -> Self {
+impl Row {
+    pub fn not_run(subcase: &'static str) -> Self {
         Self {
+            subcase,
+            verdict: "not_run",
             samples: 0,
             observation_points: 0,
-            max_open_us: 0,
-            max_read_us: 0,
-            max_publish_us: 0,
-            max_rtt_us: 0,
+            open_us: None,
+            write_us: None,
+            fsync_us: None,
+            rename_us: None,
+            read_us: None,
+            publish_us: None,
+            rtt_us: None,
+            guest_read_us: None,
+            guest_publish_us: None,
             errors: Vec::new(),
             notes: Vec::new(),
-            unknown_reason: reason,
-            verdict,
-            stop_next: stop,
+            unknown_reason: None,
         }
     }
 }
 
-pub fn judge_c1(
-    samples: &[Sample],
-    guest_digest: Option<&str>,
-    expected_digest: &str,
-) -> Judgement {
-    let mut max_open = 0u64;
-    let mut max_read = 0u64;
-    let mut max_pub = 0u64;
-    let mut max_rtt = 0u64;
-    let mut errors = Vec::new();
-    let mut notes = Vec::new();
-    for sample in samples {
-        max_open = max_open.max(sample.open_us);
-        max_read = max_read.max(sample.read_us);
-        max_pub = max_pub.max(sample.publish_us);
-        max_rtt = max_rtt.max(sample.rtt_us);
-        if sample.torn {
-            errors.push("torn-frame");
-        }
-        if sample.lost || !sample.complete {
-            errors.push("lost-update");
-        }
+#[derive(Clone, Copy, Debug)]
+struct Sample {
+    open_us: Option<u64>,
+    write_us: Option<u64>,
+    fsync_us: Option<u64>,
+    rename_us: Option<u64>,
+    read_us: Option<u64>,
+    publish_us: Option<u64>,
+    rtt_us: Option<u64>,
+}
+
+pub fn fold_verdicts(items: &[&str]) -> &'static str {
+    let exec: Vec<&str> = items.iter().copied().filter(|v| *v != "not_run").collect();
+    if items.contains(&"quarantine") {
+        return "quarantine";
     }
-    if max_open >= SLICE_NOTE_US || max_read >= SLICE_NOTE_US || max_pub >= SLICE_NOTE_US {
-        notes.push("slice-over-100ms");
+    if exec.contains(&"failed") {
+        return "failed";
     }
-    let digest_ok = guest_digest == Some(expected_digest);
-    if guest_digest.is_some() && !digest_ok {
-        errors.push("digest-mismatch");
+    if exec.contains(&"unknown") {
+        return "unknown";
     }
-    let full = samples.len() == usize::from(C1_ITERS) * 2
-        && (1..=C1_ITERS).all(|seq| {
-            samples
-                .iter()
-                .any(|s| s.direction == 1 && s.seq == seq && s.complete && !s.torn)
-                && samples
-                    .iter()
-                    .any(|s| s.direction == 2 && s.seq == seq && s.complete && !s.torn)
-        });
-    let verdict;
-    let reason;
-    let stop;
-    if errors
-        .iter()
-        .any(|e| *e == "torn-frame" || *e == "digest-mismatch")
-    {
-        verdict = "failed";
-        reason = "";
-        stop = true;
-    } else if !full || errors.contains(&"lost-update") {
-        verdict = "unknown";
-        reason = "incomplete-samples";
-        stop = true;
-    } else if max_rtt >= RTT_BLOCK_US {
-        verdict = "block";
-        reason = "";
-        errors.push("rtt-no-schedule-margin");
-        stop = true;
+    if !exec.is_empty() && exec.iter().all(|v| *v == "not-ack") {
+        return "not-ack";
+    }
+    if exec.contains(&"block") {
+        return "block";
+    }
+    if !exec.is_empty() && exec.iter().all(|v| *v == "ok") {
+        return "ok";
+    }
+    if exec.is_empty() {
+        "not_run"
     } else {
-        verdict = "ok";
-        reason = "";
-        stop = false;
-    }
-    Judgement {
-        samples: samples.len() as u64,
-        observation_points: 4,
-        max_open_us: max_open,
-        max_read_us: max_read,
-        max_publish_us: max_pub,
-        max_rtt_us: max_rtt,
-        errors,
-        notes,
-        unknown_reason: reason,
-        verdict,
-        stop_next: stop,
+        "unknown"
     }
 }
 
-pub fn judge_c2(
-    boundary: &str,
-    publishes: u64,
-    saw_complete: bool,
-    mixed: bool,
-    acked: bool,
-) -> Judgement {
-    let mut j = Judgement::blank("unknown", "durability-not-claimed", false);
-    j.samples = publishes;
-    j.observation_points = 3;
-    j.notes.push("power-loss-not-inferred");
-    if !matches!(boundary, "file-sync" | "dir-sync" | "rename-boundary") || publishes != 3 {
-        j.unknown_reason = "bad-boundary";
-        j.verdict = "unknown";
-        j.stop_next = true;
-        return j;
-    }
-    if mixed {
-        j.errors.push("torn-frame");
-        j.verdict = "failed";
-        j.unknown_reason = "";
-        j.stop_next = true;
-        return j;
-    }
-    if acked {
-        j.errors.push("false-ack");
-        j.verdict = "failed";
-        j.unknown_reason = "";
-        j.stop_next = true;
-        return j;
-    }
-    if !saw_complete {
-        j.notes.push("bytes-absent");
-    }
-    j.verdict = "not-ack";
-    j.stop_next = false;
-    j
+fn max_of(samples: &[Sample], pick: fn(&Sample) -> Option<u64>) -> Option<u64> {
+    samples.iter().filter_map(pick).max()
 }
 
-#[derive(Clone, Debug)]
-pub struct ProbeItem {
-    pub id: &'static str,
-    pub state: &'static str,
-}
-
-pub fn judge_c4(items: &[ProbeItem]) -> Judgement {
-    let mut j = Judgement::blank("unknown", "", true);
-    j.samples = items.len() as u64;
-    j.observation_points = items.len() as u64;
-    j.notes.push("host-flags-are-not-guest-sandbox");
-    if items.len() > 12 {
-        j.errors.push("probe-over-cap");
-        j.verdict = "failed";
-        return j;
-    }
-    if items.is_empty() {
-        j.unknown_reason = "no-probes";
-        return j;
-    }
-    if items
-        .iter()
-        .any(|it| !is_code(it.id) || !matches!(it.state, "pass" | "fail" | "unknown"))
-    {
-        j.errors.push("probe-schema");
-        j.verdict = "failed";
-        return j;
-    }
-    if items.iter().any(|it| it.state == "fail") {
-        j.errors.push("mount-gate");
-        j.verdict = "failed";
-        return j;
-    }
-    if items.iter().any(|it| it.state == "unknown") || items.len() < 12 {
-        j.unknown_reason = "probe-unknown";
-        j.verdict = "unknown";
-        // A full set of probes that includes an unknown item is a recorded result.
-        // Fewer than 12 means the probe itself did not finish, so the next subcase waits.
-        j.stop_next = items.len() < 12;
-        return j;
-    }
-    j.verdict = "ok";
-    j.stop_next = false;
-    j.unknown_reason = "";
-    j
-}
-
-#[derive(Clone, Debug)]
-pub struct SubjectObs {
-    pub non_admin: u64,
-    pub ops: u64,
-    pub chown: &'static str,
-    pub created_account: bool,
-    pub elevated: bool,
-}
-
-pub fn judge_c8(obs: &SubjectObs) -> Judgement {
-    let mut j = Judgement::blank("unknown", "single-non-admin-subject", true);
-    j.samples = obs.ops;
-    j.observation_points = 4;
-    if obs.created_account || obs.elevated {
-        j.verdict = "failed";
-        j.unknown_reason = "";
-        j.errors.push("elevation-forbidden");
-        return j;
-    }
-    if obs.ops > 12 {
-        j.verdict = "failed";
-        j.unknown_reason = "";
-        j.errors.push("ops-over-cap");
-        return j;
-    }
-    if obs.non_admin < 2 {
-        j.unknown_reason = "single-non-admin-subject";
-        if obs.ops != 0 {
-            j.errors.push("ops-without-second-subject");
-            j.verdict = "failed";
-        }
-        return j;
-    }
-    j.unknown_reason = "second-subject-needs-elevation";
-    if obs.chown != "denied" {
-        j.notes.push("chown-not-denied");
-    }
-    j
-}
-
-pub fn count_non_admin(unique: &str, admin_group: &str) -> Result<u64, &'static str> {
-    let mut admins = Vec::new();
-    for tok in admin_group.split_whitespace() {
-        if tok == "GroupMembership" || tok == ":" {
-            continue;
-        }
-        if tok
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        {
-            admins.push(tok.to_string());
-        }
-    }
-    let mut count = 0u64;
-    for line in unique.lines() {
-        let mut parts = line.split_whitespace();
-        let name = parts.next().ok_or("subject-parse")?;
-        let uid: u64 = parts
-            .next()
-            .ok_or("subject-parse")?
-            .parse()
-            .map_err(|_| "subject-parse")?;
-        if parts.next().is_some() {
-            return Err("subject-parse");
-        }
-        if name.starts_with('_') || name == "root" || name == "daemon" || uid < 500 {
-            continue;
-        }
-        if admins.iter().any(|a| a == name) {
-            continue;
-        }
-        count += 1;
-    }
-    Ok(count)
-}
-
-fn host_paths(volume: &Path) -> (PathBuf, PathBuf, PathBuf) {
-    (
-        volume.join("host-stage"),
-        volume.join("mailbox").join("host-write"),
-        volume.join("mailbox").join("guest-write"),
-    )
-}
-
-fn wait_frame(dir: &Path, name: &str, expect: &[u8], limit: Duration) -> (u64, bool, bool) {
-    let start = Instant::now();
-    let mut mixed = false;
-    loop {
-        let open_at = Instant::now();
-        match slot::read_named(dir, name, expect.len() as u64, expect.len() as u64) {
-            Ok(got) => {
-                let read_us = open_at.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-                if got == expect {
-                    return (read_us, true, false);
-                }
-                // A full older frame is still the previous publish. Wait for the new bytes.
-                // A non-spec buffer can be a rename observed mid-update; keep polling.
-                if !pattern::is_spec_frame(&got) {
-                    mixed = true;
-                }
-                if start.elapsed() >= limit {
-                    return if mixed {
-                        (read_us, false, true)
-                    } else {
-                        (0, false, false)
-                    };
-                }
-            }
-            Err(SlotError::NotFile)
-            | Err(SlotError::Symlink)
-            | Err(SlotError::HardLink)
-            | Err(SlotError::Name) => {
-                return (0, false, true);
-            }
-            Err(SlotError::Fsid { .. }) => {
-                mixed = true;
-                if start.elapsed() >= limit {
-                    return (0, false, true);
-                }
-            }
-            Err(SlotError::Size) | Err(SlotError::Io { .. }) | Err(SlotError::Replaced) => {
-                if start.elapsed() >= limit {
-                    return if mixed {
-                        (0, false, true)
-                    } else {
-                        (0, false, false)
-                    };
-                }
+fn points(samples: &[Sample], extra: u64) -> u64 {
+    let mut n = extra;
+    for s in samples {
+        for v in [
+            s.open_us,
+            s.write_us,
+            s.fsync_us,
+            s.rename_us,
+            s.read_us,
+            s.publish_us,
+            s.rtt_us,
+        ] {
+            if v.is_some() {
+                n += 1;
             }
         }
-        thread::sleep(Duration::from_millis(5));
+    }
+    n
+}
+
+fn notes_for(samples: &[Sample]) -> Vec<&'static str> {
+    let hot = samples.iter().any(|s| {
+        [
+            s.open_us,
+            s.write_us,
+            s.fsync_us,
+            s.rename_us,
+            s.read_us,
+            s.publish_us,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|v| v >= SLICE_NOTE_US)
+    });
+    if hot {
+        vec!["slice-over-100ms"]
+    } else {
+        Vec::new()
     }
 }
 
-pub fn drive_c1(
-    volume: &Path,
-    visibility: Duration,
-) -> Result<(Vec<Sample>, String), &'static str> {
-    let (stage, host_write, guest_write) = host_paths(volume);
-    let mut samples = Vec::new();
-    let mut published = Vec::new();
-    for seq in 1..=C1_ITERS {
-        let bytes = pattern::frame(1, 1, seq);
-        let t0 = Instant::now();
-        let times = publish::publish(&stage, &host_write, "c1-frame", &bytes)?;
-        let expect = pattern::frame(1, 2, seq);
-        let (read_us, complete, torn) = wait_frame(&guest_write, "c1-frame", &expect, visibility);
-        let rtt_us = t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-        let publish_us = times
-            .write_us
-            .saturating_add(times.fsync_us)
-            .saturating_add(times.rename_us);
-        samples.push(Sample {
-            direction: 1,
-            seq,
-            open_us: times.write_us,
-            read_us: times.write_us,
-            publish_us,
-            rtt_us,
-            complete,
-            torn,
-            lost: !complete && !torn,
-        });
-        published.push(bytes);
-        if !complete {
-            break;
-        }
-        samples.push(Sample {
-            direction: 2,
-            seq,
-            open_us: read_us,
-            read_us,
-            publish_us: read_us,
-            rtt_us,
-            complete: true,
-            torn: false,
-            lost: false,
-        });
-    }
-    Ok((samples, pattern::concat_digest(&published)))
-}
-
-pub fn guest_c1(export_root: &Path, visibility: Duration) -> Result<(), &'static str> {
-    let host_write = export_root.join("host-write");
-    let guest_write = export_root.join("guest-write");
-    let stage = guest_write.clone();
-    let mut seen = Vec::new();
-    let mut max_read = 0u64;
-    let mut max_pub = 0u64;
-    let mut torn = 0u64;
-    let mut lost = 0u64;
-    for seq in 1..=C1_ITERS {
-        let expect = pattern::frame(1, 1, seq);
-        let (read_us, complete, is_torn) = wait_frame(&host_write, "c1-frame", &expect, visibility);
-        max_read = max_read.max(read_us);
-        if !complete {
-            if is_torn {
-                torn += 1;
-            } else {
-                lost += 1;
-            }
-            break;
-        }
-        seen.push(expect);
-        let bytes = pattern::frame(1, 2, seq);
-        let times = publish::publish(&stage, &guest_write, "c1-frame", &bytes)?;
-        max_pub = max_pub.max(
-            times
-                .write_us
-                .saturating_add(times.fsync_us)
-                .saturating_add(times.rename_us),
-        );
-    }
-    let digest = pattern::concat_digest(&seen);
-    let body = guest_c1_json(seen.len() as u64, torn, lost, &digest, max_read, max_pub)?;
-    slot::write_result_slot(&guest_write, body.as_bytes()).map_err(|_| "slot-write")?;
-    Ok(())
-}
-
-fn guest_c1_json(
+#[derive(Clone)]
+struct GuestC1 {
     samples: u64,
     torn: u64,
     lost: u64,
-    digest: &str,
-    max_read: u64,
-    max_pub: u64,
-) -> Result<String, &'static str> {
-    let mut buf = crate::jsonutil::Buf::new(4096);
+    digest: String,
+    max_read_us: u64,
+    max_publish_us: u64,
+}
+
+fn judge_c1(samples: &[Sample], guest: Option<&GuestC1>, torn: bool, expect: &str) -> Row {
+    let mut row = Row::not_run("rename-latency");
+    row.samples = samples.len() as u64;
+    row.observation_points = points(samples, u64::from(guest.is_some()));
+    row.open_us = max_of(samples, |s| s.open_us);
+    row.write_us = max_of(samples, |s| s.write_us);
+    row.fsync_us = max_of(samples, |s| s.fsync_us);
+    row.rename_us = max_of(samples, |s| s.rename_us);
+    row.read_us = max_of(samples, |s| s.read_us);
+    row.publish_us = max_of(samples, |s| s.publish_us);
+    row.rtt_us = max_of(samples, |s| s.rtt_us);
+    row.notes = notes_for(samples);
+    if let Some(g) = guest {
+        row.guest_read_us = Some(g.max_read_us);
+        row.guest_publish_us = Some(g.max_publish_us);
+    }
+    let guest_torn = guest.map(|g| g.torn > 0).unwrap_or(false);
+    if torn || guest_torn {
+        row.verdict = "failed";
+        row.errors.push("torn");
+        return row;
+    }
+    let Some(g) = guest else {
+        row.verdict = "unknown";
+        row.unknown_reason = Some("no-guest-summary");
+        return row;
+    };
+    if g.lost > 0 || (g.samples == u64::from(C1_ITERS) && g.digest != expect) {
+        row.verdict = "failed";
+        row.errors.push(if g.lost > 0 { "lost" } else { "digest" });
+        return row;
+    }
+    if g.samples != u64::from(C1_ITERS) || samples.len() != usize::from(C1_ITERS) * 2 {
+        row.verdict = "unknown";
+        row.unknown_reason = Some("incomplete");
+        return row;
+    }
+    if samples
+        .iter()
+        .any(|s| s.rtt_us.unwrap_or(0) >= RTT_BLOCK_US)
+    {
+        row.verdict = "block";
+        return row;
+    }
+    row.verdict = "ok";
+    row
+}
+
+enum Wait {
+    Ready(TimedRead),
+    Torn,
+    Unknown,
+    Timeout,
+}
+
+fn wait_frame(
+    dir: &File,
+    dev: u64,
+    fsid: Option<[i32; 2]>,
+    name: &str,
+    tag: u8,
+    direction: u8,
+    seq: u8,
+) -> Wait {
+    let deadline = Instant::now() + Duration::from_millis(VISIBILITY_MS);
+    loop {
+        match slot::read_slot(dir, dev, fsid, name, FRAME_LEN) {
+            Ok(read) => match class_frame(&read.bytes, tag, direction, seq) {
+                Class::Exact => return Wait::Ready(read),
+                Class::Old => {}
+                Class::Torn => return Wait::Torn,
+            },
+            // The next sequence is published by rename over this name. An open
+            // of the previous inode then sees nlink 0. That read is not a frame.
+            Err(SlotError::Absent) | Err(SlotError::Replaced) => {}
+            Err(err) if err.integrity() => return Wait::Torn,
+            Err(_) => return Wait::Unknown,
+        }
+        if Instant::now() >= deadline {
+            return Wait::Timeout;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+enum Class {
+    Exact,
+    Old,
+    Torn,
+}
+
+fn class_frame(bytes: &[u8], tag: u8, direction: u8, seq: u8) -> Class {
+    if pattern::is_spec_frame(bytes) && bytes[6] == tag && bytes[7] == direction && bytes[8] == seq
+    {
+        Class::Exact
+    } else if pattern::is_spec_frame(bytes)
+        && bytes[6] == tag
+        && bytes[7] == direction
+        && bytes[8] < seq
+    {
+        Class::Old
+    } else {
+        Class::Torn
+    }
+}
+
+fn open_sub(mailbox: &Path, name: &str) -> Result<Held, &'static str> {
+    osutil::verify_private_leaf(&mailbox.join(name))
+}
+
+pub fn guest_c1(mailbox: &Path) -> Result<(), &'static str> {
+    let host = open_sub(mailbox, "host-write")?;
+    let guest = open_sub(mailbox, "guest-write")?;
+    let mb = osutil::verify_private_leaf(mailbox)?;
+    let fsid = mb.fsid.ok_or("fsid-unknown")?;
+    let mut torn = 0u64;
+    let mut lost = 0u64;
+    let mut samples = 0u64;
+    let mut max_read = 0u64;
+    let mut max_pub = 0u64;
+    let mut got_frames = Vec::new();
+    let mut cursor = Cursor::default();
+    for seq in 1..=C1_ITERS {
+        let started = Instant::now();
+        match wait_frame(&host.file, mb.dev, Some(fsid), "c1-frame", 1, 1, seq) {
+            Wait::Ready(read) => {
+                max_read = max_read.max(slot::us(started.elapsed()));
+                got_frames.push(read.bytes);
+                samples += 1;
+                let body = frame(1, 2, seq);
+                let t0 = Instant::now();
+                publish::publish(
+                    &guest.file,
+                    &guest.file,
+                    guest.dev,
+                    Some(fsid),
+                    "c1-frame.tmp",
+                    "c1-frame",
+                    &body,
+                    &mut cursor,
+                    true,
+                )
+                .map_err(|_| "publish")?;
+                max_pub = max_pub.max(slot::us(t0.elapsed()));
+            }
+            Wait::Torn => {
+                torn += 1;
+                break;
+            }
+            Wait::Timeout => {
+                lost += 1;
+                break;
+            }
+            Wait::Unknown => return Err("read"),
+        }
+    }
+    let digest = pattern::concat_digest(
+        &got_frames
+            .iter()
+            .map(|b| {
+                let mut a = [0u8; FRAME_LEN];
+                a.copy_from_slice(b);
+                a
+            })
+            .collect::<Vec<_>>(),
+    );
+    let mut buf = Buf::new(SLOT_CAP);
     buf.push_raw(b"{");
     buf.key("v");
     buf.u64(1);
     buf.comma();
     buf.key("op");
-    buf.code("c1");
+    buf.code("c1-summary");
     buf.comma();
     buf.key("samples");
     buf.u64(samples);
@@ -504,7 +370,7 @@ fn guest_c1_json(
     buf.u64(lost);
     buf.comma();
     buf.key("digest");
-    buf.string(digest);
+    buf.string(&digest);
     buf.comma();
     buf.key("max_read_us");
     buf.u64(max_read);
@@ -512,60 +378,139 @@ fn guest_c1_json(
     buf.key("max_publish_us");
     buf.u64(max_pub);
     buf.push_raw(b"}");
-    let bytes = buf.finish()?;
-    String::from_utf8(bytes).map_err(|_| "json-utf8")
+    let bytes = buf.finish().map_err(|_| "summary")?;
+    let mut summary = Cursor::default();
+    publish::publish(
+        &mb.file,
+        &mb.file,
+        mb.dev,
+        Some(fsid),
+        "probe-result.tmp",
+        "probe-result",
+        &bytes,
+        &mut summary,
+        true,
+    )
+    .map_err(|_| "summary")?;
+    Ok(())
 }
 
-pub fn guest_c2(export_root: &Path, boundary: &str) -> Result<(), &'static str> {
-    if !matches!(boundary, "file-sync" | "dir-sync" | "rename-boundary") {
-        return Err("bad-boundary");
-    }
-    let guest_write = export_root.join("guest-write");
-    for seq in 1..=3 {
-        let bytes = pattern::frame(2, 2, seq);
-        let tmp = guest_write.join(format!("c2-{seq}.part"));
-        std::fs::write(&tmp, bytes).map_err(|_| "c2-write")?;
-        match boundary {
-            "file-sync" => {
-                let f = std::fs::File::open(&tmp).map_err(|_| "c2-open")?;
-                f.sync_all().map_err(|_| "c2-fsync")?;
+pub fn drive_c1(mailbox: &Path, staging: &Path) -> Row {
+    let mb = match osutil::verify_private_leaf(mailbox) {
+        Ok(h) => h,
+        Err(_) => return unknown_row("rename-latency", "private-root"),
+    };
+    let Some(fsid) = mb.fsid else {
+        return unknown_row("rename-latency", "fsid-unknown");
+    };
+    let host = match open_sub(mailbox, "host-write") {
+        Ok(h) => h,
+        Err(err) => return unknown_row("rename-latency", err),
+    };
+    let guest = match open_sub(mailbox, "guest-write") {
+        Ok(h) => h,
+        Err(err) => return unknown_row("rename-latency", err),
+    };
+    let stage = match osutil::verify_private_leaf(staging) {
+        Ok(h) => h,
+        Err(err) => return unknown_row("rename-latency", err),
+    };
+    let mut samples = Vec::new();
+    let mut torn = false;
+    let mut cursor = Cursor::default();
+    for seq in 1..=C1_ITERS {
+        let body = frame(1, 1, seq);
+        let started = Instant::now();
+        let times = match publish::publish(
+            &stage.file,
+            &host.file,
+            mb.dev,
+            Some(fsid),
+            "c1-frame.tmp",
+            "c1-frame",
+            &body,
+            &mut cursor,
+            true,
+        ) {
+            Ok(t) => t,
+            Err(err) if err.integrity() => {
+                torn = true;
+                break;
             }
-            "dir-sync" => {
-                let d = std::fs::File::open(&guest_write).map_err(|_| "c2-open")?;
-                let _ = d.sync_all();
+            Err(_) => return unknown_row("rename-latency", "publish"),
+        };
+        match wait_frame(&guest.file, mb.dev, Some(fsid), "c1-frame", 1, 2, seq) {
+            Wait::Ready(read) => {
+                let rtt = slot::us(started.elapsed());
+                samples.push(dir1_sample(&times, rtt));
+                samples.push(Sample {
+                    open_us: Some(read.open_us),
+                    write_us: None,
+                    fsync_us: None,
+                    rename_us: None,
+                    read_us: Some(read.read_us),
+                    publish_us: None,
+                    rtt_us: None,
+                });
             }
-            _ => {}
-        }
-        std::fs::rename(
-            guest_write.join(format!("c2-{seq}.part")),
-            guest_write.join("c2-frame"),
-        )
-        .map_err(|_| "c2-rename")?;
-        if boundary == "rename-boundary" {
-            let d = std::fs::File::open(&guest_write).map_err(|_| "c2-open")?;
-            let _ = d.sync_all();
+            Wait::Torn => {
+                torn = true;
+                break;
+            }
+            Wait::Timeout => return unknown_row("rename-latency", "visibility"),
+            Wait::Unknown => return unknown_row("rename-latency", "read"),
         }
     }
-    // Planned exit fault: no result slot, so the host must not treat this as an ACK.
-    Err("fault-before-ack")
+    let guest_summary = match wait_frame_raw(&mb.file, mb.dev, Some(fsid), "probe-result") {
+        Wait::Ready(read) => parse_c1(&read.bytes).ok(),
+        _ => None,
+    };
+    let expect = expected_c1_digest();
+    let mut row = judge_c1(&samples, guest_summary.as_ref(), torn, &expect);
+    if torn {
+        row.verdict = "failed";
+        row.unknown_reason = None;
+    }
+    row
 }
 
-pub fn c2_frame_status(export_root: &Path) -> (bool, bool) {
-    let path_dir = export_root.join("guest-write");
-    match slot::read_named(&path_dir, "c2-frame", FRAME_LEN as u64, FRAME_LEN as u64) {
-        Ok(got) => {
-            let complete = (1..=3).any(|seq| got == pattern::frame(2, 2, seq));
-            (!complete, complete)
-        }
-        Err(SlotError::Io { .. }) => (false, false),
-        Err(_) => (true, false),
+fn dir1_sample(times: &PubTimes, rtt: u64) -> Sample {
+    Sample {
+        open_us: Some(times.open_us),
+        write_us: Some(times.write_us),
+        fsync_us: Some(times.fsync_us),
+        rename_us: Some(times.rename_us),
+        read_us: None,
+        publish_us: Some(publish::sum_pub(times)),
+        rtt_us: Some(rtt),
     }
 }
 
-pub fn parse_c1_slot(bytes: &[u8]) -> Result<(u64, String), &'static str> {
-    let text = std::str::from_utf8(bytes).map_err(|_| "slot-utf8")?;
-    let val = crate::jsonutil::parse(text, &crate::jsonutil::Limits::result_slot())?;
-    crate::jsonutil::require_keys(
+fn wait_frame_raw(dir: &File, dev: u64, fsid: Option<[i32; 2]>, name: &str) -> Wait {
+    let deadline = Instant::now() + Duration::from_millis(VISIBILITY_MS);
+    loop {
+        match slot::read_slot(dir, dev, fsid, name, SLOT_CAP) {
+            Ok(read) => return Wait::Ready(read),
+            Err(SlotError::Absent) => {}
+            Err(err) if err.integrity() => return Wait::Torn,
+            Err(_) => return Wait::Unknown,
+        }
+        if Instant::now() >= deadline {
+            return Wait::Timeout;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn expected_c1_digest() -> String {
+    let frames: Vec<[u8; FRAME_LEN]> = (1..=C1_ITERS).map(|seq| frame(1, 1, seq)).collect();
+    pattern::concat_digest(&frames)
+}
+
+fn parse_c1(bytes: &[u8]) -> Result<GuestC1, &'static str> {
+    let text = std::str::from_utf8(bytes).map_err(|_| "summary")?;
+    let val = jsonutil::parse(text, &Limits::result_slot())?;
+    jsonutil::require_keys(
         &val,
         &[
             "v",
@@ -578,89 +523,382 @@ pub fn parse_c1_slot(bytes: &[u8]) -> Result<(u64, String), &'static str> {
             "max_publish_us",
         ],
     )?;
-    if val.get("v").and_then(|v| v.int()) != Some(1)
-        || val.get("op").and_then(|v| v.str()) != Some("c1")
+    if val.get("v").and_then(Val::int) != Some(1)
+        || val.get("op").and_then(Val::str) != Some("c1-summary")
     {
-        return Err("slot-schema");
+        return Err("summary");
     }
-    let digest = val
-        .get("digest")
-        .and_then(|v| v.str())
-        .ok_or("slot-schema")?;
-    if !crate::sha256::is_hex64(digest) {
-        return Err("slot-schema");
+    let digest = val.get("digest").and_then(Val::str).ok_or("summary")?;
+    if !is_hex64(digest) {
+        return Err("summary");
     }
-    let samples = val
-        .get("samples")
-        .and_then(|v| v.int())
-        .ok_or("slot-schema")?;
-    Ok((samples, digest.to_string()))
-}
-
-/// Own-file operations for the current subject only. Never creates an account.
-pub fn self_ops(dir: &Path) -> Result<(u64, &'static str), &'static str> {
-    if volume_is_dir(dir).is_err() {
-        crate::osutil::mkdir_0700(dir).map_err(|_| "self-ops")?;
-    }
-    let file = dir.join("own-file");
-    let renamed = dir.join("own-renamed");
-    let mut ops = 0u64;
-    std::fs::write(&file, b"s11").map_err(|_| "self-ops")?;
-    ops += 1;
-    let mode = std::fs::Permissions::from_mode(0o600);
-    std::fs::set_permissions(&file, mode).map_err(|_| "self-ops")?;
-    ops += 1;
-    std::fs::rename(&file, &renamed).map_err(|_| "self-ops")?;
-    ops += 1;
-    let _ = crate::volume::lstat(&renamed)?;
-    ops += 1;
-    let chown = crate::osutil::chown_other(&renamed)?;
-    ops += 1;
-    if ops > 12 {
-        return Err("ops-over-cap");
-    }
-    Ok((ops, chown))
-}
-
-pub fn observe_c8_text(
-    unique: &str,
-    admin_group: &str,
-    work: Option<&Path>,
-) -> Result<SubjectObs, &'static str> {
-    let non_admin = count_non_admin(unique, admin_group)?;
-    if non_admin < 2 {
-        return Ok(SubjectObs {
-            non_admin,
-            ops: 0,
-            chown: "skipped",
-            created_account: false,
-            elevated: false,
-        });
-    }
-    let Some(work) = work else {
-        return Ok(SubjectObs {
-            non_admin,
-            ops: 0,
-            chown: "skipped",
-            created_account: false,
-            elevated: false,
-        });
-    };
-    let (ops, chown) = self_ops(work)?;
-    Ok(SubjectObs {
-        non_admin,
-        ops,
-        chown,
-        created_account: false,
-        elevated: false,
+    Ok(GuestC1 {
+        samples: val.get("samples").and_then(Val::int).ok_or("summary")?,
+        torn: val.get("torn").and_then(Val::int).ok_or("summary")?,
+        lost: val.get("lost").and_then(Val::int).ok_or("summary")?,
+        digest: digest.to_string(),
+        max_read_us: val.get("max_read_us").and_then(Val::int).ok_or("summary")?,
+        max_publish_us: val
+            .get("max_publish_us")
+            .and_then(Val::int)
+            .ok_or("summary")?,
     })
 }
 
-pub fn c8_slot_json(obs: &SubjectObs) -> Result<Vec<u8>, &'static str> {
-    if !matches!(obs.chown, "denied" | "skipped" | "allowed" | "error") {
-        return Err("c8-chown");
+pub(crate) fn unknown_row(sub: &'static str, reason: &'static str) -> Row {
+    let mut row = Row::not_run(sub);
+    row.verdict = "unknown";
+    row.unknown_reason = Some(reason);
+    row
+}
+
+pub fn guest_c2(mailbox: &Path, boundary: &str) -> Result<(), &'static str> {
+    if !matches!(boundary, "file-sync" | "dir-sync" | "rename-boundary") {
+        return Err("subcase");
     }
-    let mut buf = crate::jsonutil::Buf::new(4096);
+    let mb = osutil::verify_private_leaf(mailbox)?;
+    let fsid = mb.fsid.ok_or("fsid-unknown")?;
+    let mut cursor = Cursor::default();
+    for seq in 1..=2 {
+        let body = frame(2, 1, seq);
+        publish::publish(
+            &mb.file,
+            &mb.file,
+            mb.dev,
+            Some(fsid),
+            "c2-part",
+            "c2-frame",
+            &body,
+            &mut cursor,
+            true,
+        )
+        .map_err(|_| "publish")?;
+    }
+    match boundary {
+        "file-sync" => {
+            write_part(&mb.file, &frame(2, 1, 3))?;
+            write_progress(&mb, fsid, boundary, 2, 0, false)?;
+        }
+        "dir-sync" => {
+            let errno = rename_seq3(&mb.file, mb.dev, fsid, &mut cursor, true)?;
+            write_progress(&mb, fsid, boundary, 3, errno, errno == 0)?;
+        }
+        "rename-boundary" => {
+            write_progress(&mb, fsid, boundary, 3, 0, false)?;
+            rename_seq3(&mb.file, mb.dev, fsid, &mut cursor, false)?;
+        }
+        _ => return Err("subcase"),
+    }
+    Err("fault-exit")
+}
+
+fn write_part(dir: &File, bytes: &[u8]) -> Result<(), &'static str> {
+    let mut file = osutil::create_0600_at(dir, "c2-part").map_err(|_| "part")?;
+    osutil::write_all_fd(&mut file, bytes).map_err(|_| "part")?;
+    osutil::fsync_fd(&file).map_err(|_| "part")?;
+    Ok(())
+}
+
+fn rename_seq3(
+    dir: &File,
+    dev: u64,
+    fsid: [i32; 2],
+    cursor: &mut Cursor,
+    sync_dir: bool,
+) -> Result<u64, &'static str> {
+    let body = frame(2, 1, 3);
+    publish::publish(
+        dir,
+        dir,
+        dev,
+        Some(fsid),
+        "c2-part",
+        "c2-frame",
+        &body,
+        cursor,
+        false,
+    )
+    .map_err(|_| "publish")?;
+    if sync_dir {
+        match osutil::fsync_fd(dir) {
+            Ok(()) => Ok(0),
+            Err(err) => Ok(err.raw_os_error().unwrap_or(1) as u64),
+        }
+    } else {
+        Ok(0)
+    }
+}
+
+fn write_progress(
+    mb: &Held,
+    fsid: [i32; 2],
+    boundary: &str,
+    completed: u64,
+    errno: u64,
+    synced: bool,
+) -> Result<(), &'static str> {
+    let mut buf = Buf::new(SLOT_CAP);
+    buf.push_raw(b"{");
+    buf.key("v");
+    buf.u64(1);
+    buf.comma();
+    buf.key("op");
+    buf.code("c2-progress");
+    buf.comma();
+    buf.key("boundary");
+    buf.code(boundary);
+    buf.comma();
+    buf.key("completed");
+    buf.u64(completed);
+    buf.comma();
+    buf.key("errno");
+    buf.u64(errno);
+    buf.comma();
+    buf.key("dir_synced");
+    buf.u64(u64::from(synced));
+    buf.push_raw(b"}");
+    let bytes = buf.finish().map_err(|_| "progress")?;
+    let mut cursor = Cursor::default();
+    publish::publish(
+        &mb.file,
+        &mb.file,
+        mb.dev,
+        Some(fsid),
+        "c2-progress.tmp",
+        "c2-progress",
+        &bytes,
+        &mut cursor,
+        true,
+    )
+    .map_err(|_| "progress")?;
+    Ok(())
+}
+
+struct C2Obs {
+    seq: Option<u8>,
+    part: bool,
+    completed: Option<u64>,
+    errno: Option<u64>,
+    synced: Option<bool>,
+    boundary: Option<String>,
+    ack: bool,
+    bad: bool,
+    unreadable: bool,
+    saw: u64,
+}
+
+pub fn observe_c2(mailbox: &Path, sub: &str, ssh_status: Option<i32>) -> Row {
+    let mb = match osutil::verify_private_leaf(mailbox) {
+        Ok(h) => h,
+        Err(_) => return unknown_row(leak_sub(sub), "private-root"),
+    };
+    let Some(fsid) = mb.fsid else {
+        return unknown_row(leak_sub(sub), "fsid-unknown");
+    };
+    let obs = read_c2(&mb.file, mb.dev, fsid);
+    judge_c2(leak_sub(sub), &obs, ssh_status)
+}
+
+fn leak_sub(sub: &str) -> &'static str {
+    match sub {
+        "file-sync" => "file-sync",
+        "dir-sync" => "dir-sync",
+        "rename-boundary" => "rename-boundary",
+        "subjects" => "subjects",
+        "rename-latency" => "rename-latency",
+        _ => "subcase",
+    }
+}
+
+fn read_c2(dir: &File, dev: u64, fsid: [i32; 2]) -> C2Obs {
+    let mut obs = C2Obs {
+        seq: None,
+        part: false,
+        completed: None,
+        errno: None,
+        synced: None,
+        boundary: None,
+        ack: false,
+        bad: false,
+        unreadable: false,
+        saw: 0,
+    };
+    match slot::read_slot(dir, dev, Some(fsid), "c2-frame", FRAME_LEN) {
+        Ok(read) => {
+            obs.saw += 1;
+            if pattern::is_spec_frame(&read.bytes) && read.bytes[6] == 2 && read.bytes[7] == 1 {
+                obs.seq = Some(read.bytes[8]);
+            } else {
+                obs.bad = true;
+            }
+        }
+        Err(SlotError::Absent) => {}
+        Err(err) if err.integrity() => obs.bad = true,
+        Err(_) => obs.unreadable = true,
+    }
+    match slot::read_slot(dir, dev, Some(fsid), "c2-part", FRAME_LEN) {
+        Ok(_) => {
+            obs.part = true;
+            obs.saw += 1;
+        }
+        Err(SlotError::Absent) => {}
+        Err(err) if err.integrity() => obs.bad = true,
+        Err(_) => obs.unreadable = true,
+    }
+    match slot::read_slot(dir, dev, Some(fsid), "c2-progress", SLOT_CAP) {
+        Ok(read) => {
+            obs.saw += 1;
+            if parse_progress(&read.bytes, &mut obs).is_err() {
+                obs.unreadable = true;
+            }
+        }
+        Err(SlotError::Absent) => obs.unreadable = true,
+        Err(err) if err.integrity() => obs.bad = true,
+        Err(_) => obs.unreadable = true,
+    }
+    match slot::read_slot(dir, dev, Some(fsid), "probe-result", SLOT_CAP) {
+        Ok(_) => obs.ack = true,
+        Err(SlotError::Absent) => {}
+        Err(err) if err.integrity() => obs.bad = true,
+        Err(_) => obs.unreadable = true,
+    }
+    obs
+}
+
+fn parse_progress(bytes: &[u8], obs: &mut C2Obs) -> Result<(), &'static str> {
+    let text = std::str::from_utf8(bytes).map_err(|_| "progress")?;
+    let val = jsonutil::parse(text, &Limits::result_slot())?;
+    jsonutil::require_keys(
+        &val,
+        &["v", "op", "boundary", "completed", "errno", "dir_synced"],
+    )?;
+    if val.get("op").and_then(Val::str) != Some("c2-progress") {
+        return Err("progress");
+    }
+    obs.boundary = Some(
+        val.get("boundary")
+            .and_then(Val::str)
+            .ok_or("progress")?
+            .to_string(),
+    );
+    obs.completed = val.get("completed").and_then(Val::int);
+    obs.errno = val.get("errno").and_then(Val::int);
+    obs.synced = Some(val.get("dir_synced").and_then(Val::int).ok_or("progress")? == 1);
+    Ok(())
+}
+
+fn judge_c2(sub: &'static str, obs: &C2Obs, ssh_status: Option<i32>) -> Row {
+    let mut row = Row::not_run(sub);
+    row.samples = obs.completed.unwrap_or(0);
+    row.observation_points = obs.saw;
+    if obs.bad || obs.ack {
+        row.verdict = "failed";
+        row.errors
+            .push(if obs.ack { "false-ack" } else { "protocol" });
+        return row;
+    }
+    if obs.unreadable || obs.boundary.as_deref() != Some(sub) {
+        row.verdict = "unknown";
+        row.unknown_reason = Some(if obs.unreadable {
+            "unreadable"
+        } else {
+            "fault-location"
+        });
+        return row;
+    }
+    if ssh_status != Some(86) {
+        row.verdict = "unknown";
+        row.unknown_reason = Some("ssh-status");
+        return row;
+    }
+    if sub == "dir-sync" && obs.errno != Some(0) {
+        row.verdict = "unknown";
+        row.unknown_reason = Some("sync-error");
+        return row;
+    }
+    let ok = match sub {
+        "file-sync" => {
+            obs.part && obs.seq == Some(2) && obs.completed == Some(2) && obs.synced == Some(false)
+        }
+        "dir-sync" => {
+            !obs.part && obs.seq == Some(3) && obs.completed == Some(3) && obs.synced == Some(true)
+        }
+        "rename-boundary" => {
+            !obs.part && obs.seq == Some(3) && obs.completed == Some(3) && obs.synced == Some(false)
+        }
+        _ => false,
+    };
+    if ok {
+        row.verdict = "not-ack";
+    } else {
+        row.verdict = "unknown";
+        row.unknown_reason = Some("fault-location");
+    }
+    row
+}
+
+pub fn judge_c8(
+    non_admin: u64,
+    ops: u64,
+    created: bool,
+    elevated: bool,
+) -> (&'static str, Option<&'static str>) {
+    if ops != 0 || created || elevated {
+        ("failed", Some("subject-policy"))
+    } else if non_admin <= 1 {
+        ("unknown", Some("single-principal"))
+    } else {
+        ("unknown", Some("mapping-not-measured"))
+    }
+}
+
+pub fn non_admin_count(users: &str, admins: &str) -> Result<usize, &'static str> {
+    let admin_names = parse_admins(admins)?;
+    let mut n = 0usize;
+    for line in users.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let name = parts.next().ok_or("dscl")?;
+        let uid: u32 = parts.next().ok_or("dscl")?.parse().map_err(|_| "dscl")?;
+        if parts.next().is_some() {
+            return Err("dscl");
+        }
+        if uid >= 500
+            && name != "root"
+            && name != "daemon"
+            && !name.starts_with('_')
+            && !admin_names.iter().any(|a| a == name)
+        {
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+fn parse_admins(text: &str) -> Result<Vec<String>, &'static str> {
+    let line = text
+        .lines()
+        .find(|l| l.contains("GroupMembership"))
+        .ok_or("dscl")?;
+    Ok(line
+        .split_whitespace()
+        .filter(|tok| !tok.contains(':'))
+        .map(|s| s.to_string())
+        .collect())
+}
+
+pub fn guest_c8(runner: &mut dyn Runner, mailbox: &Path) -> Result<(), &'static str> {
+    let users = run_text(runner, &crate::argv::dscl_users())?;
+    let admins = run_text(runner, &crate::argv::dscl_admin_group())?;
+    let n = non_admin_count(&users, &admins)? as u64;
+    let (verdict, reason) = judge_c8(n, 0, false, false);
+    let _ = (verdict, reason);
+    let mb = osutil::verify_private_leaf(mailbox)?;
+    let fsid = mb.fsid.ok_or("fsid-unknown")?;
+    let mut buf = Buf::new(SLOT_CAP);
     buf.push_raw(b"{");
     buf.key("v");
     buf.u64(1);
@@ -669,272 +907,285 @@ pub fn c8_slot_json(obs: &SubjectObs) -> Result<Vec<u8>, &'static str> {
     buf.code("c8");
     buf.comma();
     buf.key("non_admin");
-    buf.u64(obs.non_admin);
+    buf.u64(n);
     buf.comma();
     buf.key("ops");
-    buf.u64(obs.ops);
-    buf.comma();
-    buf.key("chown");
-    buf.code(obs.chown);
+    buf.u64(0);
     buf.comma();
     buf.key("created_account");
-    buf.bool(obs.created_account);
+    buf.bool(false);
     buf.comma();
     buf.key("elevated");
-    buf.bool(obs.elevated);
+    buf.bool(false);
     buf.push_raw(b"}");
-    buf.finish()
-}
-
-pub fn parse_c8_slot(bytes: &[u8]) -> Result<SubjectObs, &'static str> {
-    let text = std::str::from_utf8(bytes).map_err(|_| "slot-utf8")?;
-    let val = crate::jsonutil::parse(text, &crate::jsonutil::Limits::result_slot())?;
-    crate::jsonutil::require_keys(
-        &val,
-        &[
-            "v",
-            "op",
-            "non_admin",
-            "ops",
-            "chown",
-            "created_account",
-            "elevated",
-        ],
-    )?;
-    if val.get("v").and_then(|v| v.int()) != Some(1)
-        || val.get("op").and_then(|v| v.str()) != Some("c8")
-    {
-        return Err("slot-schema");
-    }
-    let chown = chown_code(
-        val.get("chown")
-            .and_then(|v| v.str())
-            .ok_or("slot-schema")?,
-    )?;
-    Ok(SubjectObs {
-        non_admin: val
-            .get("non_admin")
-            .and_then(|v| v.int())
-            .ok_or("slot-schema")?,
-        ops: val.get("ops").and_then(|v| v.int()).ok_or("slot-schema")?,
-        chown,
-        created_account: val
-            .get("created_account")
-            .and_then(|v| v.bool())
-            .ok_or("slot-schema")?,
-        elevated: val
-            .get("elevated")
-            .and_then(|v| v.bool())
-            .ok_or("slot-schema")?,
-    })
-}
-
-fn chown_code(s: &str) -> Result<&'static str, &'static str> {
-    match s {
-        "denied" => Ok("denied"),
-        "skipped" => Ok("skipped"),
-        "allowed" => Ok("allowed"),
-        "error" => Ok("error"),
-        _ => Err("slot-schema"),
-    }
-}
-
-fn volume_is_dir(path: &Path) -> Result<(), &'static str> {
-    let st = crate::volume::lstat(path)?;
-    if st.is_dir && !st.is_link {
-        Ok(())
-    } else {
-        Err("self-ops")
-    }
-}
-
-pub fn prepare_volume(volume: &Path) -> Result<(), &'static str> {
-    for rel in [
-        "host-stage",
-        "mailbox/host-write",
-        "mailbox/guest-write",
-        ".fseventsd",
-    ] {
-        let path = volume.join(rel);
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                osutil_mkdir(parent)?;
-            }
-        }
-        if !path.exists() {
-            osutil_mkdir(&path)?;
-        }
-    }
-    let marker = volume.join(".metadata_never_index");
-    if !marker.exists() {
-        std::fs::write(&marker, b"").map_err(|_| "marker")?;
-    }
-    let nolog = volume.join(".fseventsd").join("no_log");
-    if !nolog.exists() {
-        std::fs::write(&nolog, b"").map_err(|_| "marker")?;
-    }
+    let bytes = buf.finish().map_err(|_| "c8")?;
+    let mut cursor = Cursor::default();
+    publish::publish(
+        &mb.file,
+        &mb.file,
+        mb.dev,
+        Some(fsid),
+        "probe-result.tmp",
+        "probe-result",
+        &bytes,
+        &mut cursor,
+        true,
+    )
+    .map_err(|_| "c8")?;
     Ok(())
 }
 
-fn osutil_mkdir(path: &Path) -> Result<(), &'static str> {
-    crate::osutil::mkdir_0700(path).map_err(|_| "mkdir")
+fn run_text(runner: &mut dyn Runner, argv: &[String]) -> Result<String, &'static str> {
+    let cmd = host_cmd(
+        argv.to_vec(),
+        Duration::from_millis(crate::budget::MS_QUERY),
+        Vec::new(),
+        None,
+        false,
+    )?;
+    let out = runner.run(&cmd);
+    let text = crate::runner::trusted_text(&out)?;
+    Ok(text.to_string())
+}
+
+pub fn observe_c8(mailbox: &Path) -> Row {
+    let mb = match osutil::verify_private_leaf(mailbox) {
+        Ok(h) => h,
+        Err(_) => return unknown_row("subjects", "private-root"),
+    };
+    let Some(fsid) = mb.fsid else {
+        return unknown_row("subjects", "fsid-unknown");
+    };
+    let read = match slot::read_slot(&mb.file, mb.dev, Some(fsid), "probe-result", SLOT_CAP) {
+        Ok(read) => read,
+        Err(SlotError::Absent) => return unknown_row("subjects", "no-slot"),
+        Err(err) if err.integrity() => {
+            let mut row = unknown_row("subjects", "protocol");
+            row.verdict = "failed";
+            row.errors.push("protocol");
+            return row;
+        }
+        Err(_) => return unknown_row("subjects", "unreadable"),
+    };
+    let text = match std::str::from_utf8(&read.bytes) {
+        Ok(t) => t,
+        Err(_) => return unknown_row("subjects", "unreadable"),
+    };
+    let val = match jsonutil::parse(text, &Limits::result_slot()) {
+        Ok(v) => v,
+        Err(_) => return unknown_row("subjects", "unreadable"),
+    };
+    if jsonutil::require_keys(
+        &val,
+        &["v", "op", "non_admin", "ops", "created_account", "elevated"],
+    )
+    .is_err()
+        || val.get("op").and_then(Val::str) != Some("c8")
+    {
+        return unknown_row("subjects", "unreadable");
+    }
+    let n = val.get("non_admin").and_then(Val::int).unwrap_or(0);
+    let ops = val.get("ops").and_then(Val::int).unwrap_or(1);
+    let created = val
+        .get("created_account")
+        .and_then(Val::bool)
+        .unwrap_or(true);
+    let elevated = val.get("elevated").and_then(Val::bool).unwrap_or(true);
+    let (verdict, reason) = judge_c8(n, ops, created, elevated);
+    let mut row = Row::not_run("subjects");
+    row.verdict = verdict;
+    row.unknown_reason = reason;
+    row.samples = 0;
+    row.observation_points = 1;
+    row
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    #[test]
-    fn c1_judge_blocks_on_rtt_and_fails_on_tear() {
-        let mut samples = Vec::new();
-        for seq in 1..=8 {
-            for direction in [1u8, 2] {
-                samples.push(Sample {
-                    direction,
-                    seq,
-                    open_us: 10,
-                    read_us: 10,
-                    publish_us: 10,
-                    rtt_us: 100,
-                    complete: true,
-                    torn: false,
-                    lost: false,
-                });
-            }
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let home = std::env::var("HOME").unwrap();
+        let p =
+            std::path::PathBuf::from(format!("{home}/.s11m2a-{tag}-{}-{n}", std::process::id()));
+        std::fs::create_dir(&p).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
+        p
+    }
+
+    fn sample_pair() -> Sample {
+        Sample {
+            open_us: Some(10),
+            write_us: Some(10),
+            fsync_us: Some(10),
+            rename_us: Some(10),
+            read_us: None,
+            publish_us: Some(40),
+            rtt_us: Some(20),
         }
-        let j = judge_c1(&samples, Some("ab"), "ab");
-        assert_eq!(j.verdict, "ok");
-        assert!(!j.stop_next);
-        samples[0].rtt_us = RTT_BLOCK_US;
-        let j = judge_c1(&samples, Some("ab"), "ab");
-        assert_eq!(j.verdict, "block");
-        assert!(j.errors.contains(&"rtt-no-schedule-margin"));
-        samples[0].torn = true;
-        let j = judge_c1(&samples, Some("ab"), "ab");
-        assert_eq!(j.verdict, "failed");
     }
 
     #[test]
-    fn c2_c4_c8_verdicts() {
-        let j = judge_c2("file-sync", 3, true, false, false);
-        assert_eq!(j.verdict, "not-ack");
-        assert!(j.notes.contains(&"power-loss-not-inferred"));
+    fn c1_rules_and_aggregate() {
+        let mut samples = Vec::new();
+        for _ in 0..8 {
+            samples.push(sample_pair());
+            samples.push(Sample {
+                open_us: Some(5),
+                read_us: Some(5),
+                ..sample_pair()
+            });
+        }
+        samples.iter_mut().skip(1).step_by(2).for_each(|s| {
+            s.write_us = None;
+            s.fsync_us = None;
+            s.rename_us = None;
+            s.publish_us = None;
+            s.rtt_us = None;
+        });
+        let guest = GuestC1 {
+            samples: 8,
+            torn: 0,
+            lost: 0,
+            digest: expected_c1_digest(),
+            max_read_us: 15,
+            max_publish_us: 30,
+        };
         assert_eq!(
-            judge_c2("file-sync", 3, true, false, true).verdict,
+            judge_c1(&samples, None, false, &guest.digest).verdict,
+            "unknown"
+        );
+        assert_eq!(
+            judge_c1(&samples, None, false, &guest.digest).unknown_reason,
+            Some("no-guest-summary")
+        );
+        assert_eq!(
+            judge_c1(&samples, Some(&guest), true, &guest.digest).verdict,
             "failed"
         );
-        let items = vec![
-            ProbeItem {
-                id: "create-exit",
-                state: "unknown"
-            };
-            12
-        ];
-        assert_eq!(judge_c4(&items).verdict, "unknown");
-        assert_eq!(judge_c4(&items[..1]).unknown_reason, "probe-unknown");
-        let one = SubjectObs {
-            non_admin: 1,
-            ops: 0,
-            chown: "skipped",
-            created_account: false,
-            elevated: false,
-        };
-        assert_eq!(judge_c8(&one).unknown_reason, "single-non-admin-subject");
-        let bad = SubjectObs {
-            non_admin: 1,
-            ops: 1,
-            chown: "skipped",
-            created_account: false,
-            elevated: false,
-        };
-        assert_eq!(judge_c8(&bad).verdict, "failed");
-        let two = SubjectObs {
-            non_admin: 2,
-            ops: 12,
-            chown: "denied",
-            created_account: false,
-            elevated: false,
-        };
+        let mut bad = guest.clone();
+        bad.torn = 1;
         assert_eq!(
-            judge_c8(&two).unknown_reason,
-            "second-subject-needs-elevation"
+            judge_c1(&samples, Some(&bad), false, &guest.digest).verdict,
+            "failed"
         );
-        let elev = SubjectObs {
-            created_account: true,
-            ..two
-        };
-        assert_eq!(judge_c8(&elev).verdict, "failed");
+        let mut slow = samples.clone();
+        slow[0].rtt_us = Some(RTT_BLOCK_US);
+        assert_eq!(
+            judge_c1(&slow, Some(&guest), false, &guest.digest).verdict,
+            "block"
+        );
+        assert_eq!(
+            judge_c1(&samples, Some(&guest), false, &guest.digest).verdict,
+            "ok"
+        );
+        assert_eq!(fold_verdicts(&["not-ack", "not-ack", "not-ack"]), "not-ack");
+        assert_eq!(fold_verdicts(&["not-ack", "unknown"]), "unknown");
+        assert_eq!(fold_verdicts(&["not-ack", "not_run"]), "not-ack");
+        assert_eq!(fold_verdicts(&["failed", "unknown"]), "failed");
+        assert_eq!(fold_verdicts(&["quarantine", "failed"]), "quarantine");
+        assert_eq!(fold_verdicts(&["not_run", "not_run"]), "not_run");
+        assert_eq!(fold_verdicts(&["ok"]), "ok");
     }
 
     #[test]
-    fn one_subject_does_not_touch_the_filesystem() {
-        let dir = std::env::temp_dir().join(format!(
-            "s11-c8-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        let obs = observe_c8_text("eval 502\n", "GroupMembership: root", Some(&dir)).unwrap();
-        assert_eq!(obs.ops, 0);
-        assert_eq!(obs.chown, "skipped");
-        assert!(!dir.exists());
-        let obs =
-            observe_c8_text("eval 502\nroleb 503\n", "GroupMembership: root", Some(&dir)).unwrap();
-        assert!(obs.ops > 0 && obs.ops <= 12);
-        assert!(matches!(obs.chown, "denied" | "allowed" | "error"));
-        assert!(!obs.created_account && !obs.elevated);
-        let back = parse_c8_slot(&c8_slot_json(&obs).unwrap()).unwrap();
-        assert_eq!(back.non_admin, obs.non_admin);
-        assert_eq!(back.ops, obs.ops);
-        let _ = std::fs::remove_dir_all(&dir);
+    fn torn_frame_fails_without_waiting_out_the_window() {
+        let root = scratch("torn");
+        let held = osutil::verify_private_leaf(&root).unwrap();
+        let mut f = osutil::create_0600_at(&held.file, "c1-frame").unwrap();
+        osutil::write_all_fd(&mut f, b"mixed-bytes").unwrap();
+        drop(f);
+        let started = Instant::now();
+        let got = wait_frame(&held.file, held.dev, held.fsid, "c1-frame", 1, 1, 1);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(matches!(got, Wait::Torn));
+        let _ = osutil::unlink_at(&held.file, "c1-frame");
+        let _ = std::fs::remove_dir(&root);
     }
 
     #[test]
-    fn subject_count_ignores_system_and_admin_names() {
-        let unique = "root 0\ndaemon 1\n_foo 501\neval 502\nroleb 503\nadminuser 504\n";
-        let group = "GroupMembership: root adminuser";
-        assert_eq!(count_non_admin(unique, group).unwrap(), 2);
-    }
-
-    #[test]
-    fn c1_exchange_matches_and_c2_does_not_ack() {
-        let dir = std::env::temp_dir().join(format!(
-            "s11-c1-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir(&dir).unwrap();
-        prepare_volume(&dir).unwrap();
-        let export = dir.join("mailbox");
-        let guest = thread::spawn(move || guest_c1(&export, Duration::from_secs(3)));
-        let (samples, digest) = drive_c1(&dir, Duration::from_secs(3)).unwrap();
+    fn local_c1_exchange_reports_only_measured_times() {
+        let root = scratch("c1");
+        let mb = root.join("mailbox");
+        std::fs::create_dir(&mb).unwrap();
+        std::fs::set_permissions(&mb, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for name in ["host-write", "guest-write"] {
+            std::fs::create_dir(mb.join(name)).unwrap();
+            std::fs::set_permissions(mb.join(name), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        let stage = root.join("stage");
+        std::fs::create_dir(&stage).unwrap();
+        std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mb2 = mb.clone();
+        let guest = thread::spawn(move || guest_c1(&mb2));
+        let row = drive_c1(&mb, &stage);
         guest.join().unwrap().unwrap();
-        let slot = slot::read_result_slot(&dir.join("mailbox").join("guest-write")).unwrap();
-        let (_n, guest_digest) = parse_c1_slot(&slot).unwrap();
-        let judged = judge_c1(&samples, Some(&guest_digest), &digest);
-        assert_eq!(judged.verdict, "ok", "{judged:?}");
-        assert_eq!(judged.samples, 16);
+        assert_eq!(row.verdict, "ok", "{:?}", row.unknown_reason);
+        assert!(row.read_us.is_some());
+        assert!(row.guest_read_us.is_some());
+        assert_eq!(row.samples, 16);
+        let _ = std::fs::remove_file(mb.join("probe-result"));
+        let _ = std::fs::remove_file(mb.join("host-write/c1-frame"));
+        let _ = std::fs::remove_file(mb.join("guest-write/c1-frame"));
+        for name in ["host-write", "guest-write"] {
+            let _ = std::fs::remove_dir(mb.join(name));
+        }
+        let _ = std::fs::remove_dir(&mb);
+        let _ = std::fs::remove_dir(&stage);
+        let _ = std::fs::remove_dir(&root);
+    }
 
-        let c2 = std::env::temp_dir().join(format!("s11-c2-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&c2);
-        std::fs::create_dir(&c2).unwrap();
-        prepare_volume(&c2).unwrap();
-        let export = c2.join("mailbox");
+    #[test]
+    fn c2_file_sync_counts_two_and_c8_does_not_invent_a_subject() {
+        let mb = scratch("c2");
+        let err = guest_c2(&mb, "file-sync").unwrap_err();
+        assert_eq!(err, "fault-exit");
+        let row = observe_c2(&mb, "file-sync", Some(86));
+        assert_eq!(row.verdict, "not-ack", "{:?}", row.unknown_reason);
+        assert_eq!(row.samples, 2);
+        assert!(mb.join("c2-part").is_file());
+        let other = scratch("c2b");
+        assert_eq!(guest_c2(&other, "dir-sync").unwrap_err(), "fault-exit");
+        assert_eq!(observe_c2(&other, "dir-sync", Some(86)).verdict, "not-ack");
+        assert_eq!(observe_c2(&other, "dir-sync", Some(1)).verdict, "unknown");
+        let third = scratch("c2c");
         assert_eq!(
-            guest_c2(&export, "file-sync").unwrap_err(),
-            "fault-before-ack"
+            guest_c2(&third, "rename-boundary").unwrap_err(),
+            "fault-exit"
         );
-        assert!(slot::read_result_slot(&export.join("guest-write")).is_err());
-        let (mixed, complete) = c2_frame_status(&export);
-        assert!(complete && !mixed);
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&c2);
+        let row = observe_c2(&third, "rename-boundary", Some(86));
+        assert_eq!(row.verdict, "not-ack", "{:?}", row.unknown_reason);
+        assert_eq!(row.samples, 3);
+        assert_eq!(judge_c8(1, 0, false, false).1, Some("single-principal"));
+        assert_eq!(judge_c8(2, 0, false, false).1, Some("mapping-not-measured"));
+        assert_eq!(judge_c8(2, 1, false, false).0, "failed");
+        assert_eq!(judge_c8(1, 0, true, false).0, "failed");
+        let users = "eval 501\nother 503\nroot 0\n_svc 210\ndaemon 1\nadmin 502\n";
+        let admins = "GroupMembership: admin root\n";
+        assert_eq!(non_admin_count(users, admins).unwrap(), 2);
+        let one = "eval 501\nroot 0\n";
+        assert_eq!(non_admin_count(one, "GroupMembership: admin\n").unwrap(), 1);
+        let c8 = scratch("c8");
+        let mut fake = crate::runner::Fake::new(vec![
+            (
+                "UniqueID",
+                crate::runner::CmdOut::ok_text("eval 501\nroot 0\n"),
+            ),
+            (
+                "GroupMembership",
+                crate::runner::CmdOut::ok_text("GroupMembership: admin\n"),
+            ),
+        ]);
+        guest_c8(&mut fake, &c8).unwrap();
+        let row = observe_c8(&c8);
+        assert_eq!(row.verdict, "unknown");
+        assert_eq!(row.unknown_reason, Some("single-principal"));
+        assert!(!c8.join("work").exists());
+        assert_eq!(row.samples, 0);
     }
 }

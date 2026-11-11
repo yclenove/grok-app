@@ -63,10 +63,18 @@ pub fn precheck(list: &Result<Vec<Vm>, &'static str>, name: &str) -> Precheck {
             }
         }
     };
-    if inventory::find(vms, GOLDEN).is_none() {
-        return Precheck::Stop {
-            reason: "golden-missing",
-        };
+    match inventory::find(vms, GOLDEN) {
+        None => {
+            return Precheck::Stop {
+                reason: "golden-missing",
+            }
+        }
+        Some(vm) if vm.state != "stopped" => {
+            return Precheck::Stop {
+                reason: "golden-not-stopped",
+            }
+        }
+        Some(_) => {}
     }
     if inventory::find(vms, name).is_some() {
         return Precheck::Stop {
@@ -143,6 +151,40 @@ pub fn confirm_absent(after_delete: &Result<Vec<Vm>, &'static str>, name: &str) 
         Ok(_) => Absent::No,
         Err(_) => Absent::Unknown,
     }
+}
+
+/// A list is trusted only when the command exited 0 and the body parsed.
+/// Nonzero status with `[]` is still untrusted.
+pub fn list_from_end(end: ToolEnd, body: &str) -> Result<Vec<Vm>, &'static str> {
+    if end != ToolEnd::Exited(0) {
+        return Err("list-untrusted");
+    }
+    inventory::parse_tart_list(body).map_err(|_| "list-untrusted")
+}
+
+pub fn confirm_stopped(
+    list: &Result<Vec<Vm>, &'static str>,
+    name: &str,
+) -> Result<(), &'static str> {
+    let vms = list.as_ref().map_err(|_| "list-untrusted")?;
+    match inventory::find(vms, name) {
+        Some(vm) if vm.state == "stopped" => Ok(()),
+        _ => Err("not-stopped"),
+    }
+}
+
+/// This clone is the only VM in `running`. Suspended and stopped do not count.
+pub fn sole_running(vms: &[Vm], name: &str) -> bool {
+    let mut found = false;
+    for vm in vms {
+        if vm.state == "running" {
+            if found || vm.name != name {
+                return false;
+            }
+            found = true;
+        }
+    }
+    found
 }
 
 #[cfg(test)]
@@ -237,5 +279,45 @@ mod tests {
         assert_eq!(confirm_absent(&Ok(vec![vm(GOLDEN)]), &name), Absent::Yes);
         assert_eq!(confirm_absent(&Ok(vec![vm(&name)]), &name), Absent::No);
         assert_eq!(confirm_absent(&Err("x"), &name), Absent::Unknown);
+        assert!(list_from_end(ToolEnd::Exited(1), "[]").is_err());
+        assert!(list_from_end(ToolEnd::Timeout, "[]").is_err());
+        assert!(list_from_end(ToolEnd::Exited(0), "[]").unwrap().is_empty());
+        let running = Vm {
+            name: name.clone(),
+            state: "running".into(),
+        };
+        let golden_run = Vm {
+            name: GOLDEN.into(),
+            state: "running".into(),
+        };
+        assert!(sole_running(&[vm(GOLDEN), running.clone()], &name));
+        assert!(!sole_running(&[golden_run, running], &name));
+        assert!(confirm_stopped(
+            &Ok(vec![Vm {
+                name: name.clone(),
+                state: "stopped".into()
+            }]),
+            &name
+        )
+        .is_ok());
+        assert!(confirm_stopped(
+            &Ok(vec![Vm {
+                name: name.clone(),
+                state: "suspended".into()
+            }]),
+            &name
+        )
+        .is_err());
+        assert!(confirm_stopped(&Err("list-untrusted"), &name).is_err());
+        let golden_run = Ok(vec![Vm {
+            name: GOLDEN.into(),
+            state: "running".into(),
+        }]);
+        assert_eq!(
+            precheck(&golden_run, &name),
+            Precheck::Stop {
+                reason: "golden-not-stopped"
+            }
+        );
     }
 }

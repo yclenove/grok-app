@@ -1,112 +1,26 @@
-//! Fixed argv templates from ADR 0019 §2 and §5.
-//! Every program path is absolute. Nothing here searches `PATH` or invokes a shell.
+//! Allow-listed argv. The program set is closed: tart, ssh, ssh-keygen, dscl.
 
 use std::path::Path;
 
 use crate::budget::{CONNECT_SEC, GOLDEN, GUEST_ROLE};
 
-pub fn hdiutil_create(seed: &Path, image: &Path) -> Vec<String> {
-    vec![
-        "/usr/bin/hdiutil".into(),
-        "create".into(),
-        "-size".into(),
-        "64m".into(),
-        "-fs".into(),
-        "HFSX".into(),
-        "-type".into(),
-        "SPARSE".into(),
-        "-layout".into(),
-        "NONE".into(),
-        "-volname".into(),
-        "GCU-MAILBOX".into(),
-        "-srcfolder".into(),
-        seed.display().to_string(),
-        image.display().to_string(),
-    ]
-}
-
-pub fn hdiutil_attach(mount: &Path, image: &Path) -> Vec<String> {
-    vec![
-        "/usr/bin/hdiutil".into(),
-        "attach".into(),
-        "-plist".into(),
-        "-noautoopen".into(),
-        "-nobrowse".into(),
-        "-owners".into(),
-        "on".into(),
-        "-mountOptions".into(),
-        "rw,nosuid,noexec,nodev".into(),
-        "-mountpoint".into(),
-        mount.display().to_string(),
-        image.display().to_string(),
-    ]
-}
-
-pub fn hdiutil_imageinfo(image: &Path) -> Vec<String> {
-    vec![
-        "/usr/bin/hdiutil".into(),
-        "imageinfo".into(),
-        "-plist".into(),
-        image.display().to_string(),
-    ]
-}
-
-pub fn hdiutil_info() -> Vec<String> {
-    vec!["/usr/bin/hdiutil".into(), "info".into(), "-plist".into()]
-}
-
-pub fn diskutil_info(device: &str) -> Vec<String> {
-    vec![
-        "/usr/sbin/diskutil".into(),
-        "info".into(),
-        "-plist".into(),
-        device.into(),
-    ]
-}
-
-pub fn mount_readonly() -> Vec<String> {
-    vec!["/sbin/mount".into()]
-}
-
-pub fn ls_acl(path: &Path) -> Vec<String> {
-    vec!["/bin/ls".into(), "-lde".into(), path.display().to_string()]
-}
-
-pub fn mdutil_status(mount: &Path) -> Vec<String> {
-    vec![
-        "/usr/bin/mdutil".into(),
-        "-s".into(),
-        mount.display().to_string(),
-    ]
-}
-
-pub fn tmutil_addexclusion(path: &Path) -> Vec<String> {
-    vec![
-        "/usr/bin/tmutil".into(),
-        "addexclusion".into(),
-        path.display().to_string(),
-    ]
-}
-
-pub fn tmutil_isexcluded(path: &Path) -> Vec<String> {
-    vec![
-        "/usr/bin/tmutil".into(),
-        "isexcluded".into(),
-        path.display().to_string(),
-    ]
-}
-
-pub fn hdiutil_detach(device: &str) -> Vec<String> {
-    vec!["/usr/bin/hdiutil".into(), "detach".into(), device.into()]
-}
-
-pub fn hdiutil_detach_force(device: &str) -> Vec<String> {
-    vec![
-        "/usr/bin/hdiutil".into(),
-        "detach".into(),
-        "-force".into(),
-        device.into(),
-    ]
+pub fn closed_program(argv: &[String]) -> Result<(), &'static str> {
+    let Some(first) = argv.first() else {
+        return Err("argv");
+    };
+    if !first.starts_with('/') || first.contains("..") || first.as_bytes().contains(&0) {
+        return Err("program");
+    }
+    let base = first.rsplit('/').next().unwrap_or(first);
+    let ok = first == "/usr/bin/ssh"
+        || first == "/usr/bin/ssh-keygen"
+        || first == "/usr/bin/dscl"
+        || base == "tart";
+    if ok {
+        Ok(())
+    } else {
+        Err("program")
+    }
 }
 
 pub fn tart_list(tart: &Path) -> Vec<String> {
@@ -127,8 +41,6 @@ pub fn tart_clone(tart: &Path, name: &str) -> Vec<String> {
     ]
 }
 
-/// §5 DEFAULT network laboratory exception, plus `--no-graphics` from the probe task.
-/// No block and no allow.
 pub fn tart_run(tart: &Path, name: &str, share: &str, mailbox: &Path) -> Vec<String> {
     vec![
         tart.display().to_string(),
@@ -166,17 +78,6 @@ pub fn ssh_keygen(key: &Path) -> Vec<String> {
     ]
 }
 
-pub fn ssh_keyscan(ip: &str) -> Vec<String> {
-    vec![
-        "/usr/bin/ssh-keyscan".into(),
-        "-T".into(),
-        CONNECT_SEC.to_string(),
-        "-t".into(),
-        "ed25519".into(),
-        ip.into(),
-    ]
-}
-
 pub fn ssh(key: &Path, known_hosts: &Path, ip: &str, remote: &str) -> Vec<String> {
     vec![
         "/usr/bin/ssh".into(),
@@ -191,6 +92,8 @@ pub fn ssh(key: &Path, known_hosts: &Path, ip: &str, remote: &str) -> Vec<String
         "GlobalKnownHostsFile=/dev/null".into(),
         "-o".into(),
         "StrictHostKeyChecking=yes".into(),
+        "-o".into(),
+        "HostKeyAlgorithms=ssh-ed25519".into(),
         "-o".into(),
         "IdentitiesOnly=yes".into(),
         "-o".into(),
@@ -235,6 +138,7 @@ pub fn ssh(key: &Path, known_hosts: &Path, ip: &str, remote: &str) -> Vec<String
     ]
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn dscl_users() -> Vec<String> {
     vec![
         "/usr/bin/dscl".into(),
@@ -245,6 +149,7 @@ pub fn dscl_users() -> Vec<String> {
     ]
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn dscl_admin_group() -> Vec<String> {
     vec![
         "/usr/bin/dscl".into(),
@@ -255,112 +160,27 @@ pub fn dscl_admin_group() -> Vec<String> {
     ]
 }
 
-/// Reject host argv that would elevate, search PATH, or open a local shell.
-pub fn validate_host_argv(argv: &[String]) -> Result<(), &'static str> {
-    if argv.is_empty() {
-        return Err("empty-argv");
-    }
-    if argv.iter().any(|a| {
-        let base = a.rsplit('/').next().unwrap_or(a);
-        matches!(base, "sudo" | "su" | "osascript" | "sysadminctl")
-    }) {
-        return Err("elevation");
-    }
-    let first = &argv[0];
-    if !first.starts_with('/') {
-        return Err("argv-not-absolute");
-    }
-    if first.ends_with("/tmutil") && argv.iter().any(|a| a == "-p" || a == "-v") {
-        return Err("tmutil-flag");
-    }
-    if first.ends_with("/mdutil") && argv.iter().any(|a| a == "-i") {
-        return Err("mdutil-mutate");
-    }
-    if first.ends_with("/hdiutil")
-        && argv
-            .iter()
-            .any(|a| a.contains("softnet-block") || a.contains("softnet-allow"))
-    {
-        return Err("unexpected-net");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
-    fn create_attach_and_run_match_adr_templates() {
-        let seed = Path::new("/vol/seed");
-        let image = Path::new("/vol/mailbox.sparseimage");
-        let mount = Path::new("/vol/mnt");
-        assert_eq!(
-            hdiutil_create(seed, image),
-            vec![
-                "/usr/bin/hdiutil",
-                "create",
-                "-size",
-                "64m",
-                "-fs",
-                "HFSX",
-                "-type",
-                "SPARSE",
-                "-layout",
-                "NONE",
-                "-volname",
-                "GCU-MAILBOX",
-                "-srcfolder",
-                "/vol/seed",
-                "/vol/mailbox.sparseimage",
-            ]
-        );
-        assert_eq!(
-            hdiutil_attach(mount, image),
-            vec![
-                "/usr/bin/hdiutil",
-                "attach",
-                "-plist",
-                "-noautoopen",
-                "-nobrowse",
-                "-owners",
-                "on",
-                "-mountOptions",
-                "rw,nosuid,noexec,nodev",
-                "-mountpoint",
-                "/vol/mnt",
-                "/vol/mailbox.sparseimage",
-            ]
-        );
-        let tart = Path::new("/Users/eval/bin/tart");
-        assert_eq!(
-            tart_run(tart, "s11-0c-aa", "bbbb", Path::new("/vol/mnt/mailbox")),
-            vec![
-                "/Users/eval/bin/tart",
-                "run",
-                "s11-0c-aa",
-                "--no-graphics",
-                "--net-softnet",
-                "--dir",
-                "bbbb:/vol/mnt/mailbox",
-            ]
-        );
-        let run = tart_run(tart, "n", "s", Path::new("/m"));
-        assert!(!run
-            .iter()
-            .any(|a| a.contains("softnet-block") || a.contains("softnet-allow")));
-        assert!(!tmutil_addexclusion(Path::new("/a"))
-            .iter()
-            .any(|a| a == "-p" || a == "-v"));
-        assert_eq!(
-            mdutil_status(Path::new("/m")),
-            vec!["/usr/bin/mdutil", "-s", "/m"]
-        );
-    }
-
-    #[test]
-    fn ssh_options_cover_the_lab_checklist() {
+    fn closed_set_and_ssh_checklist() {
+        let tart = Path::new("/home/claude/bin/tart");
+        assert!(closed_program(&tart_list(tart)).is_ok());
+        assert!(closed_program(&ssh_keygen(Path::new("/k"))).is_ok());
+        assert!(closed_program(&dscl_users()).is_ok());
+        assert!(closed_program(&["/usr/bin/hdiutil".into(), "info".into()]).is_err());
+        assert!(closed_program(&["/bin/sh".into(), "-c".into()]).is_err());
+        assert!(closed_program(&["/usr/bin/ssh-keyscan".into()]).is_err());
+        assert!(closed_program(&["/usr/bin/sudo".into()]).is_err());
+        assert!(closed_program(&["tart".into(), "list".into()]).is_err());
+        assert!(closed_program(&["/tmp/../bin/tart".into()]).is_err());
+        let run = tart_run(tart, "s11-0c-aa", "bbbb", Path::new("/m"));
+        assert!(run.iter().any(|a| a == "--no-graphics"));
+        assert!(run.iter().any(|a| a == "--net-softnet"));
+        assert!(!run.iter().any(|a| a.contains("softnet-block")));
+        assert_eq!(run.last().map(String::as_str), Some("bbbb:/m"));
         let argv = ssh(
             Path::new("/priv/id"),
             Path::new("/priv/known_hosts"),
@@ -371,41 +191,34 @@ mod tests {
         for needle in [
             "-F",
             "/dev/null",
-            "-i",
-            "/priv/id",
             "UserKnownHostsFile=/priv/known_hosts",
             "GlobalKnownHostsFile=/dev/null",
             "StrictHostKeyChecking=yes",
+            "HostKeyAlgorithms=ssh-ed25519",
             "IdentitiesOnly=yes",
             "IdentityAgent=none",
             "BatchMode=yes",
             "ClearAllForwardings=yes",
             "PreferredAuthentications=publickey",
+            "PubkeyAuthentication=yes",
             "PasswordAuthentication=no",
             "KbdInteractiveAuthentication=no",
+            "NumberOfPasswordPrompts=0",
             "RequestTTY=no",
             "ForwardAgent=no",
             "ForwardX11=no",
+            "ForwardX11Trusted=no",
+            "GatewayPorts=no",
+            "PermitLocalCommand=no",
             "ProxyCommand=none",
             "ProxyJump=none",
             "ConnectTimeout=5",
             "User=eval",
             "-T",
         ] {
-            assert!(joined.contains(needle), "missing {needle}");
+            assert!(joined.contains(needle), "{needle}");
         }
         assert_eq!(argv.last().map(String::as_str), Some("upload C1"));
-        assert!(validate_host_argv(&argv).is_ok());
-        assert_eq!(
-            validate_host_argv(&["sudo".into(), "id".into()]),
-            Err("elevation")
-        );
-        assert_eq!(
-            validate_host_argv(&["tart".into(), "list".into()]),
-            Err("argv-not-absolute")
-        );
-        let mut bad = tmutil_addexclusion(Path::new("/a"));
-        bad.push("-p".into());
-        assert_eq!(validate_host_argv(&bad), Err("tmutil-flag"));
+        assert!(closed_program(&argv).is_ok());
     }
 }

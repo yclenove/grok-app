@@ -1,90 +1,125 @@
-//! Host publish: exclusive temp on the unexported stage, fsync, rename into the slot.
-//! A temp that already exists is a stop, not an in-place write.
+//! Publish via a same-volume staging file and `renameat`. Directory sync errors
+//! are returned.
 
 use std::fs::File;
-use std::io::Write;
-use std::path::Path;
 use std::time::Instant;
 
-use crate::osutil::{self, flag_creat, flag_excl, flag_wronly};
-use crate::slot::{self, SlotError};
+use crate::osutil;
+use crate::slot::{us, SlotError};
 
-#[derive(Clone, Debug)]
-pub struct Times {
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Cursor {
+    pub ino: Option<u64>,
+    pub dev: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PubTimes {
+    pub open_us: u64,
     pub write_us: u64,
     pub fsync_us: u64,
     pub rename_us: u64,
 }
 
-fn us_since(t: Instant) -> u64 {
-    t.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+#[allow(clippy::too_many_arguments)]
+pub fn publish(
+    staging: &File,
+    dest: &File,
+    dest_dev: u64,
+    dest_fsid: Option<[i32; 2]>,
+    tmp_name: &str,
+    final_name: &str,
+    bytes: &[u8],
+    cursor: &mut Cursor,
+    sync_dirs: bool,
+) -> Result<PubTimes, SlotError> {
+    let Some(expect_fsid) = dest_fsid else {
+        return Err(SlotError::FsidUnknown);
+    };
+    if !osutil::component_ok(tmp_name) || !osutil::component_ok(final_name) {
+        return Err(SlotError::Name);
+    }
+    let stage_id = osutil::id_of(staging).map_err(|_| SlotError::Io)?;
+    if stage_id.dev != dest_dev {
+        return Err(SlotError::DevMismatch);
+    }
+    match check_dest(dest, final_name, dest_dev, cursor)? {
+        Dest::Absent | Dest::SameSlot => {}
+    }
+    let t_open = Instant::now();
+    let mut file = osutil::create_0600_at(staging, tmp_name).map_err(|_| SlotError::Io)?;
+    let open_us = us(t_open.elapsed());
+    let t_write = Instant::now();
+    osutil::write_all_fd(&mut file, bytes).map_err(|_| SlotError::Io)?;
+    let write_us = us(t_write.elapsed());
+    let t_sync = Instant::now();
+    osutil::fsync_fd(&file).map_err(|_| SlotError::Io)?;
+    let fsync_us = us(t_sync.elapsed());
+    let src = osutil::id_of(&file).map_err(|_| SlotError::Io)?;
+    if !src.is_reg || src.nlink != 1 || src.dev != dest_dev || src.size != bytes.len() as u64 {
+        let _ = osutil::unlink_at(staging, tmp_name);
+        return Err(SlotError::Replaced);
+    }
+    let src_fsid = osutil::fsid_of(&file).ok_or(SlotError::FsidUnknown)?;
+    if src_fsid != expect_fsid {
+        let _ = osutil::unlink_at(staging, tmp_name);
+        return Err(SlotError::FsidMismatch);
+    }
+    let t_ren = Instant::now();
+    osutil::rename_at(staging, tmp_name, dest, final_name).map_err(|_| SlotError::Io)?;
+    let rename_us = us(t_ren.elapsed());
+    let moved = osutil::id_of(&file).map_err(|_| SlotError::Io)?;
+    let opened = osutil::open_child(dest, final_name).map_err(|_| SlotError::Io)?;
+    let got = osutil::id_of(&opened).map_err(|_| SlotError::Io)?;
+    if !got.is_reg || got.nlink != 1 || !got.same_file(&moved) || got.dev != dest_dev {
+        return Err(SlotError::Replaced);
+    }
+    if sync_dirs {
+        osutil::fsync_fd(dest).map_err(|_| SlotError::Io)?;
+        osutil::fsync_fd(staging).map_err(|_| SlotError::Io)?;
+    }
+    cursor.dev = Some(got.dev);
+    cursor.ino = Some(got.ino);
+    Ok(PubTimes {
+        open_us,
+        write_us,
+        fsync_us,
+        rename_us,
+    })
 }
 
-pub fn publish(
-    stage: &Path,
-    target_dir: &Path,
-    name: &str,
-    bytes: &[u8],
-) -> Result<Times, &'static str> {
-    if !slot::name_ok(name) || name == "probe-result" {
-        return Err("publish-name");
+enum Dest {
+    Absent,
+    SameSlot,
+}
+
+fn check_dest(dest: &File, name: &str, dest_dev: u64, cursor: &Cursor) -> Result<Dest, SlotError> {
+    match osutil::open_child(dest, name) {
+        Err(err) if osutil::is_enoent(&err) => {
+            if cursor.ino.is_some() {
+                return Err(SlotError::Replaced);
+            }
+            Ok(Dest::Absent)
+        }
+        Err(err) if osutil::is_eloop(&err) => Err(SlotError::Symlink),
+        Err(_) => Err(SlotError::Io),
+        Ok(file) => {
+            let id = osutil::id_of(&file).map_err(|_| SlotError::Io)?;
+            if !id.is_reg || id.nlink != 1 || id.dev != dest_dev {
+                return Err(SlotError::Replaced);
+            }
+            match (cursor.dev, cursor.ino) {
+                (None, None) => Err(SlotError::Replaced),
+                (Some(dev), Some(ino)) if id.dev == dev && id.ino == ino => Ok(Dest::SameSlot),
+                _ => Err(SlotError::Replaced),
+            }
+        }
     }
-    if bytes.is_empty() || bytes.len() > 4096 {
-        return Err("publish-size");
-    }
-    let tmp_name = match name {
-        "c1-frame" => "c1-frame.tmp",
-        "c2-frame" => "c2-frame.tmp",
-        _ => return Err("publish-name"),
-    };
-    let stage_file = osutil::open_dir_nofollow(stage).map_err(|_| "stage-open")?;
-    // O_EXCL covers an existing symlink. Darwin rejects O_NOFOLLOW together with O_CREAT.
-    let flags = flag_creat() | flag_excl() | flag_wronly();
-    let started = Instant::now();
-    let mut tmp =
-        osutil::open_at(&stage_file, tmp_name, flags, 0o600).map_err(|_| "stage-create")?;
-    tmp.write_all(bytes).map_err(|_| "stage-write")?;
-    let write_us = us_since(started);
-    let sync_at = Instant::now();
-    tmp.sync_all().map_err(|_| "stage-fsync")?;
-    let fsync_us = us_since(sync_at);
-    let meta = tmp.metadata().map_err(|_| "stage-stat")?;
-    if meta.len() != bytes.len() as u64 {
-        return Err("stage-size");
-    }
-    drop(tmp);
-    let from = stage.join(tmp_name);
-    let to = target_dir.join(name);
-    let rename_at = Instant::now();
-    std::fs::rename(&from, &to).map_err(|_| "rename")?;
-    let rename_us = us_since(rename_at);
-    let _ = File::open(target_dir).and_then(|dir| dir.sync_all());
-    let _ = File::open(stage).and_then(|dir| dir.sync_all());
-    match slot::read_named(target_dir, name, bytes.len() as u64, bytes.len() as u64) {
-        Ok(got) if got == bytes => Ok(Times {
-            write_us,
-            fsync_us,
-            rename_us,
-        }),
-        Ok(_) => Err("torn-readback"),
-        Err(SlotError::Symlink) => Err("symlink"),
-        Err(SlotError::HardLink) => Err("hardlink"),
-        Err(SlotError::Fsid { .. }) => Err("readback-fsid"),
-        Err(SlotError::Replaced) => Err("readback-replaced"),
-        Err(SlotError::Size) => Err("readback-size"),
-        Err(SlotError::NotFile) => Err("readback-notfile"),
-        Err(SlotError::Name) => Err("readback-name"),
-        Err(SlotError::Io { op, .. }) => Err(match op {
-            "open" => "readback-open",
-            "read" => "readback-read",
-            "fstat" => "readback-fstat",
-            "dir-open" => "readback-dir-open",
-            "dir-fstat" => "readback-dir-fstat",
-            "dir-stat" => "readback-dir-stat",
-            "restat" => "readback-restat",
-            "reopen-stat" => "readback-reopen-stat",
-            "lstat" => "readback-lstat",
-            _ => "readback-io",
-        }),
-    }
+}
+
+pub fn sum_pub(t: &PubTimes) -> u64 {
+    t.open_us
+        .saturating_add(t.write_us)
+        .saturating_add(t.fsync_us)
+        .saturating_add(t.rename_us)
 }

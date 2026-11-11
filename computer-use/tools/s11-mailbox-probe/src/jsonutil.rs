@@ -80,6 +80,10 @@ impl Buf {
         self.push_raw(if v { b"true" } else { b"false" });
     }
 
+    pub fn null(&mut self) {
+        self.push_raw(b"null");
+    }
+
     pub fn codes(&mut self, items: &[&str]) {
         self.push_raw(b"[");
         for (i, item) in items.iter().enumerate() {
@@ -391,16 +395,6 @@ impl Limits {
             max_string: 1024,
             max_nodes: 4096,
             max_bytes: 1024 * 1024,
-        }
-    }
-
-    pub fn ledger() -> Self {
-        Self {
-            max_depth: 3,
-            max_array: 8,
-            max_string: 128,
-            max_nodes: 32,
-            max_bytes: 4096,
         }
     }
 }

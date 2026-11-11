@@ -1,412 +1,307 @@
-//! Destructive checklist. Detach and unlink run only when the ledger identity
-//! still matches a complete readback. A miss quarantines and does not delete.
+//! Recorded dev/inode cleanup. Unknown names, links, and mismatches quarantine.
+//! There is no volume DeviceNode path in this probe.
 
-use crate::plist::{self, ImageAttach, Plist};
+use std::fs::File;
+use std::path::Path;
+
+use crate::osutil::{self, Id};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FileId {
+pub struct ObjId {
     pub dev: u64,
     pub ino: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AttachId {
-    pub image_path: String,
-    pub whole: String,
-    pub slice: Option<String>,
-    pub mount: String,
-    pub uuid: String,
-    pub fsid: [u8; 8],
-    pub image: FileId,
-    pub mount_underlying: FileId,
+impl From<&Id> for ObjId {
+    fn from(id: &Id) -> Self {
+        Self {
+            dev: id.dev,
+            ino: id.ino,
+        }
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Destroy {
-    Proceed,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RmdirPlan {
     SkipAbsent,
-    Quarantine { reason: &'static str },
+    Proceed,
+    Quarantine(&'static str),
 }
 
-pub fn decide_detach(
-    recorded: &AttachId,
-    info: &Result<Vec<ImageAttach>, &'static str>,
-    diskutil: &Result<Plist, &'static str>,
-    fsid_now: Option<[u8; 8]>,
-) -> Destroy {
-    if !plist::whole_disk(&recorded.whole) || recorded.uuid.is_empty() {
-        return Destroy::Quarantine {
-            reason: "identity-incomplete",
-        };
+/// A directory is removed only when it is empty and still the recorded inode.
+/// A replacement inode is not removed.
+pub fn decide_rmdir(found: Option<ObjId>, recorded: ObjId, children: usize) -> RmdirPlan {
+    match found {
+        None => RmdirPlan::SkipAbsent,
+        Some(id) if id == recorded && children == 0 => RmdirPlan::Proceed,
+        Some(id) if id == recorded => RmdirPlan::Quarantine("dir-not-empty"),
+        Some(_) => RmdirPlan::Quarantine("identity-mismatch"),
     }
-    let images = match info {
-        Ok(images) => images,
-        Err(_) => {
-            return Destroy::Quarantine {
-                reason: "readback-incomplete",
+}
+
+#[derive(Clone, Debug)]
+pub struct Rec {
+    pub parent_path: String,
+    pub parent_dev: u64,
+    pub parent_ino: u64,
+    pub name: String,
+    pub dev: u64,
+    pub ino: u64,
+    pub is_dir: bool,
+    /// Mailbox directories the guest writes into are retained on purpose.
+    pub retain: bool,
+}
+
+pub struct Tree {
+    pub items: Vec<Rec>,
+}
+
+impl Tree {
+    pub fn new() -> Self {
+        Self { items: Vec::new() }
+    }
+
+    pub fn record_dir(
+        &mut self,
+        parent: &osutil::Held,
+        parent_path: &Path,
+        name: &str,
+        file: &File,
+        retain: bool,
+    ) -> Result<(), &'static str> {
+        let id = osutil::id_of(file).map_err(|_| "record")?;
+        if !id.is_dir {
+            return Err("record");
+        }
+        self.items.push(Rec {
+            parent_path: parent_path.display().to_string(),
+            parent_dev: parent.dev,
+            parent_ino: parent.ino,
+            name: name.to_string(),
+            dev: id.dev,
+            ino: id.ino,
+            is_dir: true,
+            retain,
+        });
+        Ok(())
+    }
+
+    pub fn record_file(
+        &mut self,
+        parent: &osutil::Held,
+        parent_path: &Path,
+        name: &str,
+        file: &File,
+    ) -> Result<(), &'static str> {
+        let id = osutil::id_of(file).map_err(|_| "record")?;
+        if !id.is_reg || id.nlink != 1 {
+            return Err("record");
+        }
+        self.items.push(Rec {
+            parent_path: parent_path.display().to_string(),
+            parent_dev: parent.dev,
+            parent_ino: parent.ino,
+            name: name.to_string(),
+            dev: id.dev,
+            ino: id.ino,
+            is_dir: false,
+            retain: false,
+        });
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChildKind {
+    File(ObjId),
+    Dir(ObjId),
+    Link,
+    Other,
+}
+
+fn classify_child(parent: &File, name: &str) -> Result<ChildKind, &'static str> {
+    match osutil::open_child(parent, name) {
+        Err(err) if osutil::is_eloop(&err) => Ok(ChildKind::Link),
+        Err(err) if osutil::is_enoent(&err) => Err("absent"),
+        Err(err) if osutil::is_eacces(&err) => Err("eacces"),
+        Err(_) => Ok(ChildKind::Other),
+        Ok(file) => {
+            let id = osutil::id_of(&file).map_err(|_| "stat")?;
+            let obj = ObjId::from(&id);
+            if id.is_dir {
+                Ok(ChildKind::Dir(obj))
+            } else if id.is_reg {
+                Ok(ChildKind::File(obj))
+            } else {
+                Ok(ChildKind::Other)
             }
         }
-    };
-    let Some(hit) = images
+    }
+}
+
+fn reopen_parent(rec: &Rec) -> Result<osutil::Held, &'static str> {
+    let held = osutil::verify_private_leaf(Path::new(&rec.parent_path))?;
+    if held.dev != rec.parent_dev || held.ino != rec.parent_ino {
+        return Err("parent-identity");
+    }
+    Ok(held)
+}
+
+/// Delete only recorded names under directories this run marked removable.
+/// Any unknown entry, symlink, or identity mismatch leaves that directory
+/// untouched and returns quarantine. This never walks recursively.
+pub fn cleanup(tree: &Tree) -> Result<(), &'static str> {
+    let dirs: Vec<&Rec> = tree
+        .items
         .iter()
-        .find(|img| img.image_path == recorded.image_path)
-    else {
-        return Destroy::Quarantine {
-            reason: "readback-incomplete",
-        };
+        .filter(|r| r.is_dir && !r.retain)
+        .collect();
+    for dir in dirs.into_iter().rev() {
+        clean_one_dir(tree, dir)?;
+    }
+    Ok(())
+}
+
+fn clean_one_dir(tree: &Tree, dir: &Rec) -> Result<(), &'static str> {
+    let parent = reopen_parent(dir)?;
+    let opened = match osutil::open_child_dir(&parent.file, &dir.name) {
+        Err(err) if osutil::is_enoent(&err) => return Ok(()),
+        Err(err) if osutil::is_eloop(&err) => return Err("symlink"),
+        Err(_) => return Err("open-dir"),
+        Ok(file) => file,
     };
-    if hit.whole != recorded.whole {
-        return Destroy::Quarantine {
-            reason: "identity-mismatch",
-        };
+    let id = osutil::id_of(&opened).map_err(|_| "stat")?;
+    if id.dev != dir.dev || id.ino != dir.ino {
+        return Err("identity-mismatch");
     }
-    if hit.mount.as_deref() != Some(recorded.mount.as_str()) && hit.mount.is_some() {
-        return Destroy::Quarantine {
-            reason: "identity-mismatch",
+    let recorded: Vec<&Rec> = tree
+        .items
+        .iter()
+        .filter(|r| r.parent_dev == dir.dev && r.parent_ino == dir.ino)
+        .collect();
+    let dir_path = Path::new(&dir.parent_path).join(&dir.name);
+    let entries = std::fs::read_dir(&dir_path).map_err(|_| "read-dir")?;
+    let mut names = Vec::new();
+    for ent in entries {
+        let ent = ent.map_err(|_| "read-dir")?;
+        let name = ent.file_name();
+        let Some(name) = name.to_str() else {
+            return Err("unknown-entry");
         };
+        if !osutil::component_ok(name) {
+            return Err("unknown-entry");
+        }
+        names.push(name.to_string());
     }
-    let doc = match diskutil {
-        Ok(doc) => doc,
-        Err(_) => {
-            return Destroy::Quarantine {
-                reason: "readback-incomplete",
+    for name in &names {
+        if !recorded.iter().any(|r| r.name == *name) {
+            return Err("unknown-entry");
+        }
+        match classify_child(&opened, name) {
+            Ok(ChildKind::Link) | Ok(ChildKind::Other) => return Err("unknown-entry"),
+            Err("eacces") => return Err("eacces"),
+            Err("absent") => {}
+            Ok(ChildKind::File(obj)) | Ok(ChildKind::Dir(obj)) => {
+                let rec = recorded.iter().find(|r| r.name == *name).unwrap();
+                if obj.dev != rec.dev || obj.ino != rec.ino {
+                    return Err("identity-mismatch");
+                }
+                if rec.is_dir != matches!(classify_child(&opened, name), Ok(ChildKind::Dir(_))) {
+                    return Err("identity-mismatch");
+                }
             }
-        }
-    };
-    let uuid = doc.get("VolumeUUID").and_then(Plist::string).unwrap_or("");
-    let node = doc.get("DeviceNode").and_then(Plist::string).unwrap_or("");
-    if uuid.is_empty() || node.is_empty() {
-        return Destroy::Quarantine {
-            reason: "readback-incomplete",
-        };
-    }
-    if uuid != recorded.uuid {
-        return Destroy::Quarantine {
-            reason: "identity-mismatch",
-        };
-    }
-    let node_ok = node == recorded.whole || recorded.slice.as_deref() == Some(node);
-    if !node_ok {
-        return Destroy::Quarantine {
-            reason: "identity-mismatch",
-        };
-    }
-    match fsid_now {
-        Some(id) if id == recorded.fsid => Destroy::Proceed,
-        _ => Destroy::Quarantine {
-            reason: "fsid-mismatch",
-        },
-    }
-}
-
-pub struct UnlinkView<'a> {
-    pub info: &'a Result<Vec<ImageAttach>, &'static str>,
-    pub mount_text: &'a Result<String, &'static str>,
-    pub image_now: Option<FileId>,
-    pub image_missing: bool,
-}
-
-pub fn decide_unlink(recorded: &AttachId, view: &UnlinkView<'_>) -> Destroy {
-    let images = match view.info {
-        Ok(images) => images,
-        Err(_) => {
-            return Destroy::Quarantine {
-                reason: "readback-incomplete",
-            }
-        }
-    };
-    let mentioned = images.iter().any(|img| {
-        img.image_path == recorded.image_path
-            || img.whole == recorded.whole
-            || recorded
-                .slice
-                .as_ref()
-                .is_some_and(|s| img.slice.as_ref() == Some(s) || img.whole == *s)
-    });
-    if mentioned {
-        return Destroy::Quarantine {
-            reason: "possibly-attached",
-        };
-    }
-    let mount = match view.mount_text {
-        Ok(text) => text,
-        Err(_) => {
-            return Destroy::Quarantine {
-                reason: "readback-incomplete",
-            }
-        }
-    };
-    if mount_contains(mount, &recorded.mount) {
-        return Destroy::Quarantine {
-            reason: "possibly-attached",
-        };
-    }
-    if view.image_missing {
-        return Destroy::SkipAbsent;
-    }
-    match view.image_now {
-        Some(id) if id == recorded.image => Destroy::Proceed,
-        Some(_) => Destroy::Quarantine {
-            reason: "identity-mismatch",
-        },
-        None => Destroy::Quarantine {
-            reason: "readback-incomplete",
-        },
-    }
-}
-
-pub fn decide_unlink_unattached(
-    recorded: &FileId,
-    info: &Result<Vec<ImageAttach>, &'static str>,
-    image_path: &str,
-    now: Option<FileId>,
-    missing: bool,
-) -> Destroy {
-    let images = match info {
-        Ok(images) => images,
-        Err(_) => {
-            return Destroy::Quarantine {
-                reason: "readback-incomplete",
-            }
-        }
-    };
-    if images.iter().any(|img| img.image_path == image_path) {
-        return Destroy::Quarantine {
-            reason: "possibly-attached",
-        };
-    }
-    if missing {
-        return Destroy::SkipAbsent;
-    }
-    match now {
-        Some(id) if id == *recorded => Destroy::Proceed,
-        Some(_) => Destroy::Quarantine {
-            reason: "identity-mismatch",
-        },
-        None => Destroy::Quarantine {
-            reason: "readback-incomplete",
-        },
-    }
-}
-
-pub fn decide_rmdir(recorded: FileId, now: Option<FileId>, empty: bool) -> Destroy {
-    match now {
-        None => Destroy::SkipAbsent,
-        Some(id) if id == recorded && empty => Destroy::Proceed,
-        Some(id) if id == recorded && !empty => Destroy::Quarantine {
-            reason: "dir-not-empty",
-        },
-        Some(_) => Destroy::Quarantine {
-            reason: "identity-mismatch",
-        },
-    }
-}
-
-/// Exact mount-point match. Our paths contain no spaces.
-pub fn mount_contains(table: &str, mount: &str) -> bool {
-    if mount.is_empty() || mount.contains(' ') || mount.contains('\t') {
-        return true;
-    }
-    for line in table.lines() {
-        let Some((_, rest)) = line.split_once(" on ") else {
-            continue;
-        };
-        let point = rest.split(" (").next().unwrap_or("");
-        if point == mount {
-            return true;
+            Err(_) => return Err("stat"),
         }
     }
-    false
-}
-
-pub fn mount_flags(table: &str, mount: &str) -> Option<Vec<String>> {
-    for line in table.lines() {
-        let Some((_, rest)) = line.split_once(" on ") else {
-            continue;
-        };
-        let mut parts = rest.split(" (");
-        let point = parts.next().unwrap_or("");
-        if point != mount {
+    for rec in &recorded {
+        if rec.is_dir {
             continue;
         }
-        let flags = parts.next().unwrap_or("").trim_end_matches(')');
-        return Some(
-            flags
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
-        );
+        match classify_child(&opened, &rec.name) {
+            Err("absent") => {}
+            Ok(ChildKind::File(obj)) if obj.dev == rec.dev && obj.ino == rec.ino => {
+                osutil::unlink_at(&opened, &rec.name).map_err(|_| "unlink")?;
+            }
+            Ok(_) => return Err("identity-mismatch"),
+            Err("eacces") => return Err("eacces"),
+            Err(_) => return Err("unlink"),
+        }
     }
-    None
-}
-
-pub fn flags_have(flags: &[String], need: &[&str]) -> bool {
-    need.iter().all(|n| flags.iter().any(|f| f == n))
-}
-
-pub fn excluded_exact(stdout: &str, path: &str) -> bool {
-    stdout.lines().any(|line| {
-        let line = line.trim();
-        line.starts_with("[Excluded]") && line.split_whitespace().any(|tok| tok == path)
-    }) && !stdout
-        .lines()
-        .any(|line| line.contains("[Included]") && line.split_whitespace().any(|tok| tok == path))
+    let remaining = std::fs::read_dir(&dir_path)
+        .map_err(|_| "read-dir")?
+        .count();
+    let found = match osutil::open_child_dir(&parent.file, &dir.name) {
+        Err(err) if osutil::is_enoent(&err) => None,
+        Err(_) => return Err("open-dir"),
+        Ok(file) => {
+            let id = osutil::id_of(&file).map_err(|_| "stat")?;
+            Some(ObjId {
+                dev: id.dev,
+                ino: id.ino,
+            })
+        }
+    };
+    match decide_rmdir(
+        found,
+        ObjId {
+            dev: dir.dev,
+            ino: dir.ino,
+        },
+        remaining,
+    ) {
+        RmdirPlan::SkipAbsent => Ok(()),
+        RmdirPlan::Proceed => osutil::unlink_dir_at(&parent.file, &dir.name).map_err(|_| "rmdir"),
+        RmdirPlan::Quarantine(reason) => Err(reason),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn recorded() -> AttachId {
-        AttachId {
-            image_path: "/vol/mailbox.sparseimage".into(),
-            whole: "/dev/disk4".into(),
-            slice: Some("/dev/disk4s1".into()),
-            mount: "/vol/mnt".into(),
-            uuid: "UUID-1".into(),
-            fsid: [1, 2, 3, 4, 5, 6, 7, 8],
-            image: FileId { dev: 9, ino: 10 },
-            mount_underlying: FileId { dev: 3, ino: 4 },
-        }
-    }
-
-    fn image() -> ImageAttach {
-        ImageAttach {
-            image_path: "/vol/mailbox.sparseimage".into(),
-            whole: "/dev/disk4".into(),
-            slice: Some("/dev/disk4s1".into()),
-            mount: Some("/vol/mnt".into()),
-        }
-    }
-
-    fn diskutil() -> Plist {
-        Plist::Dict(vec![
-            ("VolumeUUID".into(), Plist::String("UUID-1".into())),
-            ("DeviceNode".into(), Plist::String("/dev/disk4s1".into())),
-        ])
-    }
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
-    fn mismatch_or_incomplete_readback_does_not_detach_or_unlink() {
-        let rec = recorded();
+    fn replacement_directory_is_not_removed() {
+        let recorded = ObjId { dev: 1, ino: 2 };
+        assert_eq!(decide_rmdir(None, recorded, 0), RmdirPlan::SkipAbsent);
         assert_eq!(
-            decide_detach(&rec, &Ok(vec![image()]), &Ok(diskutil()), Some(rec.fsid)),
-            Destroy::Proceed
-        );
-        let mut bad = diskutil();
-        if let Plist::Dict(pairs) = &mut bad {
-            pairs[0].1 = Plist::String("UUID-2".into());
-        }
-        assert_eq!(
-            decide_detach(&rec, &Ok(vec![image()]), &Ok(bad), Some(rec.fsid)),
-            Destroy::Quarantine {
-                reason: "identity-mismatch"
-            }
+            decide_rmdir(Some(recorded), recorded, 0),
+            RmdirPlan::Proceed
         );
         assert_eq!(
-            decide_detach(&rec, &Err("plist-limit"), &Ok(diskutil()), Some(rec.fsid)),
-            Destroy::Quarantine {
-                reason: "readback-incomplete"
-            }
+            decide_rmdir(Some(recorded), recorded, 1),
+            RmdirPlan::Quarantine("dir-not-empty")
         );
         assert_eq!(
-            decide_detach(&rec, &Ok(vec![image()]), &Ok(diskutil()), None),
-            Destroy::Quarantine {
-                reason: "fsid-mismatch"
-            }
-        );
-
-        let empty: Result<Vec<ImageAttach>, &'static str> = Ok(vec![]);
-        let mount_ok = Ok("/dev/disk1 on / (apfs, local)\n".to_string());
-        assert_eq!(
-            decide_unlink(
-                &rec,
-                &UnlinkView {
-                    info: &empty,
-                    mount_text: &mount_ok,
-                    image_now: Some(rec.image),
-                    image_missing: false,
-                }
-            ),
-            Destroy::Proceed
-        );
-        let still = Ok(vec![image()]);
-        assert_eq!(
-            decide_unlink(
-                &rec,
-                &UnlinkView {
-                    info: &still,
-                    mount_text: &mount_ok,
-                    image_now: Some(rec.image),
-                    image_missing: false,
-                }
-            ),
-            Destroy::Quarantine {
-                reason: "possibly-attached"
-            }
-        );
-        let mounted =
-            Ok("/dev/disk4s1 on /vol/mnt (hfs, local, nodev, nosuid, noexec, rw)\n".into());
-        assert_eq!(
-            decide_unlink(
-                &rec,
-                &UnlinkView {
-                    info: &empty,
-                    mount_text: &mounted,
-                    image_now: Some(rec.image),
-                    image_missing: false,
-                }
-            ),
-            Destroy::Quarantine {
-                reason: "possibly-attached"
-            }
-        );
-        let other = FileId { dev: 1, ino: 2 };
-        assert_eq!(
-            decide_unlink(
-                &rec,
-                &UnlinkView {
-                    info: &empty,
-                    mount_text: &mount_ok,
-                    image_now: Some(other),
-                    image_missing: false,
-                }
-            ),
-            Destroy::Quarantine {
-                reason: "identity-mismatch"
-            }
-        );
-        assert_eq!(
-            decide_unlink(
-                &rec,
-                &UnlinkView {
-                    info: &Err("overflow"),
-                    mount_text: &mount_ok,
-                    image_now: None,
-                    image_missing: true,
-                }
-            ),
-            Destroy::Quarantine {
-                reason: "readback-incomplete"
-            }
-        );
-        assert_eq!(
-            decide_rmdir(rec.mount_underlying, Some(rec.mount_underlying), false),
-            Destroy::Quarantine {
-                reason: "dir-not-empty"
-            }
+            decide_rmdir(Some(ObjId { dev: 1, ino: 9 }), recorded, 0),
+            RmdirPlan::Quarantine("identity-mismatch")
         );
     }
 
     #[test]
-    fn mount_flags_and_exclusion_are_exact() {
-        let table = "/dev/disk4s1 on /vol/mnt (hfs, local, nodev, nosuid, noexec, rw)\n";
-        let flags = mount_flags(table, "/vol/mnt").unwrap();
-        assert!(flags_have(&flags, &["rw", "nosuid", "noexec", "nodev"]));
-        assert!(!mount_contains(table, "/vol/mnt-other"));
-        assert!(excluded_exact("[Excluded] /vol/a\n", "/vol/a"));
-        assert!(!excluded_exact("[Included] /vol/a\n", "/vol/a"));
-        assert!(!excluded_exact("Excluded /vol/a\n", "/vol/a"));
+    fn unknown_canary_quarantines_and_is_left_in_place() {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let root = Path::new(&std::env::var("HOME").unwrap())
+            .join(format!(".s11m2a-id-{}-{n}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let parent = osutil::verify_private_leaf(&root).unwrap();
+        let dirf = osutil::mkdir_0700_at(&parent.file, "stage").unwrap();
+        let mut tree = Tree::new();
+        tree.record_dir(&parent, &root, "stage", &dirf, false)
+            .unwrap();
+        std::fs::write(root.join("stage").join("canary"), b"keep").unwrap();
+        let err = cleanup(&tree).unwrap_err();
+        assert_eq!(err, "unknown-entry");
+        assert_eq!(
+            std::fs::read(root.join("stage").join("canary")).unwrap(),
+            b"keep"
+        );
+        assert!(root.join("stage").is_dir());
+        let _ = std::fs::remove_file(root.join("stage").join("canary"));
+        let _ = std::fs::remove_dir(root.join("stage"));
+        let _ = std::fs::remove_dir(&root);
     }
 }
