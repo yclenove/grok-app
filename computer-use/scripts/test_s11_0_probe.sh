@@ -262,7 +262,7 @@ setup() {
   export PATH="$ROOT/bin:$SYS"
   export TMPDIR=$CASE/tmp
   export S11_START_SEC=0
-  unset BASH_ENV S11_XTRACE S11_BOUND_SEC S11_BOUND_POLLS S11_FORCE_NAME S11_PROBE_BUDGET S11_CLEANUP_BUDGET
+  unset BASH_ENV S11_XTRACE S11_BOUND_SEC S11_BOUND_POLLS S11_FORCE_NAME S11_PROBE_BUDGET S11_CLEANUP_BUDGET S11_REAP_POLLS S11_FAIL_ROW_N S11_FAIL_STAGE S11_PROBE_MODE
   ARGS=(--ssh-key "$CASE/id_key" --tart-home "$CASE/thome" --out "$CASE/out")
 }
 
@@ -390,7 +390,7 @@ static_checks() {
   bash -n "$HERE/test_s11_0_probe.sh"
   local n
   n=$(wc -l <"$PROBE" | tr -d ' ')
-  [[ "$n" -lt 1250 ]] || die "probe has $n lines"
+  [[ "$n" -lt 1470 ]] || die "probe has $n lines"
   [[ "$(head -n 1 "$PROBE")" == '#!/bin/bash' ]] || die "shebang"
   local pat
   for pat in 'mapfile' 'declare -A' 'readarray' 'readlink -f' 'ioreg' 'system_profiler' 'wait -n'; do
@@ -1186,18 +1186,42 @@ while [[ $# -gt 0 ]]; do
     *) shift ;;
   esac
 done
+mode=${S11_PROBE_MODE:-}
+peer=1
+[[ "$cmd" == writer ]] && peer=0
+[[ "$mode" == peer0 && "$cmd" == reader ]] && peer=0
+digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+latency=measured
+[[ "$mode" == unmeasured ]] && latency=not_measured
+line=""
 case "$cmd" in
   writer|reader)
-    printf 'v=1 op=c1 role=%s verdict=ok reason=- n=8 torn=0 lost=0 open_us=1 write_us=1 fsync_us=1 rename_us=1 dir_sync_us=1 read_us=1 peer=1 digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' "$role" >"$dir/result-$role"
+    line="v=1 op=c1 role=${role} verdict=ok reason=- n=8 torn=0 lost=0 integrity=ok latency=${latency} vis_us=1 rtt_us=1 slice_us=1 w_slice_us=1 open_us=1 write_us=1 fsync_us=1 rename_us=1 dir_sync_us=1 read_us=1 peer=${peer} digest=${digest}"
     ;;
   c2)
-    printf 'v=1 op=c2 role=%s boundary=%s verdict=not-ack reason=- planned=3 attempted=3 renamed=2 visible=2 part=ok dir_synced=0\n' "$role" "$boundary" >"$dir/result-$role"
+    line="v=1 op=c2 role=${role} boundary=${boundary} verdict=not-ack reason=- planned=3 attempted=3 renamed=2 visible=2 part=ok dir_synced=0"
     ;;
   c8)
-    printf 'v=1 op=c8 role=%s verdict=unknown reason=single-principal n=1 ops=0 created=0 elevated=0\n' "$role" >"$dir/result-$role"
+    line="v=1 op=c8 role=${role} verdict=unknown reason=single-principal n=1 ops=0 created=0 elevated=0"
     ;;
 esac
+if [[ "$mode" == nonewline ]]; then
+  printf '%s' "$line" >"$dir/result-$role"
+else
+  printf '%s\n' "$line" >"$dir/result-$role"
+  [[ "$mode" == dup ]] && printf '%s\n' "$line" >>"$dir/result-$role"
+fi
 if [[ -f "${S11_STUB_ROOT:-}/plant_unknown" ]]; then printf 'x\n' >"$dir/pwned"; fi
+if [[ -f "${S11_STUB_ROOT:-}/plant_nl" ]]; then
+  nlname=$(printf 'result-host\nX')
+  nlname=${nlname%X}
+  printf 'x' >"$dir/$nlname"
+fi
+if [[ "$mode" == hold && "$cmd" == writer ]]; then
+  echo $$ >"${S11_STUB_ROOT:?}/target.pid"
+  trap '' TERM
+  while true; do sleep 0.2; done
+fi
 exit 0
 EOF
   chmod 700 "$ROOT/bin/s11probe"
@@ -1374,6 +1398,153 @@ EOF
   [[ ! -f "$CASE/out/report.json" ]] || die "report published"
 }
 
+m_stage() {
+  [[ -n "$PYTHON" ]] || die "need python"
+  "$PYTHON" - "$CASE/out/report.json" "$@" <<'PY'
+import json, sys
+path, expr = sys.argv[1], sys.argv[2]
+r = json.load(open(path))
+stage = [s for s in r["stages"] if s["stage"] == "M"][0]
+ns = {"stage": stage, "report": r, "cases": stage["cases"], "len": len, "any": any, "all": all}
+if not eval(expr, {"__builtins__": {}}, ns):
+    raise SystemExit("fail " + expr + " " + json.dumps(stage)[:500])
+PY
+}
+
+test_record_eof_rejected() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_PROBE_MODE=nonewline
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  m_stage 'cases[0]["verdict"] != "ok"'
+}
+
+test_record_dup_rejected() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_PROBE_MODE=dup
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  m_stage 'cases[0]["verdict"] != "ok"'
+}
+
+test_peer0_is_not_reader_ok() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_PROBE_MODE=peer0
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  m_stage 'cases[0]["verdict"] != "ok" and cases[0]["reason"] != "-"'
+}
+
+test_killed_after_ok_is_not_success() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_PROBE_MODE=hold S11_BOUND_POLLS=30
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  m_stage 'cases[0]["verdict"] == "unknown" and cases[0]["reason"] == "deadline" and stage["verdict"] != "ok"'
+}
+
+test_reap_abandon() {
+  setup
+  touch "$ROOT/hang_list_ignore"
+  export S11_REAP_POLLS=0 S11_BOUND_POLLS=4
+  run_probe 8 --stage A "${ARGS[@]}"
+  need_ec 2
+  common_end
+  need_reason list-timeout
+  no_clone_ops
+}
+
+test_c8_newline_name_quarantine_exit_5() {
+  setup
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/plant_nl"
+  run_probe 20 --stage M --case C8 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  need_reason single-principal
+  m_stage 'cases[0]["verdict"] == "unknown" and cases[0]["reason"] == "single-principal" and cases[0]["export_state"] == "quarantine"'
+  "$PYTHON" - "$CASE/out" <<'PY' || die "newline name"
+import os, sys
+found = False
+for root, dirs, files in os.walk(sys.argv[1]):
+    for name in files:
+        if "\n" in name:
+            found = True
+if not found:
+    raise SystemExit("newline name missing")
+PY
+  cmp -s "$ROOT/inventory" "$ROOT/inventory.orig" || die "inventory"
+}
+
+test_c2_row_loss_is_not_success() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_FAIL_ROW_N=2
+  run_probe 25 --stage M --case C2 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  m_stage 'stage["verdict"] != "not-ack" or len(cases) != 3 or any(c["verdict"] != "not-ack" for c in cases)'
+  [[ -f "$CASE/out/report.json" ]] || die "report missing"
+}
+
+test_stage_write_fails_nonzero() {
+  setup
+  write_pinned
+  export S11_FAIL_STAGE=1
+  run_probe 12 --dry-run --stage M --case C1 --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 2
+  grep -F -q 'report-write-failed' "$CASE/stderr" || die "no report-write-failed"
+  [[ ! -f "$CASE/out/report.json" ]] || die "report published"
+}
+
+test_share_path_with_space() {
+  setup
+  write_pinned
+  rm -rf "$CASE/out"
+  run_probe 8 --dry-run --stage M --case C1 --pinned-host-key "$CASE/pinned" \
+    --ssh-key "$CASE/id_key" --tart-home "$CASE/thome" --out "$CASE/lab results"
+  need_ec 0
+  [[ -f "$CASE/lab results/report.json" ]] || die "no report"
+  "$PYTHON" - "$CASE/lab results/report.json" <<'PY' || die "share dropped"
+import json, sys
+r = json.load(open(sys.argv[1]))
+stage = [s for s in r["stages"] if s["stage"] == "M"][0]
+argv = stage["cases"][0]["argv"]
+hits = [a for a in argv if a.startswith("s11mbx:") and "lab results" in a and "mailbox" in a]
+if len(hits) != 1:
+    raise SystemExit(repr(argv))
+PY
+}
+
+test_stop_unproven_quarantine() {
+  setup
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/fail_stop"
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  [[ ! -f "$ROOT/delete.args" ]] || die "deleted unproven vm"
+  m_stage 'cases[0]["verdict"] == "ok" and cases[0]["export_state"] == "quarantine" and cases[0]["cleanup"]["absent"] == "unknown"'
+  find "$CASE/out" -name result-host -print | grep -q . || die "result removed"
+}
+
 test_stage_m_usage() {
   setup
   run_probe 6 --stage M "${ARGS[@]}"
@@ -1436,5 +1607,15 @@ run_case stage-m-quarantine test_stage_m_quarantine
 run_case stage-m-not-sole test_stage_m_not_sole
 run_case stage-m-report test_stage_m_report_write
 run_case stage-m-usage test_stage_m_usage
+run_case record-eof test_record_eof_rejected
+run_case record-dup test_record_dup_rejected
+run_case peer0 test_peer0_is_not_reader_ok
+run_case killed-after-ok test_killed_after_ok_is_not_success
+run_case reap-abandon test_reap_abandon
+run_case c8-newline-quarantine test_c8_newline_name_quarantine_exit_5
+run_case c2-row-loss test_c2_row_loss_is_not_success
+run_case stage-write-fail test_stage_write_fails_nonzero
+run_case share-space test_share_path_with_space
+run_case stop-unproven test_stop_unproven_quarantine
 echo "ALL_OK ${SECONDS}s"
-[[ "$SECONDS" -lt 55 ]] || { echo "suite took ${SECONDS}s" >&2; exit 1; }
+[[ "$SECONDS" -lt 60 ]] || { echo "suite took ${SECONDS}s" >&2; exit 1; }

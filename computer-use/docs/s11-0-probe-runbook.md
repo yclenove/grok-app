@@ -107,6 +107,8 @@ C2 对 `file-sync`、`dir-sync`、`rename` 各起一台新 clone。每个边界�
 
 结束时只删除脚本自己创建的已知文件名，空目录用 `rmdir`。出现未知名字或符号链接时，一个都不删，整目录留存并记 `quarantine`，退出码非零。不递归删除。白名单里的客机帧可以留下，状态记 `retained`，这不是 quarantine。报告没写成功时，脚本非零退出（测量本来可以是 0 时，退出码是 2）。
 
+阶段 M 在 quarantine（含审计超量、超时、未证明 VM 已退出）时退出码是 5，即使采集结果同时是 unknown；测量原因仍留在该 case 行。A/B/C 仍是采集失败优先于清理失败。
+
 测量二进制是 `tools/s11-mailbox-probe`。它只接收目录、角色和计数/超时，子命令是 `writer`、`reader`、`c2 <boundary>`、`c8`。文件操作走目录 fd。它不负责 VM 或 SSH。
 
 ## 桩测试
