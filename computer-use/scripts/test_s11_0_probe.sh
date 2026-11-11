@@ -114,20 +114,25 @@ install_templates() {
     'ignore_term() { echo $$ >"$ROOT/target.pid"; trap '"'"'echo TERM >>"$ROOT/term.log"'"'"' TERM; trap "" PIPE; while true; do sleep 0.2; done; }' \
     'overflow_ignore() { echo $$ >"$ROOT/target.pid"; trap '"'"'echo TERM >>"$ROOT/term.log"'"'"' TERM; trap "" XFSZ PIPE; i=0; while [[ $i -lt 1500 ]]; do printf "%s\n" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; i=$((i+1)); done; while true; do sleep 0.2; done; }' \
     'has() { awk -v s="$1" '"'"'$1==s{f=1} END{exit !f}'"'"' "$INV"; }' \
-    'show_list() { printf "%-8s%-48s%-12s%-22s%-9s%s\n" Source Name "Disk Size" Accessed Running State; while read -r n st; do [[ -n "$n" ]] || continue; printf "%-8s%-48s%-12s%-22s%-9s%s\n" local "$n" "64 GB" "2026-10-01 09:00:00" no "$st"; done <"$INV"; }' \
+    'emit_vm() { local run=false; case "$2" in running|Running|RUNNING) run=true ;; esac; printf "  {\n    \"Size\" : 35,\n    \"Disk\" : 50,\n    \"Source\" : \"local\",\n    \"State\" : \"%s\",\n    \"Name\" : \"%s\",\n    \"Running\" : %s,\n    \"Accessed\" : \"2026-10-31T17:13:29Z\"\n" "$2" "$1" "$run"; }' \
+    'show_list() { : >"$ROOT/names.rows"; while read -r n st; do [[ -n "$n" ]] || continue; printf "%s %s\n" "$n" "$st" >>"$ROOT/names.rows"; done <"$INV"; [[ -f "$ROOT/list_collide" ]] && printf "%s %s\n" "s11-0-probe-A-${PPID}-deadbeef" stopped >>"$ROOT/names.rows"; count=$(wc -l <"$ROOT/names.rows" | tr -d " "); if [[ "$count" -eq 0 ]]; then printf "[]\n"; return 0; fi; printf "[\n"; i=0; while read -r n st; do i=$((i+1)); emit_vm "$n" "$st"; if [[ "$i" -lt "$count" ]]; then printf "  },\n"; else printf "  }\n"; fi; done <"$ROOT/names.rows"; printf "]\n"; }' \
     'cmd=${1:-}; shift || true' \
     'case "$cmd" in' \
     '  --version) [[ -f "$ROOT/bg_hold" ]] && { sleep 30 & echo $! >"$ROOT/bg.pid"; echo "stub-tart 0"; exit 0; }; [[ -f "$ROOT/hang_version" ]] && hang; echo "stub-tart 0"; exit 0 ;;' \
     '  --help) [[ -f "$ROOT/fail_help" ]] && exit 1; printf "%s\n" "commands: clone list run stop delete ip exec"; exit 0 ;;' \
     '  list)' \
+    '    [[ "${1:-}" == "--format" && "${2:-}" == json ]] || exit 2' \
+    '    shift 2' \
     '    [[ -f "$ROOT/hang_list" ]] && hang' \
     '    [[ -f "$ROOT/hang_list_ignore" ]] && ignore_term' \
     '    [[ -f "$ROOT/overflow_list" ]] && overflow_ignore' \
     '    [[ -f "$ROOT/hang_list_after_delete" && -s "$ROOT/delete.args" && ! -f "$ROOT/list_hung" ]] && { touch "$ROOT/list_hung"; hang; }' \
-    '    [[ -f "$ROOT/list_empty" ]] && exit 0' \
-    '    [[ -f "$ROOT/list_no_header" ]] && { printf "%s\n" "local only-a-row 64 GB x no stopped"; exit 0; }' \
-    '    [[ -f "$ROOT/list_trunc" ]] && { printf "%-8s%-48s%-12s%-22s%-9s%s\n" Source Name "Disk Size" Accessed Running State; printf "%s\n" "local   cut"; exit 0; }' \
-    '    [[ -f "$ROOT/list_running_only" ]] && { printf "%-8s%-48s%-12s%-22s%s\n" Source Name "Disk Size" Accessed Running; while read -r n st; do [[ -n "$n" ]] || continue; printf "%-8s%-48s%-12s%-22s%s\n" local "$n" "64 GB" "2026-10-01 09:00:00" no; done <"$INV"; exit 0; }' \
+    '    [[ -f "$ROOT/list_void" ]] && exit 0' \
+    '    [[ -f "$ROOT/list_trunc" ]] && { printf "%s\n" "[" "  {" "    \"Name\" : \"macos-s2-eval\"," "    \"State\" : \"stopped\"" "  }"; exit 0; }' \
+    '    [[ -f "$ROOT/list_no_state" ]] && { printf "%s\n" "[" "  {" "    \"Name\" : \"macos-s2-eval\"," "    \"Running\" : false" "  }" "]"; exit 0; }' \
+    '    [[ -f "$ROOT/list_dup_name" ]] && { printf "%s\n" "[" "  {" "    \"Name\" : \"macos-s2-eval\"," "    \"Name\" : \"other.alias\"," "    \"State\" : \"stopped\"" "  }" "]"; exit 0; }' \
+    '    [[ -f "$ROOT/list_dup_vm" ]] && { printf "%s\n" "[" "  {" "    \"Name\" : \"macos-s2-eval\"," "    \"State\" : \"stopped\"" "  }," "  {" "    \"Name\" : \"macos-s2-eval\"," "    \"State\" : \"running\"" "  }" "]"; exit 0; }' \
+    '    [[ -f "$ROOT/list_bad_state" ]] && { printf "%s\n" "[" "  {" "    \"Name\" : \"macos-s2-eval\"," "    \"State\" : \"paused\"" "  }" "]"; exit 0; }' \
     '    show_list; exit 0 ;;' \
     '  clone)' \
     '    src=$1; dst=$2' \
@@ -238,7 +243,7 @@ setup() {
   mkdir -p "$ROOT/bin" "$ROOT/mid" "$ROOT/real" "$CASE/thome" "$CASE/tmp"
   cp "$BASE/tpl/"* "$ROOT/bin/"
   [[ -x "$ROOT/bin/tart" && -x "$ROOT/bin/stat" ]] || die "stubs not installed"
-  printf '%s\n' 'macos-s2-eval stopped' 's11-0-probe-keep stopped' 's11-0-probe-A-1-deadbee1 stopped' >"$ROOT/inventory"
+  printf '%s\n' 'macos-s2-eval stopped' 'macos-s2-eval.alt stopped' 'vm.dotted-name stopped' 's11-0-probe-keep stopped' 's11-0-probe-A-1-deadbee1 stopped' >"$ROOT/inventory"
   cp "$ROOT/inventory" "$ROOT/inventory.orig"
   printf 'key\n' >"$CASE/id_key"
   chmod 600 "$CASE/id_key"
@@ -313,7 +318,7 @@ assert_owned_only() {
     while IFS= read -r n; do
       [[ -n "$n" ]] || continue
       grep -E "^clone [^ ]+ ${n}$" "$ROOT/tart.log" >/dev/null || die "$f $n was not cloned by this run"
-      [[ "$n" == "macos-s2-eval" || "$n" == "s11-0-probe-keep" || "$n" == "s11-0-probe-A-1-deadbee1" ]] && die "$f touched $n"
+      [[ "$n" == "macos-s2-eval" || "$n" == "macos-s2-eval.alt" || "$n" == "vm.dotted-name" || "$n" == "s11-0-probe-keep" || "$n" == "s11-0-probe-A-1-deadbee1" ]] && die "$f touched $n"
     done <"$ROOT/$f"
   done
   [[ -f "$ROOT/tart.log" ]] || return 0
@@ -338,8 +343,13 @@ common_end() {
   local keep_golden=${1:-yes}
   [[ -f "$CASE/out/report.json" ]] || die "no report"
   [[ "$keep_golden" == yes ]] && assert_has macos-s2-eval
+  assert_has macos-s2-eval.alt
+  assert_has vm.dotted-name
   assert_has s11-0-probe-keep
   assert_has s11-0-probe-A-1-deadbee1
+  if [[ -f "$ROOT/tart.log" ]] && grep -F -q 'list ' "$ROOT/tart.log"; then
+    grep -F -q 'list --format json' "$ROOT/tart.log" || die "list format"
+  fi
   assert_owned_only
   ban_file "$CASE/out/report.json"
   ban_file "$CASE/stdout"
@@ -407,6 +417,11 @@ static_checks() {
   grep -F -q 'ambiguous-destination' "$RUNBOOK"
   if grep -F -q '26 分 30 秒' "$RUNBOOK"; then die "runbook hard cap"; fi
   if grep -F -q '1590' "$RUNBOOK"; then die "runbook 1590"; fi
+  n=$(grep -F -c 'tart list --format json' "$PROBE" || true)
+  [[ "$n" -ge 1 ]] || die "json list"
+  n2=$(grep -F -o 'tart list' "$PROBE" | wc -l | tr -d ' ')
+  [[ "$n" == "$n2" ]] || die "bare tart list $n2 vs $n"
+  if grep -F -q 'Disk Size' "$PROBE" "$RUNBOOK"; then die "column offsets left"; fi
   grep -F -q 'test_s11_0_probe.sh' "$RUNBOOK"
   grep -F -q 'verify.sh' "$RUNBOOK"
   grep -F -q '不构成运行授权' "$RUNBOOK"
@@ -472,8 +487,7 @@ assert r["h1_independent_of_ip"] == "unknown"
 assert r["probe_budget_sec"] == 1500
 assert r["cleanup_budget_sec"] == 90
 assert r["reasons"] == []
-for col in ("Source", "Name", "Disk Size", "Accessed", "Running", "State"):
-    assert col in r["inventory_columns"], col
+assert r["inventory_columns"] == ["json", "Size", "Disk", "Source", "State", "Name", "Running", "Accessed"]
 assert "quic" in r["unmeasured"] and "quic" not in r["measured"]
 assert "udp-443" in r["unmeasured"]
 assert "tcp-endpoint-443" in r["measured"]
@@ -504,6 +518,8 @@ assert r["tart_help"] == "ok" and "clone" in r["tart_help_subcommands"] and "exe
 assert r["tart_exec_help"] == "ok" and "--username" in r["tart_exec_options"] and "--no-interactive" in r["tart_exec_options"]
 blob = open(sys.argv[1]).read()
 assert "203.0.113.10/32" in blob
+assert "2026-10-31T17:13:29Z" not in blob
+assert "Disk Size" not in blob
 PY
   fi
 }
@@ -614,6 +630,7 @@ test_golden_state() {
   need_ec 2
   common_end
   need_reason golden-not-stopped
+  if grep -F -q 'list-untrusted' "$CASE/out/report.json"; then die "running untrusted"; fi
   grep -F -q '"measured":[]' "$CASE/out/report.json" || die "measured"
   no_clone_ops
   awk '$1!="macos-s2-eval"{print}' "$ROOT/inventory.orig" >"$ROOT/inventory"
@@ -622,7 +639,18 @@ test_golden_state() {
   need_ec 2
   common_end no
   need_reason golden-missing
+  if grep -F -q 'list-untrusted' "$CASE/out/report.json"; then die "alias untrusted"; fi
+  assert_has macos-s2-eval.alt
   no_clone_ops
+  : >"$ROOT/inventory"
+  rm -rf "$CASE/out" "$ROOT/tart.log"
+  run_probe 6 --stage A "${ARGS[@]}"
+  need_ec 2
+  need_reason golden-missing
+  if grep -F -q 'list-untrusted' "$CASE/out/report.json"; then die "empty array untrusted"; fi
+  grep -F -q '"inventory_columns":["json"]' "$CASE/out/report.json" || die "empty columns"
+  no_clone_ops
+  cp "$ROOT/inventory.orig" "$ROOT/inventory"
 }
 
 test_fail_clone() {
@@ -950,21 +978,41 @@ test_dry_precheck() {
 test_list_untrusted() {
   setup
   local mode
-  for mode in list_empty list_no_header list_trunc list_running_only; do
+  for mode in list_void list_trunc list_no_state list_dup_name list_dup_vm list_bad_state; do
     rm -rf "$CASE/out" "$ROOT/tart.log"
-    rm -f "$ROOT/list_empty" "$ROOT/list_no_header" "$ROOT/list_trunc" "$ROOT/list_running_only"
+    rm -f "$ROOT/list_void" "$ROOT/list_trunc" "$ROOT/list_no_state" "$ROOT/list_dup_name" "$ROOT/list_dup_vm" "$ROOT/list_bad_state"
     touch "$ROOT/$mode"
     run_probe 6 --stage A "${ARGS[@]}"
     need_ec 2
     need_reason list-untrusted
     if grep -F -q 'golden-missing' "$CASE/out/report.json"; then die "untrusted as missing ($mode)"; fi
     if grep -F -q 'golden-unknown' "$CASE/out/report.json"; then die "untrusted as unknown ($mode)"; fi
-    if [[ "$mode" == list_running_only ]]; then
-      grep -F -q '"inventory_columns":["Source","Name","Disk Size","Accessed","Running"]' "$CASE/out/report.json" || die "columns"
+    if grep -F -q 'golden-not-stopped' "$CASE/out/report.json"; then die "untrusted as running ($mode)"; fi
+    if [[ "$mode" == list_no_state ]]; then
+      grep -F -q '"inventory_columns":["json","Name","Running"]' "$CASE/out/report.json" || die "columns"
     fi
+    if [[ "$mode" == list_void ]]; then
+      grep -F -q '"inventory_columns":[]' "$CASE/out/report.json" || die "void columns"
+    fi
+    if [[ "$mode" == list_bad_state ]] && grep -F -q 'paused' "$CASE/out/report.json"; then die "state value recorded"; fi
     no_clone_ops
   done
   common_end
+}
+
+test_name_in_use() {
+  setup
+  printf '%s\n' '#!/bin/bash' 'printf " deadbeef\n"' >"$ROOT/bin/od"
+  chmod +x "$ROOT/bin/od"
+  touch "$ROOT/list_collide"
+  run_probe 6 --stage A "${ARGS[@]}"
+  need_ec 3
+  common_end
+  need_reason name-in-use
+  if grep -F -q 'list-untrusted' "$CASE/out/report.json"; then die "collide untrusted"; fi
+  if grep -F -q 'golden-missing' "$CASE/out/report.json"; then die "collide missing"; fi
+  no_clone_ops
+  cmp -s "$ROOT/inventory" "$ROOT/inventory.orig" || die "inventory"
 }
 
 test_boot_ready() {
@@ -1124,6 +1172,7 @@ run_case unknown-flags test_unknown_flags
 run_case dry-run test_dry_run
 run_case softnet test_softnet_mode
 run_case golden test_golden_state
+run_case name-in-use test_name_in_use
 run_case fail-clone test_fail_clone
 run_case omit-clone test_omit_clone
 run_case partial-clone test_partial_clone

@@ -1,8 +1,7 @@
 #!/bin/bash
 # S11-0 fact probe, ADR 0018 §10. Bash 3.2.
-# Own a clone only when tart clone exits 0 and a trusted tart list then shows that name.
-# Header-driven inventory: Name and State. Offsets, not whitespace (Disk Size contains spaces).
-# Header labels that pass the whitelist are reported as inventory_columns, even if State is absent.
+# Own a clone only when tart clone exits 0 and a trusted tart list --format json then shows that name.
+# One JSON array. Each object has Name and State once. inventory_columns is json plus whitelist keys, never values.
 # No SIGKILL handler: a killed run may leave no report. Output directory must not already exist.
 # Signal a background job only while the shell job table still lists it. h1_independent_of_ip=unknown.
 set -u; set -f; umask 077; export LC_ALL=C
@@ -202,60 +201,50 @@ check_softnet() {
 parse_list() {
   local tmp=$WORKDIR/names.tmp cols=$WORKDIR/list.cols
   rm -f "$tmp" "$cols"
+  # Line state machine for Tart's pretty JSON. Partial names are discarded with the exit status.
   awk -v cols="$cols" '
-    function ncols(line, s, nm,   i,len,c,run,name,st,n) {
-      n=0; len=length(line); i=1
-      while (i<=len && substr(line,i,1)==" ") i++
-      while (i<=len) {
-        st=i; name=""
-        while (i<=len) {
-          c=substr(line,i,1)
-          if (c==" ") {
-            run=0
-            while (i+run<=len && substr(line,i+run,1)==" ") run++
-            if (run>=2 || i+run>len) break
-            name=name " "; i++; continue
-          }
-          name=name c; i++
-        }
-        sub(/ +$/, "", name)
-        if (name != "") { n++; s[n]=st; nm[n]=name }
-        while (i<=len && substr(line,i,1)==" ") i++
-      }
-      return n
+    function fail() { bad=1; exit 2 }
+    function sval(v) { return v=="stopped"||v=="Stopped"||v=="STOPPED"||v=="running"||v=="Running"||v=="RUNNING"||v=="suspended"||v=="Suspended"||v=="SUSPENDED" }
+    function note(k) {
+      if (k!="Name"&&k!="State"&&k!="Source"&&k!="Disk"&&k!="Size"&&k!="Running"&&k!="Accessed") fail()
+      if (index(obj," " k " ")>0) fail()
+      obj=obj k " "; if (index(seen," " k " ")==0) { print k > cols; seen=seen k " " }
     }
-    function field(line, s, k, n,   a,b,t) {
-      a=s[k]; if (k<n) b=s[k+1]-1; else b=length(line)
-      if (a>length(line)) return ""
-      if (b>length(line)) b=length(line)
-      if (b<a) return ""
-      t=substr(line,a,b-a+1); gsub(/^[ ]+|[ ]+$/, "", t); return t
+    function endobj() {
+      if (depth!=1 || nseen!=1 || sseen!=1 || name=="" || !sval(stt) || (name in have)) fail()
+      have[name]=1; depth=0; nobj++; printf "%s\t%s\n", name, stt
     }
-    BEGIN { hdr=0 }
+    BEGIN { phase=0; depth=0; nobj=0; pend=0; bad=0; seen=" "; obj=" " }
     {
-      line=$0
-      if (line ~ /^[ ]*$/) next
-      if (!hdr) {
-        n=ncols(line, starts, names); ni=0; si=0
-        for (i=1;i<=n;i++) {
-          if (names[i]=="Name") ni=i
-          if (names[i]=="State") si=i
-        }
-        for (i=1;i<=n;i++) if (names[i] ~ /^[A-Za-z][A-Za-z0-9 -]*$/ && length(names[i])<=40) print names[i] > cols
-        if (ni==0 || si==0) exit 2
-        hdr=1; next
+      line=$0; sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line); if (line=="") next
+      if (phase==0) {
+        if (line=="[]") { print "json" > cols; phase=3; next }
+        if (line!="[") fail()
+        print "json" > cols; phase=1; next
       }
-      if (length(line) < starts[si]) exit 3
-      name=field(line, starts, ni, n); stt=field(line, starts, si, n)
-      if (name=="" || stt=="" || index(name, "\t")>0) exit 3
-      printf "%s\t%s\n", name, stt
+      if (phase!=1) fail()
+      if (line=="]") { if (depth!=0 || pend==1) fail(); phase=2; next }
+      if (line=="{") { if (depth!=0 || (nobj>0 && pend!=1)) fail(); depth=1; nseen=0; sseen=0; name=""; stt=""; obj=" "; pend=0; next }
+      if (line=="}" || line=="},") { endobj(); pend=(line=="},"); next }
+      if (depth!=1 || substr(line,1,1)!="\"") fail()
+      q=index(substr(line,2), "\""); if (q<1) fail()
+      k=substr(line,2,q-1); rest=substr(line,q+2); if (substr(rest,1,3)!=" : ") fail()
+      v=substr(rest,4); if (substr(v,length(v),1)==",") v=substr(v,1,length(v)-1)
+      note(k)
+      if (k=="Name" || k=="State" || k=="Source" || k=="Accessed") {
+        if (substr(v,1,1)!="\"" || substr(v,length(v),1)!="\"" || index(v,"\\")>0 || index(substr(v,2,length(v)-2),"\"")>0) fail()
+        v=substr(v,2,length(v)-2)
+      } else if (k=="Running") { if (v!="true" && v!="false") fail() }
+      else if (v !~ /^[0-9]+$/) fail()
+      if (k=="Name") { if (v=="" || index(v,"\t")>0) fail(); name=v; nseen++ }
+      if (k=="State") { stt=v; sseen++ }
     }
-    END { if (!hdr) exit 2 }
+    END { if (bad || (phase!=2 && phase!=3)) exit 2 }
   ' "$WORKDIR/list.last" >"$tmp" || { rm -f "$tmp" "$WORKDIR/names.tab"; return 1; }
   mv "$tmp" "$WORKDIR/names.tab"
 }
 refresh_list() {
-  run_bounded 10 "$WORKDIR/list.out" "$WORKDIR/list.err" - -- tart list || true
+  run_bounded 10 "$WORKDIR/list.out" "$WORKDIR/list.err" - -- tart list --format json || true
   rm -f "$WORKDIR/names.tab"
   if [[ "$RB_OVERFLOW" == 1 ]]; then add_reason capture-overflow; add_reason list-untrusted; return 1; fi
   if [[ "$RB_TIMED_OUT" == 1 ]]; then add_reason list-timeout; return 1; fi
@@ -421,7 +410,7 @@ boot_wait() {
 }
 mark_ambiguous() {
   add_reason ambiguous-destination; ANY_AMBIGUOUS=1; S_COLL=failed
-  say "ambiguous-destination: ${1:-clone} not confirmed; not deleting; owner must check tart list"
+  say "ambiguous-destination: ${1:-clone} not confirmed; not deleting; owner must check tart list --format json"
 }
 cleanup_owned() {
   [[ "$IN_CLEANUP" == 1 ]] && return 0
