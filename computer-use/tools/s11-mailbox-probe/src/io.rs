@@ -31,33 +31,17 @@ const ELOOP: i32 = pick(62, 40, 40);
 const ENOENT: i32 = 2;
 const ENXIO: i32 = 6;
 extern "C" {
-    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-    fn openat(dirfd: i32, path: *const c_char, flags: i32, mode: i32) -> i32;
+    // Variadic, as in the C prototype: Rust passes `mode` the way each target's
+    // variadic ABI expects (on the stack on macOS arm64, in a register elsewhere).
+    fn openat(dirfd: i32, path: *const c_char, flags: i32, ...) -> i32;
     fn renameat(olddir: i32, old: *const c_char, newdir: i32, newp: *const c_char) -> i32;
     fn unlinkat(dirfd: i32, path: *const c_char, flags: i32) -> i32;
     fn fsync(fd: i32) -> i32;
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    fn __error() -> *mut i32;
 }
-// macOS arm64 puts openat's variadic mode on the stack. The syscall keeps it in x3.
 fn open_at(dirfd: i32, path: *const c_char, flags: i32, mode: i32) -> i32 {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    unsafe {
-        let (mut ret, mut bad) = (0isize, 0isize);
-        std::arch::asm!(
-            "svc #0x80", "cset {bad}, cs", in("x16") 0x20001cfisize, inout("x0") dirfd as isize => ret, in("x1") path, in("x2") flags as isize, in("x3") mode as isize, bad = lateout(reg) bad,
-        );
-        if bad != 0 {
-            *__error() = ret as i32;
-            -1
-        } else {
-            ret as i32
-        }
-    }
-    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-    unsafe {
-        openat(dirfd, path, flags, mode)
-    }
+    // SAFETY: `path` is a NUL-terminated C string owned by the caller for the
+    // duration of the call; `mode` is promoted as a C `int` vararg.
+    unsafe { openat(dirfd, path, flags, mode) }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Snap {
