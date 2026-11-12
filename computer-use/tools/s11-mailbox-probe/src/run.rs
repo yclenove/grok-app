@@ -485,8 +485,15 @@ mod c1 {
                         Err(stop) => return Err(stop),
                     }
                 }
-                // Do not poll a missing name. virtiofs caches that miss for an unknown time.
-                Err(RdErr::Absent) => return Err(Stop::Io),
+                // Slots are pre-created before the VM starts, so a miss here is the
+                // transient ENOENT macOS virtiofs shows while a slot is renamed over
+                // (measured on the Mini). Retry within the round; never wait on a
+                // name that was not pre-created.
+                Err(RdErr::Absent) => { if !wait_more(limit) { return Err(timed(end)); } }
+                // The peer renamed a new message over this slot during our read. Discard
+                // what we read (never accept bytes from an object whose identity changed)
+                // and read the slot again; malformed bytes remain sticky failures above.
+                Err(RdErr::Replaced) => { if !wait_more(limit) { return Err(timed(end)); } }
                 Err(err) => return Err(stop_of(err, round_end, end)),
             }
         }
@@ -539,7 +546,12 @@ mod c1 {
                         return Err(Stop::Bad);
                     }
                 }
-                Err(RdErr::Absent) => return Err(Stop::Io),
+                // Pre-created slot briefly missing during a rename-over: retry until the end.
+                Err(RdErr::Absent) => {
+                    if !wait_more(end) {
+                        return Err(Stop::PeerNotReady);
+                    }
+                }
                 Err(err) => return Err(stop_of(err, None, end)),
             }
         }
@@ -1464,17 +1476,22 @@ mod tests {
         assert!(!line.contains("latency=measured") && !line.contains("verdict=ok"), "{line}");
         assert!(decode(line.trim_end_matches('\n'), C1_KEYS).is_some(), "{line}");
         let _ = fs::remove_dir_all(&dir);
-        io::test_clear_clock();
-        io::test_clear_wait();
+        // A pre-created slot that is missing (the transient ENOENT macOS virtiofs shows
+        // during a rename-over) is retried until the end, then reported as peer-not-ready.
         let dir = scratch("noready-absent");
         fs::remove_file(dir.join("guest-write/hg-ready")).unwrap();
-        let started = Instant::now();
+        let t1 = Instant::now();
+        io::test_set_clock(t1);
+        io::test_set_wait(Box::new(move || {
+            io::test_set_clock(t1 + Duration::from_secs(30));
+        }));
         assert_ne!(run(&dir, &["writer", "--dir", "DIR", "--role", "host", "--count", "1", "--timeout", "8"]), 0);
-        assert!(started.elapsed() < Duration::from_secs(2), "absent ready was polled");
         let line = text(&dir, "result-host");
-        assert!(line.contains("verdict=unknown") && line.contains("reason=io"), "{line}");
-        assert!(!line.contains("reason=peer-not-ready") && !line.contains("verdict=ok"), "{line}");
+        assert!(line.contains("verdict=unknown") && line.contains("reason=peer-not-ready"), "{line}");
+        assert!(!line.contains("verdict=ok") && !line.contains("latency=measured"), "{line}");
         let _ = fs::remove_dir_all(&dir);
+        io::test_clear_clock();
+        io::test_clear_wait();
     }
 
     #[test]
