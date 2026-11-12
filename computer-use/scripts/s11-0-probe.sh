@@ -861,13 +861,27 @@ make_once_key() {
   [[ -n "$ONCE_PUB" ]] || return 1
   if has_meta "$ONCE_PUB"; then return 1; fi
 }
+# Slots exist before the VM. A guest lookup of a missing name sticks in virtiofs.
+seed_c1_slots() {
+  local mbx=$1 leaf name
+  for leaf in host-write guest-write; do
+    for name in hg-ping hg-pong gh-ping gh-pong hg-ready gh-ready; do
+      printf '%s\n' 'v=1 op=empty seq=0' >"$mbx/$leaf/$name" || return 1
+    done
+  done
+  printf '%s\n' 'v=1 op=empty seq=0' >"$mbx/summary-host" || return 1
+  printf '%s\n' 'v=1 op=empty seq=0' >"$mbx/summary-guest" || return 1
+}
 prepare_export() {
   EXPORT_DONE=0; EXPORT_STATE=absent
   EXPORT_DIR=$(mktemp -d "$OUT/s11m.XXXXXX") || return 1
   chmod 0700 "$EXPORT_DIR" || return 1
   mkdir -m 0700 "$EXPORT_DIR/mailbox" || return 1
   case "$M_CASE" in
-    C1) mkdir -m 0700 "$EXPORT_DIR/mailbox/host-write" "$EXPORT_DIR/mailbox/guest-write" || return 1 ;;
+    C1)
+      mkdir -m 0700 "$EXPORT_DIR/mailbox/host-write" "$EXPORT_DIR/mailbox/guest-write" || return 1
+      seed_c1_slots "$EXPORT_DIR/mailbox" || return 1
+      ;;
     C2)
       mkdir -m 0700 "$EXPORT_DIR/mailbox/data" "$EXPORT_DIR/mailbox/evidence" || return 1
       printf '%s\n' "$M_BOUNDARY" >"$EXPORT_DIR/mailbox/boundary" || return 1
@@ -1075,18 +1089,14 @@ write_frames() {
     i=$((i + 1))
   done
 }
-write_c1_frames() {
-  local f=$1 max=$2 i=1 flow kind
+write_c1_names() {
+  local f=$1 flow kind
   : >"$f"
-  while [[ "$i" -le "$max" ]]; do
-    for flow in hg gh; do
-      for kind in ping pong; do
-        printf '%s\n' "${flow}-${kind}-$i" "${flow}-${kind}-$i.tmp" >>"$f"
-      done
+  for flow in hg gh; do
+    for kind in ping pong ready; do
+      printf '%s\n' "${flow}-${kind}" "${flow}-${kind}.tmp" >>"$f"
     done
-    i=$((i + 1))
   done
-  printf '%s\n' hg-ready hg-ready.tmp gh-ready gh-ready.tmp >>"$f"
 }
 name_allowed() { grep -F -x -q -- "$1" "$2"; }
 scan_one() {
@@ -1117,7 +1127,7 @@ audit_export() {
     C1)
       write_names "$WORKDIR/allow.root" host-write guest-write summary-host summary-guest result-host result-guest
       write_names "$WORKDIR/allow.dirs" host-write guest-write
-      write_c1_frames "$WORKDIR/allow.child" 8
+      write_c1_names "$WORKDIR/allow.child"
       ;;
     C2)
       write_names "$WORKDIR/allow.root" boundary data evidence result-host result-guest summary-host summary-guest

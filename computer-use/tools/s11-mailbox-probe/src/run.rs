@@ -480,27 +480,47 @@ mod c1 {
                     clock.note_read(open_us, read_us, slice_us);
                     match good(&bytes) {
                         Ok(true) => return Ok(bytes),
-                        // False is only an explicitly permitted old object. No name in this probe is one.
+                        // Placeholder, or an older seq still in this same slot.
                         Ok(false) => { if !wait_more(limit) { return Err(timed(end)); } }
                         Err(stop) => return Err(stop),
                     }
                 }
-                Err(RdErr::Absent) => { if !wait_more(limit) { return Err(timed(end)); } }
+                // Do not poll a missing name. virtiofs caches that miss for an unknown time.
+                Err(RdErr::Absent) => return Err(Stop::Io),
                 Err(err) => return Err(stop_of(err, round_end, end)),
             }
         }
     }
-    fn obj_name(direction: u8, kind: &str, seq: u8) -> String { format!("{}-{kind}-{seq}", ["gh", "hg"][usize::from(direction == 1)]) }
-    pub(super) const READY_MARK: &[u8] = b"v=1 op=ready\n";
-    const READY_CAP: usize = 64;
-    const _: () = assert!(READY_MARK.len() <= READY_CAP);
-    fn ready_name(direction: u8) -> String { format!("{}-ready", ["gh", "hg"][usize::from(direction == 1)]) }
-    // Absence retries. The first stable wrong body is the marker; it is not an old frame.
+    fn dir_tag(direction: u8) -> &'static str { ["gh", "hg"][usize::from(direction == 1)] }
+    fn slot_name(direction: u8, kind: &str) -> String { format!("{}-{kind}", dir_tag(direction)) }
+    /// Bash plants this in every slot before the VM starts. It is not a ping, pong, or ready mark.
+    pub(super) const PLACEHOLDER: &[u8] = b"v=1 op=empty seq=0\n";
+    pub(super) fn ready_mark(direction: u8) -> &'static [u8] {
+        [b"v=1 op=ready dir=gh\n" as &[u8], b"v=1 op=ready dir=hg\n" as &[u8]][usize::from(direction == 1)]
+    }
+    const READY_CAP: usize = {
+        let mark = b"v=1 op=ready dir=hg\n".len();
+        let other = b"v=1 op=ready dir=gh\n".len();
+        let empty = b"v=1 op=empty seq=0\n".len();
+        let mut n = mark;
+        if other > n {
+            n = other;
+        }
+        if empty > n {
+            n = empty;
+        }
+        if n > 64 {
+            panic!("ready record exceeds the read cap");
+        }
+        64
+    };
+    // Placeholder keeps waiting until the command deadline. Any other body fails.
     fn wait_ready(dir: &Dir, direction: u8, end: Instant, clock: &mut Clock) -> Result<(), Stop> {
         if io::past(end) {
             return Err(Stop::Deadline);
         }
-        let name = ready_name(direction);
+        let name = slot_name(direction, "ready");
+        let want = ready_mark(direction);
         loop {
             if io::past(end) {
                 return Err(Stop::PeerNotReady);
@@ -508,36 +528,77 @@ mod c1 {
             match dir.read_file(&name, READY_CAP, end) {
                 Ok((bytes, open_us, read_us, slice_us)) => {
                     clock.note_read(open_us, read_us, slice_us);
-                    if bytes == READY_MARK {
+                    if bytes == want {
                         return Ok(());
                     }
-                    return Err(Stop::Bad);
-                }
-                Err(RdErr::Absent) => {
-                    if !wait_more(end) {
-                        return Err(Stop::PeerNotReady);
+                    if bytes == PLACEHOLDER {
+                        if !wait_more(end) {
+                            return Err(Stop::PeerNotReady);
+                        }
+                    } else {
+                        return Err(Stop::Bad);
                     }
                 }
+                Err(RdErr::Absent) => return Err(Stop::Io),
                 Err(err) => return Err(stop_of(err, None, end)),
             }
         }
     }
-    // Absence retries above. A distinct name admits no old object, so every observed byte sticks.
+    // Same slot every round. Older seq and the placeholder stay; a skip, the wrong direction, or a torn body sticks.
     fn accept_ping(bytes: &[u8], direction: u8, seq: u8) -> Result<bool, Stop> {
+        if bytes == PLACEHOLDER {
+            return Ok(false);
+        }
         match frame::classify(bytes) {
             Ok((1, dir, s)) if dir == direction && s == seq => Ok(true),
+            Ok((1, dir, s)) if dir == direction && s < seq => Ok(false),
             Ok(_) => Err(Stop::Bad),
             Err(()) => Err(Stop::Torn),
         }
     }
-    fn accept_pong(bytes: &[u8], seq: u8, ping: &[u8]) -> Result<bool, Stop> {
-        if bytes.len() == FRAME_LEN { return Err(if frame::classify(bytes).is_ok() { Stop::Bad } else { Stop::Torn }); }
-        let text = rec_text(bytes).ok_or(Stop::Bad)?;
-        let want = format!("v=1 op=pong seq={seq} digest={}", hex_digest(ping));
-        if text == want { return Ok(true); }
-        if text.starts_with("v=1 op=pong seq=") && text.contains(" digest=") { Err(Stop::BadPong) } else { Err(Stop::Bad) }
+    fn pong_text(direction: u8, seq: u8, ping: &[u8]) -> String {
+        format!("v=1 op=pong dir={} seq={seq} digest={}", dir_tag(direction), hex_digest(ping))
     }
-    pub(super) fn pong_bytes(seq: u8, ping: &[u8]) -> Vec<u8> { format!("v=1 op=pong seq={seq} digest={}\n", hex_digest(ping)).into_bytes() }
+    fn parse_pong(text: &str) -> Option<(&str, u8, &str)> {
+        let rest = text.strip_prefix("v=1 op=pong dir=")?;
+        let (dir, rest) = rest.split_once(" seq=")?;
+        let (seq, digest) = rest.split_once(" digest=")?;
+        if !matches!(dir, "hg" | "gh") || !numeric(seq) {
+            return None;
+        }
+        let seq: u8 = seq.parse().ok()?;
+        if seq == 0 || digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some((dir, seq, digest))
+    }
+    fn accept_pong(bytes: &[u8], direction: u8, seq: u8, ping: &[u8]) -> Result<bool, Stop> {
+        if bytes == PLACEHOLDER {
+            return Ok(false);
+        }
+        if bytes.len() == FRAME_LEN {
+            return Err(if frame::classify(bytes).is_ok() { Stop::Bad } else { Stop::Torn });
+        }
+        let text = match rec_text(bytes) {
+            Some(text) => text,
+            None => return Err(Stop::Bad),
+        };
+        if text == pong_text(direction, seq, ping) {
+            return Ok(true);
+        }
+        match parse_pong(text) {
+            Some((dir, got, _)) if dir == dir_tag(direction) && got < seq => Ok(false),
+            Some((dir, got, _)) if dir == dir_tag(direction) && got == seq => Err(Stop::BadPong),
+            Some(_) => Err(Stop::Bad),
+            None if text.starts_with("v=1 op=pong") => Err(Stop::BadPong),
+            None => Err(Stop::Bad),
+        }
+    }
+    pub(super) fn pong_bytes(direction: u8, seq: u8, ping: &[u8]) -> Vec<u8> {
+        let mut body = pong_text(direction, seq, ping).into_bytes();
+        body.push(b'\n');
+        body
+    }
     fn fail_at(exch: Exch, stop: Stop) -> Box<Fail> { Box::new(Fail { exch, stop }) }
     fn note_pub(exch: &mut Exch, res: Result<Times, RdErr>) -> Result<(), Stop> {
         match res {
@@ -556,12 +617,12 @@ mod c1 {
         for seq in 1..=count {
             if io::past(end) { return Err(fail_at(exch, Stop::Deadline)); }
             let ping = frame::frame(1, direction, seq);
-            let name = obj_name(direction, "ping", seq);
+            let name = slot_name(direction, "ping");
             if let Err(stop) = note_pub(&mut exch, ping_dir.publish(&format!("{name}.tmp"), &name, &ping, true, end)) { return Err(fail_at(exch, stop)); }
             if io::past(end) { return Err(fail_at(exch, Stop::Deadline)); }
             // Round trip starts when ping publication has returned, after the ready wait.
             let t0 = io::now();
-            match wait_bytes(pong_dir, &obj_name(direction, "pong", seq), end, Some(ROUND_WAIT), &mut exch.clock, |bytes| accept_pong(bytes, seq, &ping)) {
+            match wait_bytes(pong_dir, &slot_name(direction, "pong"), end, Some(ROUND_WAIT), &mut exch.clock, |bytes| accept_pong(bytes, direction, seq, &ping)) {
                 Ok(_) => { exch.samples.push(io::us(io::now().saturating_duration_since(t0))); exch.frames.push(ping); }
                 Err(stop) => return Err(fail_at(exch, stop)),
             }
@@ -571,19 +632,19 @@ mod c1 {
     fn respond(ping_dir: &Dir, pong_dir: &Dir, direction: u8, count: u8, end: Instant) -> Result<Exch, Box<Fail>> {
         let mut exch = empty_exch();
         if io::past(end) { return Err(fail_at(exch, Stop::Deadline)); }
-        let ready = ready_name(direction);
-        if let Err(stop) = note_pub(&mut exch, pong_dir.publish(&format!("{ready}.tmp"), &ready, READY_MARK, true, end)) {
+        let ready = slot_name(direction, "ready");
+        if let Err(stop) = note_pub(&mut exch, pong_dir.publish(&format!("{ready}.tmp"), &ready, ready_mark(direction), true, end)) {
             return Err(fail_at(exch, stop));
         }
         for seq in 1..=count {
             if io::past(end) { return Err(fail_at(exch, Stop::Deadline)); }
-            let ping = match wait_bytes(ping_dir, &obj_name(direction, "ping", seq), end, None, &mut exch.clock, |bytes| accept_ping(bytes, direction, seq)) {
+            let ping = match wait_bytes(ping_dir, &slot_name(direction, "ping"), end, None, &mut exch.clock, |bytes| accept_ping(bytes, direction, seq)) {
                 Ok(bytes) => bytes,
                 Err(stop) => return Err(fail_at(exch, stop)),
             };
             if io::past(end) { return Err(fail_at(exch, Stop::Deadline)); }
-            let name = obj_name(direction, "pong", seq);
-            let body = pong_bytes(seq, &ping);
+            let name = slot_name(direction, "pong");
+            let body = pong_bytes(direction, seq, &ping);
             if let Err(stop) = note_pub(&mut exch, pong_dir.publish(&format!("{name}.tmp"), &name, &body, true, end)) { return Err(fail_at(exch, stop)); }
             let mut buf = [0u8; FRAME_LEN];
             buf.copy_from_slice(&ping);
@@ -637,7 +698,16 @@ mod c1 {
             Err(fail) => fail_done(*fail, 1, false).ship(&root, opt),
         }
     }
-    fn load_summary(root: &Dir, name: &str, end: Instant, clock: &mut Clock) -> Result<Vec<u8>, Stop> { wait_bytes(root, name, end, None, clock, |_| Ok(true)) }
+    fn summary_body(bytes: &[u8]) -> Result<bool, Stop> {
+        if bytes == PLACEHOLDER {
+            Ok(false)
+        } else if decode_c1(bytes).is_ok() {
+            Ok(true)
+        } else {
+            Err(Stop::Bad)
+        }
+    }
+    fn load_summary(root: &Dir, name: &str, end: Instant, clock: &mut Clock) -> Result<Vec<u8>, Stop> { wait_bytes(root, name, end, None, clock, summary_body) }
     fn read_rec(root: &Dir, name: &str, end: Instant, clock: &mut Clock) -> Result<Rec, Stop> { decode_c1(&load_summary(root, name, end, clock)?).map_err(|()| Stop::Bad) }
     fn safe_reason(reason: &str) -> &str {
         if !reason.is_empty() && reason.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') { reason } else { "bad-record" }
@@ -1153,7 +1223,18 @@ mod tests {
         fs::create_dir_all(p.join("data")).unwrap();
         fs::create_dir_all(p.join("evidence")).unwrap();
         fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::canonicalize(&p).unwrap()
+        let dir = fs::canonicalize(&p).unwrap();
+        seed_c1(&dir);
+        dir
+    }
+    fn seed_c1(dir: &std::path::Path) {
+        for leaf in ["host-write", "guest-write"] {
+            for name in ["hg-ping", "hg-pong", "gh-ping", "gh-pong", "hg-ready", "gh-ready"] {
+                fs::write(dir.join(leaf).join(name), PLACEHOLDER).unwrap();
+            }
+        }
+        fs::write(dir.join("summary-host"), PLACEHOLDER).unwrap();
+        fs::write(dir.join("summary-guest"), PLACEHOLDER).unwrap();
     }
     fn run(dir: &std::path::Path, args: &[&str]) -> i32 {
         let owned: Vec<String> = args.iter().map(|arg| if *arg == "DIR" { dir.to_str().unwrap().to_string() } else { (*arg).to_string() }).collect();
@@ -1217,10 +1298,16 @@ mod tests {
         (hw, hr)
     }
 
+    fn leaf_names(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir).unwrap().map(|ent| ent.unwrap().file_name().into_string().unwrap()).collect();
+        names.sort();
+        names
+    }
+
     #[test]
-    fn ping_pong_both_directions_measure_rtt_on_one_clock() {
+    fn preseeded_fixed_slots_overwrite_and_measure_rtt_for_eight_rounds() {
         let dir = scratch("pong");
-        let (hw, hr) = both_sides(&dir, "2", "8");
+        let (hw, hr) = both_sides(&dir, "8", "30");
         assert_eq!((hw, hr), (0, 0));
         let line = text(&dir, "result-host");
         assert!(line.contains("verdict=ok"), "{line}");
@@ -1228,14 +1315,35 @@ mod tests {
         assert!(line.contains("latency=measured"), "{line}");
         assert!(line.contains("integrity=ok") && line.contains("torn=0") && line.contains("peer=1"), "{line}");
         assert!(line.contains("vis_us=≤rtt"), "{line}");
-        assert!(line.contains("rtt_us=hg=n=2,") && line.contains(";gh=n=2,"), "{line}");
+        assert!(line.contains("rtt_us=hg=n=8,") && line.contains(";gh=n=8,"), "{line}");
+        assert!(line.contains(&format!("digest={}", expect_digest(1, 8))), "{line}");
         assert!(line.contains("min=") && line.contains("p50=") && line.contains("max="), "{line}");
         assert!(!line.contains("p99="), "{line}");
         assert_gate_matches(&line);
         assert!(line.contains("lost=-"), "{line}");
         assert!(decode(line.trim_end_matches('\n'), C1_KEYS).is_some(), "{line}");
-        assert_eq!(fs::read(dir.join("guest-write/hg-ready")).unwrap(), READY_MARK);
-        assert_eq!(fs::read(dir.join("host-write/gh-ready")).unwrap(), READY_MARK);
+        let guest = text(&dir, "summary-guest");
+        assert!(guest.contains("gh=n=8,") && guest.contains(&format!("digest={}", expect_digest(2, 8))), "{guest}");
+        assert_eq!(fs::read(dir.join("guest-write/hg-ready")).unwrap(), ready_mark(1));
+        assert_eq!(fs::read(dir.join("host-write/gh-ready")).unwrap(), ready_mark(2));
+        let ping = fs::read(dir.join("host-write/hg-ping")).unwrap();
+        assert_eq!(ping.len(), FRAME_LEN);
+        assert_eq!(frame::classify(&ping), Ok((1, 1, 8)));
+        assert_eq!(fs::read(dir.join("guest-write/hg-pong")).unwrap(), pong_bytes(1, 8, &ping));
+        let gping = fs::read(dir.join("guest-write/gh-ping")).unwrap();
+        assert_eq!(frame::classify(&gping), Ok((1, 2, 8)));
+        assert_eq!(fs::read(dir.join("host-write/gh-pong")).unwrap(), pong_bytes(2, 8, &gping));
+        assert_eq!(fs::read(dir.join("host-write/hg-pong")).unwrap(), PLACEHOLDER);
+        assert_eq!(fs::read(dir.join("guest-write/hg-ping")).unwrap(), PLACEHOLDER);
+        assert_eq!(fs::read(dir.join("host-write/gh-ping")).unwrap(), PLACEHOLDER);
+        assert_eq!(fs::read(dir.join("guest-write/gh-pong")).unwrap(), PLACEHOLDER);
+        assert_eq!(fs::read(dir.join("host-write/hg-ready")).unwrap(), PLACEHOLDER);
+        assert_eq!(fs::read(dir.join("guest-write/gh-ready")).unwrap(), PLACEHOLDER);
+        let slots = vec!["gh-ping".to_string(), "gh-pong".to_string(), "gh-ready".to_string(), "hg-ping".to_string(), "hg-pong".to_string(), "hg-ready".to_string()];
+        assert_eq!(leaf_names(&dir.join("host-write")), slots);
+        assert_eq!(leaf_names(&dir.join("guest-write")), slots);
+        assert!(!dir.join("host-write/hg-ping-1").exists());
+        assert!(!dir.join("host-write/hg-ping.tmp").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1255,10 +1363,10 @@ mod tests {
             if step == 0 {
                 step = 1;
                 io::test_set_clock(t0 + Duration::from_secs(5));
-                pongs.publish("hg-ready.tmp", "hg-ready", READY_MARK, true, end).unwrap();
+                pongs.publish("hg-ready.tmp", "hg-ready", ready_mark(1), true, end).unwrap();
             } else {
-                let (bytes, _, _, _) = pings.read_file("hg-ping-1", FRAME_LEN, end).unwrap();
-                pongs.publish("hg-pong-1.tmp", "hg-pong-1", &pong_bytes(1, &bytes), true, end).unwrap();
+                let (bytes, _, _, _) = pings.read_file("hg-ping", FRAME_LEN, end).unwrap();
+                pongs.publish("hg-pong.tmp", "hg-pong", &pong_bytes(1, 1, &bytes), true, end).unwrap();
             }
         }));
         assert_eq!(run(&dir, &["writer", "--dir", "DIR", "--role", "host", "--count", "1", "--timeout", "30"]), 0);
@@ -1268,6 +1376,74 @@ mod tests {
         assert!(!line.contains("5000000"), "{line}");
         assert!(!line.contains("reason=timeout") && !line.contains("reason=peer-not-ready"), "{line}");
         assert_gate_matches(&line);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_seq_waits_skip_and_malformed_fail_and_placeholder_is_not_a_pong() {
+        let dir = scratch("oldseq");
+        fs::write(dir.join("guest-write/hg-ready"), ready_mark(1)).unwrap();
+        let ping1 = frame::frame(1, 1, 1);
+        fs::write(dir.join("guest-write/hg-pong"), pong_bytes(1, 1, &ping1)).unwrap();
+        let peer = dir.clone();
+        let guard = SeamGuard;
+        io::test_set_wait(Box::new(move || {
+            let root = Dir::open_path(peer.to_str().unwrap()).unwrap();
+            let pongs = root.open_child_dir("guest-write").unwrap();
+            let end = Instant::now() + Duration::from_secs(5);
+            let ping2 = frame::frame(1, 1, 2);
+            pongs.publish("hg-pong.tmp", "hg-pong", &pong_bytes(1, 2, &ping2), true, end).unwrap();
+        }));
+        assert_eq!(run(&dir, &["writer", "--dir", "DIR", "--role", "host", "--count", "2", "--timeout", "5"]), 0);
+        let line = text(&dir, "result-host");
+        assert!(line.contains("verdict=ok") && line.contains("rtt_us=hg=n=2,"), "{line}");
+        assert_eq!(fs::read(dir.join("guest-write/hg-pong")).unwrap(), pong_bytes(1, 2, &frame::frame(1, 1, 2)));
+        drop(guard);
+        let _ = fs::remove_dir_all(&dir);
+
+        let dir = scratch("skip");
+        fs::write(dir.join("guest-write/hg-ready"), ready_mark(1)).unwrap();
+        fs::write(dir.join("guest-write/hg-pong"), pong_bytes(1, 2, &frame::frame(1, 1, 2))).unwrap();
+        assert_ne!(run(&dir, &["writer", "--dir", "DIR", "--role", "host", "--count", "1", "--timeout", "2"]), 0);
+        let line = text(&dir, "result-host");
+        assert!(line.contains("verdict=failed") && line.contains("reason=bad-record"), "{line}");
+        assert!(!line.contains("reason=timeout") && !line.contains("verdict=ok"), "{line}");
+        let _ = fs::remove_dir_all(&dir);
+
+        let dir = scratch("badshape");
+        fs::write(dir.join("guest-write/hg-ready"), ready_mark(1)).unwrap();
+        fs::write(dir.join("guest-write/hg-pong"), b"v=1 op=pong seq=1\n").unwrap();
+        assert_ne!(run(&dir, &["writer", "--dir", "DIR", "--role", "host", "--count", "1", "--timeout", "2"]), 0);
+        let line = text(&dir, "result-host");
+        assert!(line.contains("verdict=failed") && (line.contains("reason=bad-pong") || line.contains("reason=bad-record")), "{line}");
+        assert!(!line.contains("reason=timeout") && !line.contains("verdict=ok"), "{line}");
+        let _ = fs::remove_dir_all(&dir);
+
+        let dir = scratch("skip-ping");
+        fs::write(dir.join("host-write/hg-ping"), frame::frame(1, 1, 2)).unwrap();
+        assert_ne!(run(&dir, &["writer", "--dir", "DIR", "--role", "guest", "--count", "1", "--timeout", "2"]), 0);
+        let line = text(&dir, "result-guest");
+        assert!(line.contains("verdict=failed") && line.contains("reason=bad-record"), "{line}");
+        assert!(!line.contains("reason=timeout"), "{line}");
+        fs::write(dir.join("host-write/hg-ping"), b"not-a-frame\n").unwrap();
+        assert_ne!(run(&dir, &["writer", "--dir", "DIR", "--role", "guest", "--count", "1", "--timeout", "2"]), 0);
+        let line = text(&dir, "result-guest");
+        assert!(line.contains("verdict=failed") && line.contains("reason=torn"), "{line}");
+        let _ = fs::remove_dir_all(&dir);
+
+        let _guard = SeamGuard;
+        let dir = scratch("ph-pong");
+        fs::write(dir.join("guest-write/hg-ready"), ready_mark(1)).unwrap();
+        let t0 = Instant::now();
+        io::test_set_clock(t0);
+        io::test_set_wait(Box::new(move || {
+            io::test_set_clock(t0 + ROUND_WAIT);
+        }));
+        assert_ne!(run(&dir, &["writer", "--dir", "DIR", "--role", "host", "--count", "1", "--timeout", "8"]), 0);
+        let line = text(&dir, "result-host");
+        assert!(line.contains("verdict=unknown") && line.contains("reason=timeout"), "{line}");
+        assert!(!line.contains("reason=bad-pong") && !line.contains("verdict=failed") && !line.contains("verdict=ok"), "{line}");
+        assert_eq!(fs::read(dir.join("guest-write/hg-pong")).unwrap(), PLACEHOLDER);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1288,18 +1464,31 @@ mod tests {
         assert!(!line.contains("latency=measured") && !line.contains("verdict=ok"), "{line}");
         assert!(decode(line.trim_end_matches('\n'), C1_KEYS).is_some(), "{line}");
         let _ = fs::remove_dir_all(&dir);
+        io::test_clear_clock();
+        io::test_clear_wait();
+        let dir = scratch("noready-absent");
+        fs::remove_file(dir.join("guest-write/hg-ready")).unwrap();
+        let started = Instant::now();
+        assert_ne!(run(&dir, &["writer", "--dir", "DIR", "--role", "host", "--count", "1", "--timeout", "8"]), 0);
+        assert!(started.elapsed() < Duration::from_secs(2), "absent ready was polled");
+        let line = text(&dir, "result-host");
+        assert!(line.contains("verdict=unknown") && line.contains("reason=io"), "{line}");
+        assert!(!line.contains("reason=peer-not-ready") && !line.contains("verdict=ok"), "{line}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn wrong_ready_marker_is_failed() {
-        let dir = scratch("badready");
-        fs::write(dir.join("guest-write/hg-ready"), b"v=1 op=other\n").unwrap();
-        assert_ne!(run(&dir, &["writer", "--dir", "DIR", "--role", "host", "--count", "1", "--timeout", "2"]), 0);
-        let line = text(&dir, "result-host");
-        assert!(line.contains("verdict=failed") && line.contains("reason=bad-record"), "{line}");
-        assert!(!line.contains("reason=peer-not-ready") && !line.contains("reason=timeout"), "{line}");
-        assert!(!line.contains("latency=measured") && !line.contains("verdict=ok"), "{line}");
-        let _ = fs::remove_dir_all(&dir);
+        for body in [b"v=1 op=other\n".as_slice(), b"v=1 op=ready\n".as_slice(), ready_mark(2)] {
+            let dir = scratch("badready");
+            fs::write(dir.join("guest-write/hg-ready"), body).unwrap();
+            assert_ne!(run(&dir, &["writer", "--dir", "DIR", "--role", "host", "--count", "1", "--timeout", "2"]), 0);
+            let line = text(&dir, "result-host");
+            assert!(line.contains("verdict=failed") && line.contains("reason=bad-record"), "{body:?} {line}");
+            assert!(!line.contains("reason=peer-not-ready") && !line.contains("reason=timeout"), "{line}");
+            assert!(!line.contains("latency=measured") && !line.contains("verdict=ok"), "{line}");
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
@@ -1307,7 +1496,7 @@ mod tests {
         let _guard = SeamGuard;
         let dir = scratch("repready");
         let live = dir.join("guest-write/hg-ready");
-        fs::write(&live, READY_MARK).unwrap();
+        fs::write(&live, ready_mark(1)).unwrap();
         let aside = dir.join("guest-write/hg-ready.aside");
         io::test_set_read_hook(
             "hg-ready",
@@ -1326,7 +1515,7 @@ mod tests {
     #[test]
     fn missing_pong_times_out_and_keeps_the_sample() {
         let dir = scratch("tmo");
-        fs::write(dir.join("guest-write/hg-ready"), READY_MARK).unwrap();
+        fs::write(dir.join("guest-write/hg-ready"), ready_mark(1)).unwrap();
         let peer = dir.clone();
         let (ready_tx, ready_rx) = mpsc::channel();
         let helper = thread::spawn(move || {
@@ -1338,9 +1527,9 @@ mod tests {
                 if Instant::now() >= end {
                     return;
                 }
-                match pings.read_file("hg-ping-1", FRAME_LEN, end) {
+                match pings.read_file("hg-ping", FRAME_LEN, end) {
                     Ok((bytes, _, _, _)) if frame::classify(&bytes) == Ok((1, 1, 1)) => {
-                        pongs.publish("hg-pong-1.tmp", "hg-pong-1", &pong_bytes(1, &bytes), true, end).unwrap();
+                        pongs.publish("hg-pong.tmp", "hg-pong", &pong_bytes(1, 1, &bytes), true, end).unwrap();
                         let _ = ready_tx.send(());
                         return;
                     }
@@ -1376,6 +1565,7 @@ mod tests {
         assert!(line.contains(";gh=n=0"), "{line}");
         assert!(line.contains("vis_us=≤rtt"), "{line}");
         assert!(!line.contains("verdict=ok") && !line.contains("p99="), "{line}");
+        assert!(!line.contains("reason=bad-pong") && !line.contains("reason=bad-record"), "{line}");
         assert_gate_matches(&line);
         helper.join().unwrap();
         let _ = fs::remove_dir_all(&dir);
@@ -1386,7 +1576,7 @@ mod tests {
         let dir = scratch("torn");
         let mut torn = frame::frame(1, 1, 1);
         torn[80] ^= 0xff;
-        fs::write(dir.join("host-write/hg-ping-1"), torn).unwrap();
+        fs::write(dir.join("host-write/hg-ping"), torn).unwrap();
         assert_ne!(run(&dir, &["writer", "--dir", "DIR", "--role", "guest", "--count", "1", "--timeout", "2"]), 0);
         let line = text(&dir, "result-guest");
         assert!(line.contains("verdict=failed") && line.contains("reason=torn") && line.contains("integrity=bad"), "{line}");
@@ -1397,7 +1587,7 @@ mod tests {
     #[test]
     fn pong_digest_mismatch_is_failed() {
         let dir = scratch("badpong");
-        fs::write(dir.join("guest-write/hg-ready"), READY_MARK).unwrap();
+        fs::write(dir.join("guest-write/hg-ready"), ready_mark(1)).unwrap();
         let peer = dir.clone();
         let helper = thread::spawn(move || {
             let root = Dir::open_path(peer.to_str().unwrap()).unwrap();
@@ -1408,12 +1598,12 @@ mod tests {
                 if Instant::now() >= end {
                     return;
                 }
-                match pings.read_file("hg-ping-1", FRAME_LEN, end) {
+                match pings.read_file("hg-ping", FRAME_LEN, end) {
                     Ok((bytes, _, _, _)) if frame::classify(&bytes) == Ok((1, 1, 1)) => {
-                        let mut bad = pong_bytes(1, &bytes);
+                        let mut bad = pong_bytes(1, 1, &bytes);
                         let flip = bad.len() - 2;
                         bad[flip] = if bad[flip] == b'a' { b'b' } else { b'a' };
-                        let _ = pongs.publish("hg-pong-1.tmp", "hg-pong-1", &bad, true, end);
+                        let _ = pongs.publish("hg-pong.tmp", "hg-pong", &bad, true, end);
                         return;
                     }
                     Err(RdErr::Absent) => thread::sleep(Duration::from_millis(10)),
@@ -1444,7 +1634,7 @@ mod tests {
         fs::write(dir.join("summary-guest"), format!("{guest}\n")).unwrap();
         let mut torn = frame::frame(1, 2, 1);
         torn[80] ^= 0xff;
-        fs::write(dir.join("guest-write/gh-ping-1"), torn).unwrap();
+        fs::write(dir.join("guest-write/gh-ping"), torn).unwrap();
         assert_ne!(run(&dir, &["reader", "--dir", "DIR", "--role", "host", "--count", "2", "--timeout", "2"]), 0);
         let line = text(&dir, "result-host");
         assert!(line.contains("verdict=failed") && line.contains("reason=torn") && line.contains("integrity=bad"), "{line}");
@@ -1462,7 +1652,7 @@ mod tests {
         let guest = phase_summary("guest", 1, 2, &[12], &clock);
         fs::write(dir.join("summary-host"), format!("{host}\n")).unwrap();
         fs::write(dir.join("summary-guest"), format!("{guest}\n")).unwrap();
-        fs::write(dir.join("guest-write/gh-ping-1"), frame::frame(1, 2, 1)).unwrap();
+        fs::write(dir.join("guest-write/gh-ping"), frame::frame(1, 2, 1)).unwrap();
         assert_eq!(run(&dir, &["reader", "--dir", "DIR", "--role", "host", "--count", "1", "--timeout", "2"]), 0);
         let line = text(&dir, "result-host");
         assert!(line.contains("verdict=ok") && line.contains("reason=-") && line.contains("latency=measured"), "{line}");
@@ -1515,7 +1705,7 @@ mod tests {
         fs::write(dir.join("summary-guest"), format!("{}\n", phase_summary("guest", 1, 2, &[12], &clock))).unwrap();
         let mut short = frame::frame(1, 2, 1).to_vec();
         short.pop();
-        fs::write(dir.join("guest-write/gh-ping-1"), &short).unwrap();
+        fs::write(dir.join("guest-write/gh-ping"), &short).unwrap();
         let retries = Arc::new(AtomicUsize::new(0));
         let flag = retries.clone();
         let peer = dir.clone();
@@ -1525,7 +1715,7 @@ mod tests {
             let pings = root.open_child_dir("guest-write").unwrap();
             let end = Instant::now() + Duration::from_secs(2);
             let ping = frame::frame(1, 2, 1);
-            let _ = pings.publish("gh-ping-1.tmp", "gh-ping-1", &ping, true, end);
+            let _ = pings.publish("gh-ping.tmp", "gh-ping", &ping, true, end);
         }));
         assert_ne!(run(&dir, &["reader", "--dir", "DIR", "--role", "host", "--count", "1", "--timeout", "2"]), 0);
         let line = text(&dir, "result-host");
@@ -1541,10 +1731,10 @@ mod tests {
         let dir = scratch("badpong2");
         let clock = clock_1();
         fs::write(dir.join("summary-host"), format!("{}\n", phase_summary("host", 1, 1, &[10], &clock))).unwrap();
-        fs::write(dir.join("host-write/gh-ready"), READY_MARK).unwrap();
+        fs::write(dir.join("host-write/gh-ready"), ready_mark(2)).unwrap();
         let mut torn = frame::frame(1, 2, 1);
         torn[80] ^= 0xff;
-        fs::write(dir.join("host-write/gh-pong-1"), torn).unwrap();
+        fs::write(dir.join("host-write/gh-pong"), torn).unwrap();
         let retries = Arc::new(AtomicUsize::new(0));
         let flag = retries.clone();
         let peer = dir.clone();
@@ -1554,7 +1744,7 @@ mod tests {
             let pongs = root.open_child_dir("host-write").unwrap();
             let end = Instant::now() + Duration::from_secs(2);
             let ping = frame::frame(1, 2, 1);
-            let _ = pongs.publish("gh-pong-1.tmp", "gh-pong-1", &pong_bytes(1, &ping), true, end);
+            let _ = pongs.publish("gh-pong.tmp", "gh-pong", &pong_bytes(2, 1, &ping), true, end);
         }));
         assert_ne!(run(&dir, &["reader", "--dir", "DIR", "--role", "guest", "--count", "1", "--timeout", "2"]), 0);
         let guest = text(&dir, "result-guest");
@@ -1574,7 +1764,7 @@ mod tests {
         let clock = clock_1();
         fs::write(dir.join("summary-host"), format!("{}\n", phase_summary("host", 1, 1, &[10], &clock))).unwrap();
         fs::write(dir.join("summary-guest"), format!("{}\n", phase_summary("guest", 1, 2, &[12], &clock))).unwrap();
-        fs::write(dir.join("guest-write/gh-ping-1"), frame::frame(1, 2, 1)).unwrap();
+        fs::write(dir.join("guest-write/gh-ping"), frame::frame(1, 2, 1)).unwrap();
         let (hit_tx, hit_rx) = mpsc::channel();
         let (go_tx, go_rx) = mpsc::channel();
         let work = dir.clone();
@@ -1582,7 +1772,7 @@ mod tests {
         thread::spawn(move || {
             let _guard = SeamGuard;
             io::test_set_read_hook(
-                "gh-ping-1",
+                "gh-ping",
                 Box::new(move || {
                     let _ = hit_tx.send(());
                     let _ = go_rx.recv_timeout(Duration::from_secs(15));
@@ -1596,7 +1786,7 @@ mod tests {
         let root = Dir::open_path(dir.to_str().unwrap()).unwrap();
         let pings = root.open_child_dir("guest-write").unwrap();
         let end = Instant::now() + Duration::from_secs(5);
-        pings.publish("gh-ping-1.tmp", "gh-ping-1", &frame::frame(1, 2, 1), true, end).unwrap();
+        pings.publish("gh-ping.tmp", "gh-ping", &frame::frame(1, 2, 1), true, end).unwrap();
         let _ = go_tx.send(());
         let (code, line) = done_rx.recv_timeout(Duration::from_secs(20)).expect("hang watchdog");
         assert_ne!(code, 0);
@@ -1611,7 +1801,7 @@ mod tests {
         let clock = clock_1();
         fs::write(dir.join("summary-host"), format!("{}\n", phase_summary("host", 1, 1, &[10], &clock))).unwrap();
         fs::write(dir.join("summary-guest"), b"placeholder\n").unwrap();
-        fs::write(dir.join("guest-write/gh-ping-1"), frame::frame(1, 2, 1)).unwrap();
+        fs::write(dir.join("guest-write/gh-ping"), frame::frame(1, 2, 1)).unwrap();
         let (hit_tx, hit_rx) = mpsc::channel();
         let (go_tx, go_rx) = mpsc::channel();
         let work = dir.clone();
@@ -1647,7 +1837,8 @@ mod tests {
         let dir = scratch("sym");
         let clock = clock_1();
         fs::write(dir.join("summary-host"), format!("{}\n", phase_summary("host", 1, 1, &[8], &clock))).unwrap();
-        fs::write(dir.join("guest-write/gh-ping-1"), frame::frame(1, 2, 1)).unwrap();
+        fs::write(dir.join("guest-write/gh-ping"), frame::frame(1, 2, 1)).unwrap();
+        fs::remove_file(dir.join("summary-guest")).unwrap();
         symlink("missing-target", dir.join("summary-guest")).unwrap();
         assert_ne!(run(&dir, &["reader", "--dir", "DIR", "--role", "host", "--count", "1", "--timeout", "2"]), 0);
         let line = text(&dir, "result-host");
@@ -1663,7 +1854,7 @@ mod tests {
         fs::write(dir.join("summary-host"), format!("{}\n", phase_summary("host", 1, 1, &[10], &clock))).unwrap();
         let bad = c1_line("guest", "ok", "-", (1, 0), ("ok", "not_measured", "-", "≤rtt", "hg=n=0;gh=n=1,min=2500000,p50=2500000,max=1", "-"), &clock, (1, &expect_digest(2, 1)));
         fs::write(dir.join("summary-guest"), format!("{bad}\n")).unwrap();
-        fs::write(dir.join("guest-write/gh-ping-1"), frame::frame(1, 2, 1)).unwrap();
+        fs::write(dir.join("guest-write/gh-ping"), frame::frame(1, 2, 1)).unwrap();
         assert_ne!(run(&dir, &["reader", "--dir", "DIR", "--role", "host", "--count", "1", "--timeout", "2"]), 0);
         let line = text(&dir, "result-host");
         assert!(!line.contains("latency=measured") && !line.contains("2500000"), "{line}");
@@ -1677,7 +1868,7 @@ mod tests {
         let dir = scratch("nosum");
         let clock = clock_1();
         fs::write(dir.join("summary-host"), format!("{}\n", phase_summary("host", 1, 1, &[9], &clock))).unwrap();
-        fs::write(dir.join("guest-write/gh-ping-1"), frame::frame(1, 2, 1)).unwrap();
+        fs::write(dir.join("guest-write/gh-ping"), frame::frame(1, 2, 1)).unwrap();
         let t0 = Instant::now();
         io::test_set_clock(t0);
         io::test_set_wait(Box::new(move || {
@@ -1709,7 +1900,7 @@ mod tests {
     fn late_publish_does_not_become_measured() {
         let _guard = SeamGuard;
         let dir = scratch("late-pub");
-        fs::write(dir.join("guest-write/hg-ready"), READY_MARK).unwrap();
+        fs::write(dir.join("guest-write/hg-ready"), ready_mark(1)).unwrap();
         io::test_set_hook(Box::new(|| thread::sleep(Duration::from_millis(1100))));
         let started = Instant::now();
         let code = run(&dir, &["writer", "--dir", "DIR", "--role", "host", "--count", "1", "--timeout", "1"]);

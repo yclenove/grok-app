@@ -1223,6 +1223,7 @@ if [[ "$cmd" == writer || "$cmd" == reader ]]; then
   printf '%s\n' 'v=1 op=ready' >"$dir/host-write/gh-ready"
   printf '%s\n' 'v=1 op=ready' >"$dir/host-write/gh-ready.tmp"
 fi
+if [[ "$mode" == oldname ]]; then printf 'x\n' >"$dir/guest-write/hg-ping-1"; fi
 if [[ -f "${S11_STUB_ROOT:-}/plant_unknown" ]]; then printf 'x\n' >"$dir/pwned"; fi
 if [[ -f "${S11_STUB_ROOT:-}/plant_nl" ]]; then
   nlname=$(printf 'result-host\nX')
@@ -1338,6 +1339,24 @@ PY
   find "$CASE/out" -name gh-ready -print | grep -q . || die "gh-ready removed"
   find "$CASE/out" -name hg-ready.tmp -print | grep -q . || die "hg-ready.tmp removed"
   find "$CASE/out" -name gh-ready.tmp -print | grep -q . || die "gh-ready.tmp removed"
+  local mbx leaf name
+  mbx=$(find "$CASE/out" -type d -name mailbox -print)
+  mbx=${mbx%%$'\n'*}
+  [[ -n "$mbx" && ! -L "$mbx" ]] || die "no mailbox"
+  for leaf in host-write guest-write; do
+    for name in hg-ping hg-pong gh-ping gh-pong hg-ready gh-ready; do
+      [[ -f "$mbx/$leaf/$name" && ! -L "$mbx/$leaf/$name" ]] || die "missing slot $leaf/$name"
+    done
+  done
+  [[ "$(cat "$mbx/guest-write/hg-ping")" == 'v=1 op=empty seq=0' ]] || die "guest ping placeholder"
+  [[ "$(cat "$mbx/host-write/hg-pong")" == 'v=1 op=empty seq=0' ]] || die "host pong placeholder"
+  [[ "$(cat "$mbx/host-write/hg-ready")" == 'v=1 op=empty seq=0' ]] || die "host ready placeholder"
+  [[ "$(cat "$mbx/guest-write/gh-ready")" == 'v=1 op=empty seq=0' ]] || die "guest gh-ready placeholder"
+  [[ "$(cat "$mbx/summary-host")" == 'v=1 op=empty seq=0' ]] || die "summary-host placeholder"
+  [[ "$(cat "$mbx/summary-guest")" == 'v=1 op=empty seq=0' ]] || die "summary-guest placeholder"
+  if find "$mbx" \( -name 'hg-ping-[0-9]*' -o -name 'hg-pong-[0-9]*' -o -name 'gh-ping-[0-9]*' -o -name 'gh-pong-[0-9]*' \) -print | grep -q .; then
+    die "numbered slot name"
+  fi
   cmp -s "$ROOT/inventory" "$ROOT/inventory.orig" || die "inventory"
 }
 
@@ -1364,6 +1383,19 @@ assert all(c["verdict"] == "not-ack" for c in stage["cases"])
 assert all("--dir" in c["argv"] and any(x.startswith("s11mbx:") for x in c["argv"]) for c in stage["cases"])
 PY
   fi
+}
+
+test_c1_old_name_quarantine() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_PROBE_MODE=oldname
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  find "$CASE/out" -name hg-ping-1 -print | grep -q . || die "numbered name removed"
+  find "$CASE/out" -name hg-ping -print | grep -q . || die "fixed slot removed"
 }
 
 test_stage_m_quarantine() {
@@ -1650,6 +1682,7 @@ run_case output-exists test_output_exists
 run_case route-fail test_route_fail
 run_case dispatcher test_dispatcher_literal
 run_case stage-m-c1 test_stage_m_c1
+run_case c1-old-name test_c1_old_name_quarantine
 run_case stage-m-c2 test_stage_m_c2
 run_case stage-m-quarantine test_stage_m_quarantine
 run_case stage-m-not-sole test_stage_m_not_sole
