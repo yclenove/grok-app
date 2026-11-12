@@ -317,7 +317,7 @@ C7 自主终止及所有 transport/liveness 验收移到 M7/M9，在 block-all �
 
 ### S11-0c 拆分与首轮实测事实（2026-11-11）
 
-**拆分**：S11-0c 分为 **M2a**（邮箱目录机制 C1/C2/C8，导出为宿主普通 0700 私有目录，不是限容 HFSX 卷）与 **M2c**（卷实验 C4/C5/C6/C7/C9/C10，含 hdiutil 流程与本节原有卷相关约束，尚未实现）。M2a 的私有根规则：叶子目录为当前 UID 所有且 0700，祖先由 root 或当前 UID 所有、无组/其他写权限、无 ACL 写授权（逐段 FD 遍历，类似 ssh StrictModes），替代“每段 0700”的字面要求（Mini 的家目录与临时目录祖先不是 0700）。
+**拆分**：S11-0c 分为 **M2a**（邮箱目录机制 C1/C2/C8，导出为宿主普通 0700 私有目录，不是限容 HFSX 卷）与 **M2c**（卷实验 C4/C5/C6/C7/C9/C10，含 hdiutil 流程与本节原有卷相关约束；其中 M2c-a 即 C4 与 C1/C2/C9 的卷上复测，已实测，见下节，M2c-b 即 C5/C6/C7/C10，尚未实现）。M2a 的私有根规则：叶子目录为当前 UID 所有且 0700，祖先由 root 或当前 UID 所有、无组/其他写权限、无 ACL 写授权（逐段 FD 遍历，类似 ssh StrictModes），替代“每段 0700”的字面要求（Mini 的家目录与临时目录祖先不是 0700）。
 
 **实测**（Mac mini，Tart 2.41.1，一次性 DEFAULT-Softnet clone + 受限 SSH 实验室 driver，无模型、无凭据；每例结束确认 clone 删除且缺席、无 tart/softnet 残留进程；证据标签 `DEFAULT-network/mechanics-only`，导出为普通私有目录）：
 
@@ -340,7 +340,22 @@ C7 自主终止及所有 transport/liveness 验收移到 M7/M9，在 block-all �
 
 **对 §3 协议的约束（由上述事实推出，M3/M4 实现必须遵守）**：(a) 访客将会读取的每一个邮箱名字都由宿主在 VM 启动前预建，绝不让访客等待新名字出现；(b) 发布一律是 staging 后 rename 覆盖预建槽位，消息内容带方向与单调 seq，读方只接受期望 seq，旧 seq/占位继续等；(c) 读预建槽位时 ENOENT 与“读取中被替换”都是瞬时状态，丢弃本次读到的字节并在本轮截止内重读，只有读到的字节本身畸形/撕裂/seq 不符才是粘性失败；(d) 约 1 s 的可见延迟要计入租约预算（续租 ≤1 s、访客 ≤3 s 停树），M4/M7 须在负载下实测余量；(e) 重读次数要计入证据，不能隐藏。
 
-**仍未测**：C8 真正的双主体映射（需 owner 在准备副本中另建非管理员账号，S11e 本来也需要）、全部卷实验（M2c，邮箱最终在 HFSX 限容卷上，上述事实需在卷上复测）、block-all 下的自主运行与存活（M7/M9）。
+### M2c-a 限容卷实测事实（2026-11-12）
+
+同一台 Mac mini，`s11-0-probe.sh --stage V`：每个子例新建一个 64 MiB HFSX 稀疏镜像，挂在本次尝试目录里，用完按 §2 身份规则卸载并删除；C1/C2/C9 的邮箱放在卷上（槽位启动前预建），每例一台新 clone。每例结束都确认：无 clone、无挂载、`hdiutil info` 中无本次镜像。
+
+| 实验 | 结果（只记事实） |
+| --- | --- |
+| C4 卷配方 | `ok/volume-ok`。回读：`hfs`、Case-sensitive HFS+、容量 67108864；nosuid/noexec/nodev/nobrowse 均生效，`owners` 生效（无 noowners）；`mdutil -s` 为 Indexing disabled；`tmutil isexcluded` 为 included（未排除备份，归 C10）。create 约 1 s、attach <1 s、detach 0 s；空镜像 7,344,128 字节 |
+| C1 乒乓（卷上） | 两方向各 8 轮，完整性 ok、撕裂 0；宿主→访客往返 min 567 / 中位 993 / max 1013 ms，访客→宿主 986 / 1001 / 1011 ms；宿主侧重读 0。与 M2a 私有目录一致，约 1 s |
+| C2（卷上） | file-sync：rename 2/3、可见 2，`part` 完整；dir-sync、rename：3/3 可见；均 `not-ack`。与 M2a 一致 |
+| C9 data（≤80×1 MiB） | 两次运行完全相同：写到 62 个文件（65,011,712 字节）时访客收到 ENOSPC，卷剩 454,656 字节；镜像 st_size 与 blocks×512 峰值均为 76,550,144 字节（73.0 MiB，≤80 MiB 上限），较空镜像增 69,206,016 字节。宿主可用空间下降两次分别为 79,949,824 与 58,961,920 字节，第一次超出“镜像增量 + 1 MiB”判为 `failed/host-grew`，第二次 `ok` |
+| C9 small（≤8192×1 KiB） | 两次均写满 8192 个文件（8 MiB）仍未 ENOSPC，按设计 `unknown/enospc-absent`；镜像峰值 47,190,016 字节（每个 1 KiB 文件约占 4.9 KiB 镜像），宿主下降 39.6/39.9 MB 与镜像增量 39.8 MB 相符 |
+| detach | 本轮 9 次卸载均 0–1 s，未用 force。此前一次 C4 的按挂载点 normal detach 超过当时的 5 s 上限，被 kill 后镜像处于“已卸载但仍 attached”，探针按设计 quarantine；依 receipt 核对镜像 inode 与设备映射后人工卸载删除。同机单独计时 9 次均 0.14–0.17 s（按挂载点或设备、有无 mdutil/tmutil/marker 写入都一样），未能复现 |
+
+**推论**：(a) 限容有效：同样的写入，镜像峰值是确定的，且受 64 MiB 卷约束；访客得到 ENOSPC，宿主卷没有被写满。(b) 宿主可用空间下降只能做旁证：在共享系统盘上，一分钟内的其它写入/释放会带来约 ±10 MB 的噪声，同一写入两次判定不同；上限证据以镜像 st_size/blocks 峰值为准，M5/M9 不得只凭宿主空间差值判卷外增长。(c) normal detach 偶尔会超过 5 s，而超时 kill 会留下已卸载但仍 attached 的镜像；探针已把 normal detach 的上限放到整个卷清理份额 20 s（force 10 s），并记录实际耗时。§2 预算表的 5 s 目标要在 M5 按实测分布重定，不能在 5 s 时直接 kill。(d) 工具教训：macOS 的 bash 3.2 下进程替换的管道要等读端回收才关闭，探针每 20 ms 轮询一次，会把打开的 fd 推到约 100 个（`ulimit -n` 为 256）；已改为不用进程替换。Linux 上的桩套件发现不了这个问题。
+
+**仍未测**：C8 真正的双主体映射（需 owner 在准备副本中另建非管理员账号，S11e 本来也需要）、卷实验 C5/C6/C7/C10（M2c-b）、block-all 下的自主运行与存活（M7/M9）。
 
 ## 6. 残余风险、not_run 与分步交付
 
