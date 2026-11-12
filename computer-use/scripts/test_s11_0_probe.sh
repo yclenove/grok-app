@@ -146,6 +146,7 @@ install_templates() {
     '    has "$1" || exit 1' \
     '    [[ -f "$ROOT/fail_run" ]] && exit 1' \
     '    [[ -f "$ROOT/run_exit" ]] && { echo $$ >"$ROOT/target.pid"; sleep 0.12; exit 0; }' \
+    '    awk -v n="$1" '"'"'$1==n{$2="running"} {print}'"'"' "$INV" >"$INV.tmp" && mv "$INV.tmp" "$INV"' \
     '    trap "exit 0" TERM INT HUP' \
     '    while true; do sleep 0.2; done ;;' \
     '  stop)' \
@@ -171,10 +172,15 @@ install_templates() {
   write_stub ssh \
     'ROOT=${S11_STUB_ROOT:?}' \
     'printf "%s\n" "$*" >>"$ROOT/ssh.log"' \
+    'kh=""; for a in "$@"; do case "$a" in UserKnownHostsFile=*) kh=${a#UserKnownHostsFile=} ;; esac; done' \
+    'if [[ -n "$kh" && -f "$kh" ]]; then cp "$kh" "$ROOT/known_hosts.copy"; fi' \
     'ready=0; for a in "$@"; do [[ "$a" == "/usr/bin/true" ]] && ready=1; done' \
     'if [[ "$ready" == 1 ]]; then' \
     '  if [[ -f "$ROOT/ssh_fail_n" ]]; then n=0; [[ -f "$ROOT/ssh.count" ]] && n=$(cat "$ROOT/ssh.count"); n=$((n+1)); echo "$n" >"$ROOT/ssh.count"; fn=$(cat "$ROOT/ssh_fail_n"); [[ "$n" -le "$fn" ]] && exit 255; fi' \
     '  exit 0; fi' \
+    'case " $* " in *s11m.XXXXXX*) cat >"$ROOT/init.body"; printf "init-ok\n"; exit 0 ;; esac' \
+    'remote=""; for remote in "$@"; do :; done' \
+    'case "$remote" in upload|verify\ *|run\ C1|run\ C2|run\ C8) cat >/dev/null; exit 0 ;; esac' \
     '[[ -f "$ROOT/guest_fail" ]] && exit 9' \
     'if [[ -f "$ROOT/guest_hang" ]]; then trap "exit 143" TERM INT HUP; while true; do sleep 0.2; done; fi' \
     'last=""' \
@@ -256,7 +262,7 @@ setup() {
   export PATH="$ROOT/bin:$SYS"
   export TMPDIR=$CASE/tmp
   export S11_START_SEC=0
-  unset BASH_ENV S11_XTRACE S11_BOUND_SEC S11_BOUND_POLLS S11_FORCE_NAME S11_PROBE_BUDGET S11_CLEANUP_BUDGET
+  unset BASH_ENV S11_XTRACE S11_BOUND_SEC S11_BOUND_POLLS S11_FORCE_NAME S11_PROBE_BUDGET S11_CLEANUP_BUDGET S11_REAP_POLLS S11_FAIL_ROW_N S11_FAIL_STAGE S11_PROBE_MODE
   ARGS=(--ssh-key "$CASE/id_key" --tart-home "$CASE/thome" --out "$CASE/out")
 }
 
@@ -384,7 +390,7 @@ static_checks() {
   bash -n "$HERE/test_s11_0_probe.sh"
   local n
   n=$(wc -l <"$PROBE" | tr -d ' ')
-  [[ "$n" -lt 735 ]] || die "probe has $n lines"
+  [[ "$n" -lt 1470 ]] || die "probe has $n lines"
   [[ "$(head -n 1 "$PROBE")" == '#!/bin/bash' ]] || die "shebang"
   local pat
   for pat in 'mapfile' 'declare -A' 'readarray' 'readlink -f' 'ioreg' 'system_profiler' 'wait -n'; do
@@ -1159,6 +1165,398 @@ run_case() {
   fi
 }
 
+write_pinned() {
+  printf '%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyForStageMStubOnly stub' >"$CASE/pinned"
+  chmod 600 "$CASE/pinned"
+}
+
+write_fake_probe() {
+  cat >"$ROOT/bin/s11probe" <<'EOF'
+#!/bin/bash
+cmd=$1
+shift
+boundary=-
+if [[ "$cmd" == c2 ]]; then boundary=$1; shift; fi
+dir=""
+role=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dir) dir=$2; shift 2 ;;
+    --role) role=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+mode=${S11_PROBE_MODE:-}
+peer=1
+[[ "$cmd" == writer ]] && peer=0
+[[ "$mode" == peer0 && "$cmd" == reader ]] && peer=0
+digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+latency=measured
+[[ "$mode" == unmeasured ]] && latency=not_measured
+line=""
+case "$cmd" in
+  writer|reader)
+    line="v=1 op=c1 role=${role} verdict=ok reason=- n=8 torn=0 lost=0 integrity=ok latency=${latency} vis_us=1 rtt_us=1 slice_us=1 w_slice_us=1 open_us=1 write_us=1 fsync_us=1 rename_us=1 dir_sync_us=1 read_us=1 peer=${peer} digest=${digest}"
+    ;;
+  c2)
+    line="v=1 op=c2 role=${role} boundary=${boundary} verdict=not-ack reason=- planned=3 attempted=3 renamed=2 visible=2 part=ok dir_synced=0"
+    ;;
+  c8)
+    line="v=1 op=c8 role=${role} verdict=unknown reason=single-principal n=1 ops=0 created=0 elevated=0"
+    ;;
+esac
+if [[ "$mode" == nonewline ]]; then
+  printf '%s' "$line" >"$dir/result-$role"
+else
+  printf '%s\n' "$line" >"$dir/result-$role"
+  [[ "$mode" == dup ]] && printf '%s\n' "$line" >>"$dir/result-$role"
+fi
+if [[ -f "${S11_STUB_ROOT:-}/plant_unknown" ]]; then printf 'x\n' >"$dir/pwned"; fi
+if [[ -f "${S11_STUB_ROOT:-}/plant_nl" ]]; then
+  nlname=$(printf 'result-host\nX')
+  nlname=${nlname%X}
+  printf 'x' >"$dir/$nlname"
+fi
+if [[ "$mode" == hold && "$cmd" == writer ]]; then
+  echo $$ >"${S11_STUB_ROOT:?}/target.pid"
+  trap '' TERM
+  while true; do sleep 0.2; done
+fi
+exit 0
+EOF
+  chmod 700 "$ROOT/bin/s11probe"
+}
+
+extract_dispatcher() {
+  awk '
+    index($0, "cat <<'\''END_DISPATCHER'\''") {p=1; next}
+    $0=="END_DISPATCHER" && p {exit}
+    p {print}
+  ' "$PROBE" >"$CASE/dispatcher.sh"
+  [[ -s "$CASE/dispatcher.sh" ]] || die "no dispatcher"
+}
+
+expect_reject() {
+  local cmd=$1 out st
+  SSH_ORIGINAL_COMMAND=$cmd bash "$CASE/dispatcher.sh" >"$CASE/disp.out" 2>"$CASE/disp.err"
+  st=$?
+  out=$(cat "$CASE/disp.out")
+  [[ "$st" == 2 ]] || die "reject ec $st for [$cmd]"
+  [[ "$out" == reject ]] || die "reject text for [$cmd]: $out"
+  if grep -E -q 'uid=|reject-ran' "$CASE/disp.out" "$CASE/disp.err"; then die "reject executed [$cmd]"; fi
+}
+
+test_dispatcher_literal() {
+  setup
+  extract_dispatcher
+  bash -n "$CASE/dispatcher.sh" || die "dispatcher syntax"
+  expect_reject 'run C1; id'
+  expect_reject $'upload\nid'
+  expect_reject 'run $(id)'
+  expect_reject 'run `id`'
+  expect_reject 'run C9'
+  expect_reject "$("$PYTHON" -c 'print("z"*80)')"
+  SSH_ORIGINAL_COMMAND=upload bash "$CASE/dispatcher.sh" >"$CASE/disp.out"
+  [[ "$?" == 3 ]] || die "upload ec"
+  grep -F -q fail-dir "$CASE/disp.out" || die "upload fail-dir"
+  SSH_ORIGINAL_COMMAND=verify\ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bash "$CASE/dispatcher.sh" >"$CASE/disp.out"
+  [[ "$?" == 5 ]] || die "verify ec"
+  grep -F -q fail-probe "$CASE/disp.out" || die "verify fail-probe"
+  SSH_ORIGINAL_COMMAND='run C1' bash "$CASE/dispatcher.sh" >"$CASE/disp.out"
+  [[ "$?" == 6 ]] || die "run ec"
+  grep -F -q fail-run "$CASE/disp.out" || die "run fail-run"
+  if grep -F -q 'eval ' "$CASE/dispatcher.sh"; then die "dispatcher uses eval"; fi
+}
+
+test_stage_m_c1() {
+  setup
+  write_pinned
+  write_fake_probe
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 0
+  common_end
+  grep -E '^run s11-0-probe-M-[0-9]+-[0-9a-f]+ --no-graphics --net-softnet --dir s11mbx:.*/mailbox$' "$ROOT/tart.log" >/dev/null || die "M argv"
+  local opt
+  for opt in '-F /dev/null' BatchMode=yes StrictHostKeyChecking=yes GlobalKnownHostsFile=/dev/null IdentitiesOnly=yes IdentityAgent=none ClearAllForwardings=yes RequestTTY=no; do
+    grep -F -q -- "$opt" "$ROOT/ssh.log" || die "ssh missing $opt"
+  done
+  if grep -F -q 'StrictHostKeyChecking=accept-new' "$ROOT/ssh.log"; then die "stage M used accept-new"; fi
+  grep -F -q 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyForStageMStubOnly' "$ROOT/known_hosts.copy" || die "pinned key"
+  [[ "$(grep -c 'id_key' "$ROOT/ssh.log")" == 2 ]] || die "eval key count"
+  grep -E -q '/once\.[A-Za-z0-9]+/key ' "$ROOT/ssh.log" || die "once key"
+  "$PYTHON" - "$ROOT/ssh.log" "$ROOT/init.body" "$PROBE" <<'PY' || die "init order"
+import hashlib, sys
+log, init_path, probe = sys.argv[1:]
+lines = open(log).read().splitlines()
+kinds = []
+for line in lines:
+    if "/usr/bin/true" in line and "id_key" in line:
+        kinds.append("ready")
+    elif "s11m.XXXXXX" in line and "id_key" in line:
+        kinds.append("init")
+    elif " upload" in line or line.endswith(" upload"):
+        kinds.append("upload")
+    elif " verify " in line:
+        kinds.append("verify")
+    elif " run C1" in line:
+        kinds.append("run")
+assert kinds[:5] == ["ready", "init", "upload", "verify", "run"], kinds
+body = open(init_path).read()
+marker = "<<'END_DISPATCHER'\n"
+start = body.find(marker)
+assert start > 0
+rest = body[start + len(marker):]
+end = rest.find("\nEND_DISPATCHER\n")
+disp = rest[:end] + "\n"
+digest = hashlib.sha256(disp.encode()).hexdigest()
+assert digest in body
+end_at = body.find("\nEND_DISPATCHER\n")
+assert body.find("mkdir -m 0700") < start
+assert end_at < body.find("/usr/bin/shasum -a 256", end_at)
+assert body.find("/usr/bin/shasum -a 256", end_at) < body.find("restrict,command=")
+text = open(probe).read().split("cat <<'END_DISPATCHER'\n", 1)[1].split("\nEND_DISPATCHER\n", 1)[0] + "\n"
+assert text == disp
+PY
+  grep -F -q '"evidence":"DEFAULT-network/mechanics-only"' "$CASE/out/report.json" || die "evidence"
+  grep -F -q '"export":"host-private-directory (not the capped HFSX volume)"' "$CASE/out/report.json" || die "export"
+  grep -F -q '"verdict":"ok"' "$CASE/out/report.json" || die "verdict"
+  grep -F -q '"export_state":"retained"' "$CASE/out/report.json" || die "retained"
+  find "$CASE/out" -name result-host -print | grep -q . || die "result removed"
+  cmp -s "$ROOT/inventory" "$ROOT/inventory.orig" || die "inventory"
+}
+
+test_stage_m_c2() {
+  setup
+  write_pinned
+  write_fake_probe
+  run_probe 25 --stage M --case C2 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 0
+  common_end
+  local n
+  n=$(grep -E -c '^run s11-0-probe-M-[0-9]+-[0-9a-f]+ --no-graphics --net-softnet --dir s11mbx:.*/mailbox$' "$ROOT/tart.log" || true)
+  [[ "$n" == 3 ]] || die "C2 argv count $n"
+  grep -F -q '"verdict":"not-ack"' "$CASE/out/report.json" || die "aggregate"
+  if [[ -n "$PYTHON" ]]; then
+    "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "C2 rows"
+import json, sys
+r = json.load(open(sys.argv[1]))
+stage = [s for s in r["stages"] if s["stage"] == "M"][0]
+assert stage["verdict"] == "not-ack"
+bounds = [c["boundary"] for c in stage["cases"]]
+assert bounds == ["file-sync", "dir-sync", "rename"], bounds
+assert all(c["verdict"] == "not-ack" for c in stage["cases"])
+assert all("--dir" in c["argv"] and any(x.startswith("s11mbx:") for x in c["argv"]) for c in stage["cases"])
+PY
+  fi
+}
+
+test_stage_m_quarantine() {
+  setup
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/plant_unknown"
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  grep -F -q '"export_state":"quarantine"' "$CASE/out/report.json" || die "state"
+  find "$CASE/out" -name pwned -print | grep -q . || die "unknown removed"
+  find "$CASE/out" -name host-write -print | grep -q . || die "known dir removed"
+}
+
+test_stage_m_not_sole() {
+  setup
+  write_pinned
+  write_fake_probe
+  printf '%s\n' 'other-vm running' >>"$ROOT/inventory"
+  run_probe 15 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  need_reason not-sole
+  assert_has other-vm
+  awk '$1=="other-vm" && $2=="running" {f=1} END{exit !f}' "$ROOT/inventory" || die "other vm changed"
+  if [[ -f "$ROOT/stop.args" ]] && grep -F -x -q other-vm "$ROOT/stop.args"; then die "stopped other"; fi
+  if [[ -f "$ROOT/delete.args" ]] && grep -F -x -q other-vm "$ROOT/delete.args"; then die "deleted other"; fi
+  if [[ -f "$ROOT/ssh.log" ]] && grep -F -q 's11m.XXXXXX' "$ROOT/ssh.log"; then die "ssh before sole check"; fi
+}
+
+test_stage_m_report_write() {
+  setup
+  write_pinned
+  cat >"$ROOT/bin/mv" <<EOF
+#!/bin/bash
+if [[ "\${2:-}" == */report.json ]]; then
+  echo "mv-report-fail" >&2
+  exit 1
+fi
+exec $SYS/mv "\$@"
+EOF
+  chmod 700 "$ROOT/bin/mv"
+  run_probe 12 --dry-run --stage M --case C1 --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 2
+  grep -F -q 'report-write-failed' "$CASE/stderr" || die "no report-write-failed"
+  [[ ! -f "$CASE/out/report.json" ]] || die "report published"
+}
+
+m_stage() {
+  [[ -n "$PYTHON" ]] || die "need python"
+  "$PYTHON" - "$CASE/out/report.json" "$@" <<'PY'
+import json, sys
+path, expr = sys.argv[1], sys.argv[2]
+r = json.load(open(path))
+stage = [s for s in r["stages"] if s["stage"] == "M"][0]
+ns = {"stage": stage, "report": r, "cases": stage["cases"], "len": len, "any": any, "all": all}
+if not eval(expr, {"__builtins__": {}}, ns):
+    raise SystemExit("fail " + expr + " " + json.dumps(stage)[:500])
+PY
+}
+
+test_record_eof_rejected() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_PROBE_MODE=nonewline
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  m_stage 'cases[0]["verdict"] != "ok"'
+}
+
+test_record_dup_rejected() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_PROBE_MODE=dup
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  m_stage 'cases[0]["verdict"] != "ok"'
+}
+
+test_peer0_is_not_reader_ok() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_PROBE_MODE=peer0
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  m_stage 'cases[0]["verdict"] != "ok" and cases[0]["reason"] != "-"'
+}
+
+test_killed_after_ok_is_not_success() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_PROBE_MODE=hold S11_BOUND_POLLS=30
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  m_stage 'cases[0]["verdict"] == "unknown" and cases[0]["reason"] == "deadline" and stage["verdict"] != "ok"'
+}
+
+test_reap_abandon() {
+  setup
+  touch "$ROOT/hang_list_ignore"
+  export S11_REAP_POLLS=0 S11_BOUND_POLLS=4
+  run_probe 8 --stage A "${ARGS[@]}"
+  need_ec 2
+  common_end
+  need_reason list-timeout
+  no_clone_ops
+}
+
+test_c8_newline_name_quarantine_exit_5() {
+  setup
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/plant_nl"
+  run_probe 20 --stage M --case C8 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  need_reason single-principal
+  m_stage 'cases[0]["verdict"] == "unknown" and cases[0]["reason"] == "single-principal" and cases[0]["export_state"] == "quarantine"'
+  "$PYTHON" - "$CASE/out" <<'PY' || die "newline name"
+import os, sys
+found = False
+for root, dirs, files in os.walk(sys.argv[1]):
+    for name in files:
+        if "\n" in name:
+            found = True
+if not found:
+    raise SystemExit("newline name missing")
+PY
+  cmp -s "$ROOT/inventory" "$ROOT/inventory.orig" || die "inventory"
+}
+
+test_c2_row_loss_is_not_success() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_FAIL_ROW_N=2
+  run_probe 25 --stage M --case C2 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  m_stage 'stage["verdict"] != "not-ack" or len(cases) != 3 or any(c["verdict"] != "not-ack" for c in cases)'
+  [[ -f "$CASE/out/report.json" ]] || die "report missing"
+}
+
+test_stage_write_fails_nonzero() {
+  setup
+  write_pinned
+  export S11_FAIL_STAGE=1
+  run_probe 12 --dry-run --stage M --case C1 --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 2
+  grep -F -q 'report-write-failed' "$CASE/stderr" || die "no report-write-failed"
+  [[ ! -f "$CASE/out/report.json" ]] || die "report published"
+}
+
+test_share_path_with_space() {
+  setup
+  write_pinned
+  rm -rf "$CASE/out"
+  run_probe 8 --dry-run --stage M --case C1 --pinned-host-key "$CASE/pinned" \
+    --ssh-key "$CASE/id_key" --tart-home "$CASE/thome" --out "$CASE/lab results"
+  need_ec 0
+  [[ -f "$CASE/lab results/report.json" ]] || die "no report"
+  "$PYTHON" - "$CASE/lab results/report.json" <<'PY' || die "share dropped"
+import json, sys
+r = json.load(open(sys.argv[1]))
+stage = [s for s in r["stages"] if s["stage"] == "M"][0]
+argv = stage["cases"][0]["argv"]
+hits = [a for a in argv if a.startswith("s11mbx:") and "lab results" in a and "mailbox" in a]
+if len(hits) != 1:
+    raise SystemExit(repr(argv))
+PY
+}
+
+test_stop_unproven_quarantine() {
+  setup
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/fail_stop"
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  [[ ! -f "$ROOT/delete.args" ]] || die "deleted unproven vm"
+  m_stage 'cases[0]["verdict"] == "ok" and cases[0]["export_state"] == "quarantine" and cases[0]["cleanup"]["absent"] == "unknown"'
+  find "$CASE/out" -name result-host -print | grep -q . || die "result removed"
+}
+
+test_stage_m_usage() {
+  setup
+  run_probe 6 --stage M "${ARGS[@]}"
+  need_ec 2
+  common_end
+  need_reason usage
+  rm -rf "$CASE/out"
+  run_probe 6 --stage A --case C1 "${ARGS[@]}"
+  need_ec 2
+  need_reason usage
+}
+
 link_sys
 install_templates
 static_checks
@@ -1202,5 +1600,22 @@ run_case cleanup-blocks-b test_cleanup_blocks_b
 run_case help-fail test_help_fail
 run_case output-exists test_output_exists
 run_case route-fail test_route_fail
+run_case dispatcher test_dispatcher_literal
+run_case stage-m-c1 test_stage_m_c1
+run_case stage-m-c2 test_stage_m_c2
+run_case stage-m-quarantine test_stage_m_quarantine
+run_case stage-m-not-sole test_stage_m_not_sole
+run_case stage-m-report test_stage_m_report_write
+run_case stage-m-usage test_stage_m_usage
+run_case record-eof test_record_eof_rejected
+run_case record-dup test_record_dup_rejected
+run_case peer0 test_peer0_is_not_reader_ok
+run_case killed-after-ok test_killed_after_ok_is_not_success
+run_case reap-abandon test_reap_abandon
+run_case c8-newline-quarantine test_c8_newline_name_quarantine_exit_5
+run_case c2-row-loss test_c2_row_loss_is_not_success
+run_case stage-write-fail test_stage_write_fails_nonzero
+run_case share-space test_share_path_with_space
+run_case stop-unproven test_stop_unproven_quarantine
 echo "ALL_OK ${SECONDS}s"
-[[ "$SECONDS" -lt 30 ]] || { echo "suite took ${SECONDS}s" >&2; exit 1; }
+[[ "$SECONDS" -lt 60 ]] || { echo "suite took ${SECONDS}s" >&2; exit 1; }
