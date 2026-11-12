@@ -1075,6 +1075,18 @@ write_frames() {
     i=$((i + 1))
   done
 }
+write_c1_frames() {
+  local f=$1 max=$2 i=1 flow kind
+  : >"$f"
+  while [[ "$i" -le "$max" ]]; do
+    for flow in hg gh; do
+      for kind in ping pong; do
+        printf '%s\n' "${flow}-${kind}-$i" "${flow}-${kind}-$i.tmp" >>"$f"
+      done
+    done
+    i=$((i + 1))
+  done
+}
 name_allowed() { grep -F -x -q -- "$1" "$2"; }
 scan_one() {
   local dir=$1 allow=$2 dirs=$3 raw=$WORKDIR/scan.raw path name count=0
@@ -1104,7 +1116,7 @@ audit_export() {
     C1)
       write_names "$WORKDIR/allow.root" host-write guest-write summary-host summary-guest result-host result-guest
       write_names "$WORKDIR/allow.dirs" host-write guest-write
-      write_frames "$WORKDIR/allow.child" 8
+      write_c1_frames "$WORKDIR/allow.child" 8
       ;;
     C2)
       write_names "$WORKDIR/allow.root" boundary data evidence result-host result-guest summary-host summary-guest
