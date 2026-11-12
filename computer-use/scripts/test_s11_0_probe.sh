@@ -180,7 +180,7 @@ install_templates() {
     '  exit 0; fi' \
     'case " $* " in *s11m.XXXXXX*) cat >"$ROOT/init.body"; printf "init-ok\n"; exit 0 ;; esac' \
     'remote=""; for remote in "$@"; do :; done' \
-    'case "$remote" in upload|verify\ *|run\ C1|run\ C2|run\ C8) cat >/dev/null; exit 0 ;; esac' \
+    'case "$remote" in upload|verify\ *|run\ C1|run\ C2|run\ C8) cat >/dev/null; exit 0 ;; "run C9") cat >/dev/null; "$ROOT/bin/c9write"; exit $? ;; esac' \
     '[[ -f "$ROOT/guest_fail" ]] && exit 9' \
     'if [[ -f "$ROOT/guest_hang" ]]; then trap "exit 143" TERM INT HUP; while true; do sleep 0.2; done; fi' \
     'last=""' \
@@ -242,6 +242,221 @@ install_templates() {
     'if [[ -f "$path.statout" ]]; then cat "$path.statout"; exit 0; fi' \
     'printf "%s\n" "root -rwxr-xr-x"' \
     'exit 0'
+  write_volume_stubs
+}
+
+write_volume_stubs() {
+  cat >"$BASE/tpl/hdiutil" <<'EOF'
+#!/bin/bash
+ROOT=${S11_STUB_ROOT:?}
+printf '%s\n' "$*" >>"$ROOT/hdiutil.log"
+STATE=$ROOT/vol.state
+get() { awk -F= -v k="$1" '$1==k{print substr($0, index($0, "=")+1); exit}' "$STATE"; }
+put() {
+  local k=$1 v=$2 tmp=$STATE.tmp
+  if [[ -f "$STATE" ]]; then
+    awk -F= -v k="$k" -v v="$v" 'BEGIN{found=0} $1==k{print k"="v; found=1; next} {print} END{if(!found) print k"="v}' "$STATE" >"$tmp"
+  else
+    printf '%s=%s\n' "$k" "$v" >"$tmp"
+  fi
+  mv "$tmp" "$STATE"
+}
+cmd=${1:-}; shift || true
+case "$cmd" in
+  create)
+    [[ $# -eq 11 ]] || exit 2
+    [[ "$1" == -size && "$2" == 64m && "$3" == -fs && "$4" == HFSX && "$5" == -type && "$6" == SPARSE && "$7" == -layout && "$8" == NONE && "$9" == -volname && "${10}" == GCU-MAILBOX ]] || exit 2
+    img=${11}
+    [[ "$img" == */mailbox.sparseimage ]] || exit 2
+    [[ -e "$img" || -L "$img" ]] && exit 1
+    : >"$img" || exit 1
+    chmod 600 "$img" || exit 1
+    put image "$img"
+    put disk /dev/disk9
+    put dev 11
+    put ino 22
+    put size 4096
+    put blocks 8
+    put attached 0
+    put mount ""
+    exit 0 ;;
+  attach)
+    [[ $# -eq 10 ]] || exit 2
+    [[ "$1" == -plist && "$2" == -nobrowse && "$3" == -noautoopen && "$4" == -owners && "$5" == on && "$6" == -mountOptions && "$7" == nosuid,noexec,nodev && "$8" == -mountpoint ]] || exit 2
+    mp=$9; img=${10}
+    [[ "$img" == "$(get image)" ]] || exit 1
+    [[ -d "$mp" && ! -L "$mp" ]] || exit 1
+    set -- "$mp"/*
+    [[ -e "${1:-}" ]] && exit 1
+    case "$mp" in */mnt.*) ;; *) exit 2 ;; esac
+    mv "$mp" "$mp.under" || exit 1
+    mkdir -m 0700 "$mp" || exit 1
+    put mount "$mp"
+    put attached 1
+    if [[ -f "$ROOT/bad_plist" ]]; then
+      printf '%s\n' '#s11plist' 'system-entities.0.dev-entry=/dev/disk9'
+    else
+      printf '%s\n' '#s11plist' \
+        "system-entities.0.dev-entry=$(get disk)" \
+        "system-entities.0.mount-point=$mp" \
+        'content-hint=Apple_HFS' \
+        'volume-kind=hfs' \
+        'size-bytes=67108864'
+    fi
+    exit 0 ;;
+  info)
+    [[ $# -eq 1 && "$1" == -plist ]] || exit 2
+    n=0
+    [[ -f "$ROOT/info.count" ]] && n=$(cat "$ROOT/info.count")
+    n=$((n + 1))
+    printf '%s\n' "$n" >"$ROOT/info.count"
+    if [[ -f "$ROOT/hang_info" && "$n" == 1 ]]; then while true; do sleep 30; done; fi
+    att=$(get attached)
+    mpt=$(get mount)
+    if [[ -f "$ROOT/mismatch_on" && "$(cat "$ROOT/mismatch_on")" == "$n" ]]; then mpt=/volume-mismatch; fi
+    if [[ "$att" == 1 ]]; then
+      printf '%s\n' '#s11plist' \
+        "images.0.image-path=$(get image)" \
+        "images.0.system-entities.0.dev-entry=$(get disk)" \
+        "images.0.system-entities.0.mount-point=$mpt"
+    else
+      printf '%s\n' '#s11plist' 'images.count=0'
+    fi
+    exit 0 ;;
+  detach)
+    force=0; dev=
+    if [[ "${1:-}" == -force ]]; then
+      [[ $# -eq 2 ]] || exit 2
+      force=1; dev=$2
+      printf '%s\n' force >>"$ROOT/force.count"
+      [[ -f "$ROOT/fail_force" ]] && exit 1
+    else
+      [[ $# -eq 1 ]] || exit 2
+      dev=$1
+      [[ -f "$ROOT/fail_detach" ]] && exit 1
+    fi
+    [[ "$dev" == "$(get disk)" ]] || exit 1
+    [[ "$(get attached)" == 1 ]] || exit 1
+    mp=$(get mount)
+    case "$mp" in */mnt.*) ;; *) exit 2 ;; esac
+    [[ -d "$mp.under" && ! -L "$mp" ]] || exit 1
+    rm -rf "$mp"
+    mv "$mp.under" "$mp" || exit 1
+    put attached 0
+    exit 0 ;;
+  *) exit 2 ;;
+esac
+EOF
+  cat >"$BASE/tpl/plutil" <<'EOF'
+#!/bin/bash
+ROOT=${S11_STUB_ROOT:?}
+printf '%s\n' "$*" >>"$ROOT/plutil.log"
+cmd=${1:-}; shift || true
+case "$cmd" in
+  -lint)
+    [[ $# -eq 1 && -f "$1" ]] || exit 1
+    IFS= read -r line <"$1" || exit 1
+    [[ "$line" == '#s11plist' ]] || exit 1
+    printf '%s\n' "$1: OK"
+    exit 0 ;;
+  -extract)
+    [[ $# -eq 5 && "$2" == raw || $# -eq 5 && "$2" == json ]] || exit 2
+    [[ "$3" == -o && "$4" == - && -f "$5" ]] || exit 2
+    key=$1; form=$2; file=$5
+    if [[ "$key" == images && "$form" == json ]]; then
+      if awk -F= '$1=="images.0.image-path"{found=1} END{exit !found}' "$file"; then
+        printf '%s\n' '[{"image-path":"present"}]'
+      else
+        printf '%s\n' '[]'
+      fi
+      exit 0
+    fi
+    [[ "$form" == raw ]] || exit 2
+    awk -F= -v k="$key" '$1==k{print substr($0, index($0, "=")+1); found=1; exit} END{exit !found}' "$file" || exit 1
+    exit 0 ;;
+  *) exit 2 ;;
+esac
+EOF
+  cat >"$BASE/tpl/mount" <<'EOF'
+#!/bin/bash
+ROOT=${S11_STUB_ROOT:?}
+printf '%s\n' "$*" >>"$ROOT/mount.log"
+[[ $# -eq 0 ]] || exit 2
+STATE=$ROOT/vol.state
+get() { awk -F= -v k="$1" '$1==k{print substr($0, index($0, "=")+1); exit}' "$STATE"; }
+[[ "$(get attached)" == 1 ]] || exit 0
+opts='hfs, local, nodev, nosuid, noexec, nobrowse'
+[[ -f "$ROOT/drop_nosuid" ]] && opts='hfs, local, nodev, noexec, nobrowse'
+printf '%s\n' "$(get disk) on $(get mount) ($opts)"
+exit 0
+EOF
+  cat >"$BASE/tpl/mdutil" <<'EOF'
+#!/bin/bash
+ROOT=${S11_STUB_ROOT:?}
+printf '%s\n' "$*" >>"$ROOT/mdutil.log"
+[[ "$1" == -s && $# -eq 2 ]] || exit 2
+[[ -f "$ROOT/mdutil_fail" ]] && exit 1
+printf '%s\n' 'Indexing disabled.'
+exit 0
+EOF
+  cat >"$BASE/tpl/tmutil" <<'EOF'
+#!/bin/bash
+ROOT=${S11_STUB_ROOT:?}
+printf '%s\n' "$*" >>"$ROOT/tmutil.log"
+[[ "$1" == isexcluded && $# -eq 2 ]] || exit 2
+printf '%s\n' 'Operation not permitted' >&2
+exit 1
+EOF
+  cat >"$BASE/tpl/statv" <<'EOF'
+#!/bin/bash
+ROOT=${S11_STUB_ROOT:?}
+printf '%s\n' "$*" >>"$ROOT/statv.log"
+[[ $# -eq 3 && "$1" == -f && "$2" == '%z %b %d %i' ]] || exit 2
+STATE=$ROOT/vol.state
+get() { awk -F= -v k="$1" '$1==k{print substr($0, index($0, "=")+1); exit}' "$STATE"; }
+[[ "$3" == "$(get image)" ]] || exit 1
+size=$(get size); blocks=$(get blocks); dev=$(get dev); ino=$(get ino)
+if [[ -f "$ROOT/stat_big" ]]; then size=90000000; blocks=200000; fi
+printf '%s %s %s %s\n' "$size" "$blocks" "$dev" "$ino"
+exit 0
+EOF
+  cat >"$BASE/tpl/df" <<'EOF'
+#!/bin/bash
+ROOT=${S11_STUB_ROOT:?}
+printf '%s\n' "$*" >>"$ROOT/df.log"
+[[ $# -eq 3 && "$1" == -k && "$2" == -P ]] || exit 2
+STATE=$ROOT/vol.state
+get() { awk -F= -v k="$1" '$1==k{print substr($0, index($0, "=")+1); exit}' "$STATE"; }
+path=$3
+hostk=4000000
+if [[ -f "$ROOT/df_drop" && "$path" != "$(get mount)" ]]; then
+  n=0
+  [[ -f "$ROOT/df.hostn" ]] && n=$(cat "$ROOT/df.hostn")
+  n=$((n + 1))
+  printf '%s\n' "$n" >"$ROOT/df.hostn"
+  [[ "$n" -gt 1 ]] && hostk=$((hostk - 200000))
+fi
+printf '%s\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on'
+if [[ "$path" == "$(get mount)" ]]; then
+  printf '%s %s %s %s %s %s\n' /dev/disk9 65536 1000 1024 50% "$path"
+else
+  printf '%s %s %s %s %s %s\n' hostfs 8000000 1000 "$hostk" 50% "$path"
+fi
+exit 0
+EOF
+  cat >"$BASE/tpl/c9write" <<'EOF'
+#!/bin/bash
+ROOT=${S11_STUB_ROOT:?}
+mbx=$(awk 'match($0,/--dir s11mbx:/){p=substr($0,RSTART+13)} END{print p}' "$ROOT/tart.log")
+[[ -n "$mbx" && -d "$mbx" && ! -L "$mbx" ]] || exit 9
+mode=$(tr -d '\r\n' <"$mbx/fill-mode")
+en=1; bytes=4096; files=4
+[[ -f "$ROOT/c9_no_enospc" ]] && en=0
+printf 'v=1 seq=1 bytes=%s files=%s enospc=%s\n' "$bytes" "$files" "$en" >"$mbx/progress"
+printf 'v=1 op=c9 role=guest mode=%s enospc=%s bytes=%s files=%s batches=1\n' "$mode" "$en" "$bytes" "$files" >"$mbx/result-guest"
+exit 0
+EOF
+  chmod 700 "$BASE/tpl/hdiutil" "$BASE/tpl/plutil" "$BASE/tpl/mount" "$BASE/tpl/mdutil" "$BASE/tpl/tmutil" "$BASE/tpl/statv" "$BASE/tpl/df" "$BASE/tpl/c9write"
 }
 
 setup() {
@@ -263,6 +478,7 @@ setup() {
   export TMPDIR=$CASE/tmp
   export S11_START_SEC=0
   unset BASH_ENV S11_XTRACE S11_BOUND_SEC S11_BOUND_POLLS S11_FORCE_NAME S11_PROBE_BUDGET S11_CLEANUP_BUDGET S11_REAP_POLLS S11_FAIL_ROW_N S11_FAIL_STAGE S11_PROBE_MODE
+  unset S11_HDIUTIL S11_PLUTIL S11_MOUNT S11_MDUTIL S11_TMUTIL S11_STAT S11_DF
   ARGS=(--ssh-key "$CASE/id_key" --tart-home "$CASE/thome" --out "$CASE/out")
 }
 
@@ -390,7 +606,7 @@ static_checks() {
   bash -n "$HERE/test_s11_0_probe.sh"
   local n
   n=$(wc -l <"$PROBE" | tr -d ' ')
-  [[ "$n" -lt 1470 ]] || die "probe has $n lines"
+  [[ "$n" -lt 2500 ]] || die "probe has $n lines"
   [[ "$(head -n 1 "$PROBE")" == '#!/bin/bash' ]] || die "shebang"
   local pat
   for pat in 'mapfile' 'declare -A' 'readarray' 'readlink -f' 'ioreg' 'system_profiler' 'wait -n'; do
@@ -1267,7 +1483,7 @@ test_dispatcher_literal() {
   expect_reject $'upload\nid'
   expect_reject 'run $(id)'
   expect_reject 'run `id`'
-  expect_reject 'run C9'
+  expect_reject 'run C9 data'
   expect_reject "$("$PYTHON" -c 'print("z"*80)')"
   SSH_ORIGINAL_COMMAND=upload bash "$CASE/dispatcher.sh" >"$CASE/disp.out"
   [[ "$?" == 3 ]] || die "upload ec"
@@ -1278,6 +1494,9 @@ test_dispatcher_literal() {
   SSH_ORIGINAL_COMMAND='run C1' bash "$CASE/dispatcher.sh" >"$CASE/disp.out"
   [[ "$?" == 6 ]] || die "run ec"
   grep -F -q fail-run "$CASE/disp.out" || die "run fail-run"
+  SSH_ORIGINAL_COMMAND='run C9' bash "$CASE/dispatcher.sh" >"$CASE/disp.out"
+  [[ "$?" == 6 ]] || die "run C9 ec"
+  grep -F -q fail-run "$CASE/disp.out" || die "run C9 fail-run"
   if grep -F -q 'eval ' "$CASE/dispatcher.sh"; then die "dispatcher uses eval"; fi
 }
 
@@ -1700,6 +1919,228 @@ run_case c8-newline-quarantine test_c8_newline_name_quarantine_exit_5
 run_case c2-row-loss test_c2_row_loss_is_not_success
 run_case stage-write-fail test_stage_write_fails_nonzero
 run_case share-space test_share_path_with_space
+enable_volume() {
+  export S11_HDIUTIL=$ROOT/bin/hdiutil
+  export S11_PLUTIL=$ROOT/bin/plutil
+  export S11_MOUNT=$ROOT/bin/mount
+  export S11_MDUTIL=$ROOT/bin/mdutil
+  export S11_TMUTIL=$ROOT/bin/tmutil
+  export S11_STAT=$ROOT/bin/statv
+  export S11_DF=$ROOT/bin/df
+}
+
+image_path() {
+  sed -n 's/^create .* \(.*\/mailbox\.sparseimage\)$/\1/p' "$ROOT/hdiutil.log"
+}
+
+assert_image_gone() {
+  local img
+  img=$(image_path)
+  [[ -n "$img" ]] || die "no image path"
+  [[ ! -e "$img" && ! -L "$img" ]] || die "image remains $img"
+  [[ ! -d "$(dirname "$img")" ]] || die "attempt dir remains"
+}
+
+assert_image_kept() {
+  local img
+  img=$(image_path)
+  [[ -n "$img" && -f "$img" && ! -L "$img" ]] || die "image not kept"
+  if grep -E '^detach( |$)' "$ROOT/hdiutil.log"; then die "detached"; fi
+}
+
+assert_create_argv() {
+  grep -E '^create -size 64m -fs HFSX -type SPARSE -layout NONE -volname GCU-MAILBOX .*/mailbox\.sparseimage$' "$ROOT/hdiutil.log" >/dev/null || die "create argv"
+  grep -E '^attach -plist -nobrowse -noautoopen -owners on -mountOptions nosuid,noexec,nodev -mountpoint .* .*/mailbox\.sparseimage$' "$ROOT/hdiutil.log" >/dev/null || die "attach argv"
+  grep -F -q -- '-extract system-entities.0.dev-entry raw -o -' "$ROOT/plutil.log" || die "plutil extract"
+  grep -F -q -- '-extract images.0.image-path raw -o -' "$ROOT/plutil.log" || die "plutil info"
+}
+
+test_stage_v_c4_argv_and_cleanup() {
+  setup
+  enable_volume
+  grep -F -q 'S11_HDIUTIL:-/usr/bin/hdiutil' "$PROBE" || die "default hdiutil"
+  grep -F -q -- '-size 64m -fs HFSX -type SPARSE -layout NONE -volname GCU-MAILBOX' "$PROBE" || die "create literal"
+  grep -F -q -- '-plist -nobrowse -noautoopen -owners on -mountOptions nosuid,noexec,nodev' "$PROBE" || die "attach literal"
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 0
+  common_end
+  assert_create_argv
+  assert_image_gone
+  grep -F -q '"export":"capped HFSX volume"' "$CASE/out/report.json" || die "export label"
+  grep -F -q '"evidence":"volume-only"' "$CASE/out/report.json" || die "c4 evidence"
+  grep -F -q '"fstype":"hfs"' "$CASE/out/report.json" || die "fstype"
+  grep -F -q '"nosuid":"yes"' "$CASE/out/report.json" || die "nosuid"
+  grep -F -q '"noexec":"yes"' "$CASE/out/report.json" || die "noexec"
+  grep -F -q '"nodev":"yes"' "$CASE/out/report.json" || die "nodev"
+  grep -F -q '"nobrowse":"yes"' "$CASE/out/report.json" || die "nobrowse"
+  grep -F -q '"mdutil":"disabled"' "$CASE/out/report.json" || die "mdutil"
+  grep -F -q '"tmutil":"unknown"' "$CASE/out/report.json" || die "tmutil"
+  grep -F -q '"capacity":"67108864"' "$CASE/out/report.json" || die "capacity"
+  grep -F -q '"verdict":"ok"' "$CASE/out/report.json" || die "c4 ok"
+  local n
+  n=$(grep -c '^detach /dev/disk9$' "$ROOT/hdiutil.log" || true)
+  [[ "$n" == 1 ]] || die "detach count $n"
+  if grep -F -q -- '-force' "$ROOT/hdiutil.log"; then die "unexpected force"; fi
+  if grep -E '^(clone|run) ' "$ROOT/tart.log"; then die "c4 started a vm"; fi
+}
+
+test_stage_v_mismatch_quarantine() {
+  setup
+  enable_volume
+  printf '%s\n' 2 >"$ROOT/mismatch_on"
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  assert_image_kept
+  grep -F -q '"export_state":"quarantine"' "$CASE/out/report.json" || die "export state"
+}
+
+test_stage_v_detach_force_once() {
+  setup
+  enable_volume
+  touch "$ROOT/fail_detach"
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 0
+  common_end
+  assert_image_gone
+  local n f
+  n=$(grep -c '^detach /dev/disk9$' "$ROOT/hdiutil.log" || true)
+  f=$(grep -c '^detach -force /dev/disk9$' "$ROOT/hdiutil.log" || true)
+  [[ "$n" == 1 && "$f" == 1 ]] || die "force counts detach=$n force=$f"
+  grep -F -q '"force":"1"' "$CASE/out/report.json" || die "force flag"
+}
+
+test_stage_v_no_force_if_vm_not_stopped() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/fail_stop"
+  run_probe 20 --stage V --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  assert_image_kept
+  if grep -F -q -- '-force' "$ROOT/hdiutil.log"; then die "forced while vm up"; fi
+}
+
+test_stage_v_timeout_quarantine() {
+  setup
+  enable_volume
+  touch "$ROOT/hang_info"
+  export S11_BOUND_POLLS=4
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  assert_image_kept
+}
+
+test_stage_v_incomplete_quarantine() {
+  setup
+  enable_volume
+  touch "$ROOT/bad_plist"
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  assert_image_kept
+}
+
+test_stage_v_option_rejected() {
+  setup
+  enable_volume
+  touch "$ROOT/drop_nosuid"
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 4
+  common_end
+  assert_image_gone
+  grep -F -q '"reason":"option-rejected"' "$CASE/out/report.json" || die "option reason"
+  grep -F -q '"export_state":"removed"' "$CASE/out/report.json" || die "option cleaned"
+  grep -F -q '"nosuid":"no"' "$CASE/out/report.json" || die "nosuid recorded"
+  if grep -E '^clone ' "$ROOT/tart.log"; then die "option started vm"; fi
+}
+
+test_stage_v_c1_on_volume() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  run_probe 20 --stage V --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 0
+  common_end
+  assert_create_argv
+  assert_image_gone
+  grep -F -q '"export":"capped HFSX volume"' "$CASE/out/report.json" || die "c1 export"
+  grep -F -q 'DEFAULT-network/mechanics-only' "$CASE/out/report.json" || die "c1 evidence"
+  grep -E '^run s11-0-probe-V-[0-9]+-[0-9a-f]+ --no-graphics --net-softnet --dir s11mbx:.*/mailbox$' "$ROOT/tart.log" >/dev/null || die "V argv"
+  grep -F -q ' run C1' "$ROOT/ssh.log" || die "ran C1"
+}
+
+test_stage_v_c9_ok() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  run_probe 25 --stage V --case C9 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 0
+  common_end
+  assert_image_gone
+  local n
+  n=$(grep -c ' run C9$' "$ROOT/ssh.log" || true)
+  [[ "$n" == 2 ]] || die "c9 runs $n"
+  grep -F -q '"boundary":"data"' "$CASE/out/report.json" || die "data mode"
+  grep -F -q '"boundary":"small"' "$CASE/out/report.json" || die "small mode"
+  grep -F -q '"enospc":"1"' "$CASE/out/report.json" || die "enospc"
+  grep -F -q '"verdict":"ok"' "$CASE/out/report.json" || die "c9 ok"
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "cap"
+import json,sys
+rep=json.load(open(sys.argv[1]))
+cases=rep["stages"][0]["cases"]
+assert len(cases)==2
+for c in cases:
+    vol=c["volume"]
+    assert int(vol["image_bytes"])<=83886080
+    assert int(vol["image_alloc"])<=83886080
+    assert c["verdict"]=="ok"
+PY
+}
+
+test_stage_v_usage() {
+  setup
+  run_probe 6 --stage V "${ARGS[@]}"
+  need_ec 2
+  common_end
+  need_reason usage
+  [[ ! -f "$ROOT/hdiutil.log" ]] || die "usage called hdiutil"
+  rm -rf "$CASE/out"
+  run_probe 6 --stage V --case C8 "${ARGS[@]}"
+  need_ec 2
+  need_reason usage
+  rm -rf "$CASE/out"
+  run_probe 6 --stage M --case C4 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 2
+  need_reason usage
+  rm -rf "$CASE/out"
+  run_probe 8 --dry-run --stage V --case C4 "${ARGS[@]}"
+  need_ec 0
+  common_end
+  grep -F -q '/usr/bin/hdiutil create -size 64m -fs HFSX -type SPARSE -layout NONE -volname GCU-MAILBOX' "$CASE/stdout" || die "dry create"
+  grep -F -q '/usr/bin/hdiutil attach -plist -nobrowse -noautoopen -owners on -mountOptions nosuid,noexec,nodev' "$CASE/stdout" || die "dry attach"
+  [[ ! -f "$ROOT/hdiutil.log" ]] || die "dry called hdiutil"
+}
+
 run_case stop-unproven test_stop_unproven_quarantine
+run_case stage-v-c4 test_stage_v_c4_argv_and_cleanup
+run_case stage-v-mismatch test_stage_v_mismatch_quarantine
+run_case stage-v-force test_stage_v_detach_force_once
+run_case stage-v-no-force test_stage_v_no_force_if_vm_not_stopped
+run_case stage-v-timeout test_stage_v_timeout_quarantine
+run_case stage-v-incomplete test_stage_v_incomplete_quarantine
+run_case stage-v-option test_stage_v_option_rejected
+run_case stage-v-c1 test_stage_v_c1_on_volume
+run_case stage-v-c9 test_stage_v_c9_ok
+run_case stage-v-usage test_stage_v_usage
 echo "ALL_OK ${SECONDS}s"
 [[ "$SECONDS" -lt 90 ]] || { echo "suite took ${SECONDS}s" >&2; exit 1; }

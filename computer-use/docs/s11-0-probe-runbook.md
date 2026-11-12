@@ -101,7 +101,7 @@ bash computer-use/scripts/s11-0-probe.sh --stage B --endpoint-placeholder --tart
 
 真机跑阶段 M 之前必须先发一句，确认这次是 DEFAULT 网络机械实验、网关会暴露。没有这句话就不要跑。本段不构成运行授权。真实 VM 上的阶段 M 仍是 not_run。
 
-每个子例用 `/usr/bin/ssh-keygen` 在宿主私有目录生成一把一次性 ed25519。现有 eval 密钥只做两步：就绪命令 `/usr/bin/true`，以及一次固定初始化（客机新建 0700 目录、写入固定 dispatcher、客机 `shasum -a 256` 核对宿主算出的摘要、追加带 `restrict,command=` 的一次性公钥）。任何一步失败都停。之后的 upload、verify、run 只用一次性密钥。dispatcher 只按字面接受 `upload`、`verify` 加 64 位十六进制、`run C1`、`run C2`、`run C8`。`--pinned-host-key` 是 golden 的 ssh-ed25519 公钥，clone 继承同一把主机密钥。SSH 使用 `StrictHostKeyChecking=yes`、独立 known_hosts、只认这一把私钥、关闭转发、不用 TTY。每次连接前，本次 clone 必须是唯一正在运行的 VM。
+每个子例用 `/usr/bin/ssh-keygen` 在宿主私有目录生成一把一次性 ed25519。现有 eval 密钥只做两步：就绪命令 `/usr/bin/true`，以及一次固定初始化（客机新建 0700 目录、写入固定 dispatcher、客机 `shasum -a 256` 核对宿主算出的摘要、追加带 `restrict,command=` 的一次性公钥）。任何一步失败都停。之后的 upload、verify、run 只用一次性密钥。dispatcher 只按字面接受 `upload`、`verify` 加 64 位十六进制、`run C1`、`run C2`、`run C8`、`run C9`。`--pinned-host-key` 是 golden 的 ssh-ed25519 公钥，clone 继承同一把主机密钥。SSH 使用 `StrictHostKeyChecking=yes`、独立 known_hosts、只认这一把私钥、关闭转发、不用 TTY。每次连接前，本次 clone 必须是唯一正在运行的 VM。
 
 C2 对 `file-sync`、`dir-sync`、`rename` 各起一台新 clone。每个边界计划发布 3 次。file-sync 完成两次重命名；第三次只把文件 fsync 到 `part` 后退出，不重命名，也不同步被测数据目录。三个子例都是 `not-ack`，并且 VM 清理被证实时，聚合才是 `not-ack`、退出码 0。`unknown` 或没跑到的子例优先于 `not-ack`。C8 若客机只有一个非管理员主体，结果是 `unknown` / `single-principal`。不建账户，不提权。
 
@@ -109,7 +109,25 @@ C2 对 `file-sync`、`dir-sync`、`rename` 各起一台新 clone。每个边界�
 
 阶段 M 在 quarantine（含审计超量、超时、未证明 VM 已退出）时退出码是 5，即使采集结果同时是 unknown；测量原因仍留在该 case 行。A/B/C 仍是采集失败优先于清理失败。
 
-测量二进制是 `tools/s11-mailbox-probe`。它只接收目录、角色和计数/超时，子命令是 `writer`、`reader`、`c2 <boundary>`、`c8`。文件操作走目录 fd。它不负责 VM 或 SSH。
+测量二进制是 `tools/s11-mailbox-probe`。它只接收目录、角色和计数/超时，子命令是 `writer`、`reader`、`c2 <boundary>`、`c8`，以及只在客机上跑的 `fill --mode data|small`。文件操作走目录 fd。它不负责 VM、SSH 或磁盘镜像。
+
+## 阶段 V（限容卷，C4 / C1 / C2 / C9）
+
+阶段 V 在每次子例里新建一个 64MiB 的 HFSX 稀疏镜像，挂到本次尝试目录里的空挂载点，用完后卸载并删除。C4 只做卷的创建、挂载、读回和删除，不起 VM。C1、C2、C9 把阶段 M 的邮箱放到这个卷的 `mailbox` 上（槽位仍在启动前写好），每个子例一台新 clone、一个新卷。C2 的三个边界、C9 的 `data` 和 `small` 各是一次独立尝试。报告里的 `export` 是 `capped HFSX volume`。C4 的 `evidence` 是 `volume-only`；C1、C2、C9 仍是 `DEFAULT-network/mechanics-only`。
+
+真机跑阶段 V 之前必须先发一句：这次会在 Mini 上创建、挂载、卸载并删除一个 64MiB 的专用镜像。没有这句话就不要跑。本段不构成运行授权。真实机器上的阶段 V 仍是 not_run。
+
+镜像只用固定参数调用 `/usr/bin/hdiutil`（`create -size 64m -fs HFSX -type SPARSE -layout NONE -volname GCU-MAILBOX`，以及 `attach -plist -nobrowse -noautoopen -owners on -mountOptions nosuid,noexec,nodev`）。设备节点和挂载点只从 `/usr/bin/plutil -extract` 读出，再用 `hdiutil info -plist` 核对镜像路径、设备号和 inode。对不上、读回不完整或超时，脚本不做卸载、不删镜像，把尝试目录留在 `--out` 下，报告 `quarantine`，退出码 5。
+
+quarantine 之后由人处理，脚本不会补一次删除。先在该次 `--out` 里找到留下的尝试目录和其中的 `mailbox.sparseimage`，再人工核对，不要凭目录名直接删：
+
+- `hdiutil info -plist`，看 `image-path` 是不是这一份镜像，`dev-entry` 和 `mount-point` 是不是同一次 attach 记下来的那一对
+- `mount`，看该挂载点上的实际选项
+- `stat` 这一份镜像的设备号和 inode，对照报告里记录的值
+
+只有这三项都指向同一次尝试，才可以手工 `hdiutil detach` 对应的整盘设备，再确认 `hdiutil info` 里已经没有这份镜像，然后删除镜像文件和空目录。对不上就停，留给下一次人工判断。不要用 `sudo`，不要 `detach -force`，除非已经证明没有 VM 还拿着这个卷。
+
+C9 让客机通过固定的 `run C9` 写满卷（`data` 最多 80 个 1MiB，`small` 最多 8192 个 1KiB，遇到空间不足就停）。宿主看镜像的逻辑大小和占用是否都不超过 80MiB，以及宿主所在卷有没有额外增长。卷满且没有越界才是 `ok`；客机没有报告空间不足是 `unknown`；镜像或宿主其他目录越界是 `failed`。判定之后仍然按上面的身份规则卸载和删除。
 
 ## 桩测试
 

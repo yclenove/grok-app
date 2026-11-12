@@ -1,8 +1,8 @@
 # S11-0c 邮箱测量核心
 
-宿主编排在 `scripts/s11-0-probe.sh` 的阶段 M。这个二进制只测量一个目录。它不 clone，不做 SSH，也不调用 tart。只做 C1、C2、C8。只用标准库。测试另计。
+宿主编排在 `scripts/s11-0-probe.sh`（阶段 M 是普通目录，阶段 V 是限容卷）。这个二进制只测量一个目录。它不 clone，不做 SSH，也不调用 tart、hdiutil。做 C1、C2、C8，以及 C9 的 `fill`。只用标准库。测试另计。
 
-导出目录是宿主上的普通私有目录，不是限容卷。HFSX 上的差异由后续 M2c/M7 补测。
+阶段 M 的导出目录是宿主上的普通私有目录。阶段 V 把同一套槽位放在限容 HFSX 卷的 `mailbox` 上。卷的创建和删除只在 bash 里做。
 
 ## 子命令
 
@@ -13,7 +13,10 @@ s11-mailbox-probe writer --dir <绝对目录> --role host|guest --count N --time
 s11-mailbox-probe reader --dir <绝对目录> --role host|guest --count N --timeout SEC
 s11-mailbox-probe c2 file-sync|dir-sync|rename --dir <绝对目录> --role host|guest --count N --timeout SEC
 s11-mailbox-probe c8 --dir <绝对目录> --role host|guest --count N --timeout SEC
+s11-mailbox-probe fill --dir <绝对目录> --role guest --mode data|small --timeout SEC
 ```
+
+`fill` 只在客机跑。`data` 最多 80 个 1MiB 文件，`small` 最多 8192 个 1KiB 文件，遇到 ENOSPC（或测试用的更小配额）就停，并在 `result-guest` 报告已写字节和文件数。邮箱里要先有 `payload/` 和 `progress`。
 
 `N` 是 1 到 8。`SEC` 是 0 到 120。标志顺序不限。每个子命令有自己的进程内绝对截止（`Instant`）。到点写 `unknown` / `deadline` 后退出。没测到的时间写成 `-`，不写成 0。
 
