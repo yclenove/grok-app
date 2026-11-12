@@ -959,7 +959,8 @@ pub fn count_non_admin(users: &str, admins: &str) -> Result<usize, ()> {
         }
         let mut parts = line.split_whitespace();
         let name = parts.next().ok_or(())?;
-        let uid: u32 = parts.next().ok_or(())?.parse().map_err(|_| ())?;
+        // Signed: macOS lists system accounts such as `nobody -2`; anything below 500 is not a person.
+        let uid: i64 = parts.next().ok_or(())?.parse().map_err(|_| ())?;
         if parts.next().is_some() {
             return Err(());
         }
@@ -1715,5 +1716,15 @@ mod tests {
         let slept = bounded_out(&["/bin/sleep", "30"], Instant::now() + Duration::from_millis(150));
         assert!(slept.is_none());
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn count_non_admin_handles_negative_system_uids() {
+        let users = "_amavisd                 83\ndaemon                   1\neval                     501\nnobody                   -2\nroot                     0\n";
+        let admins = "GroupMembership: root _mbsetupuser eval\n";
+        assert_eq!(count_non_admin(users, admins), Ok(0));
+        let with_user = format!("{users}tester                   502\n");
+        assert_eq!(count_non_admin(&with_user, admins), Ok(1));
+        assert_eq!(judge_c8(count_non_admin(users, admins).ok()), ("unknown", "no-non-admin-principal"));
     }
 }
