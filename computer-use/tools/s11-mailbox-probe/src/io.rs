@@ -1,5 +1,5 @@
 #[cfg(test)]
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -8,8 +8,16 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::time::{Duration, Instant};
 #[cfg(test)]
+struct ReadHook {
+    name: String,
+    fire: Box<dyn FnOnce() + Send>,
+}
+#[cfg(test)]
 thread_local! {
-    static IO_HOOK: RefCell<Option<Box<dyn Fn() + Send>>> = RefCell::new(None);
+    static IO_HOOK: RefCell<Option<Box<dyn Fn() + Send>>> = const { RefCell::new(None) };
+    static READ_HOOK: RefCell<Option<ReadHook>> = const { RefCell::new(None) };
+    static CLOCK: Cell<Option<Instant>> = const { Cell::new(None) };
+    static WAIT: RefCell<Option<Box<dyn FnMut() + Send>>> = const { RefCell::new(None) };
 }
 const fn pick(mac: i32, arm: i32, other: i32) -> i32 {
     if cfg!(target_os = "macos") {
@@ -88,8 +96,17 @@ pub struct Dir {
 pub fn us(d: Duration) -> u64 {
     u64::try_from(d.as_micros()).unwrap_or(u64::MAX)
 }
+pub fn now() -> Instant {
+    #[cfg(test)]
+    {
+        if let Some(frozen) = CLOCK.with(|c| c.get()) {
+            return frozen;
+        }
+    }
+    Instant::now()
+}
 pub fn past(end: Instant) -> bool {
-    Instant::now() >= end
+    now() >= end
 }
 fn name_ok(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\0') && name.is_ascii()
@@ -176,6 +193,44 @@ pub fn test_set_hook(hook: Box<dyn Fn() + Send>) {
 pub fn test_clear_hook() {
     clear_hook();
 }
+#[cfg(test)]
+pub fn test_set_clock(t: Instant) {
+    CLOCK.with(|c| c.set(Some(t)));
+}
+#[cfg(test)]
+pub fn test_clear_clock() {
+    CLOCK.with(|c| c.set(None));
+}
+#[cfg(test)]
+pub fn test_set_wait(hook: Box<dyn FnMut() + Send>) {
+    WAIT.with(|w| *w.borrow_mut() = Some(hook));
+}
+#[cfg(test)]
+pub fn test_clear_wait() {
+    WAIT.with(|w| *w.borrow_mut() = None);
+}
+/// Runs the injected wait once. `false` means production sleep.
+#[cfg(test)]
+pub fn test_wait_fire() -> bool {
+    let Some(mut hook) = WAIT.with(|w| w.borrow_mut().take()) else {
+        return false;
+    };
+    hook();
+    WAIT.with(|w| {
+        if w.borrow().is_none() {
+            *w.borrow_mut() = Some(hook);
+        }
+    });
+    true
+}
+#[cfg(test)]
+pub fn test_set_read_hook(name: &str, hook: Box<dyn FnOnce() + Send>) {
+    READ_HOOK.with(|slot| *slot.borrow_mut() = Some(ReadHook { name: name.to_string(), fire: hook }));
+}
+#[cfg(test)]
+pub fn test_clear_read_hook() {
+    READ_HOOK.with(|slot| *slot.borrow_mut() = None);
+}
 /// One-shot test seam. Production builds call an empty function.
 fn io_hook() {
     #[cfg(test)]
@@ -193,6 +248,21 @@ fn set_hook(hook: Box<dyn Fn() + Send>) {
 #[cfg(test)]
 fn clear_hook() {
     IO_HOOK.with(|slot| *slot.borrow_mut() = None);
+}
+fn read_hook(name: &str) {
+    #[cfg(test)]
+    {
+        let matched = READ_HOOK.with(|slot| slot.borrow().as_ref().is_some_and(|hook| hook.name == name));
+        if matched {
+            if let Some(hook) = READ_HOOK.with(|slot| slot.borrow_mut().take()) {
+                (hook.fire)();
+            }
+        }
+    }
+    #[cfg(not(test))]
+    {
+        let _ = name;
+    }
 }
 fn create_synced(dir: &Dir, name: &CString, bytes: &[u8], end: Option<Instant>) -> Result<(File, u64, u64, u64), RdErr> {
     gate(end)?;
@@ -349,6 +419,7 @@ impl Dir {
             return Err(RdErr::Size);
         }
         io_hook();
+        read_hook(name);
         let after = snap_of(&file).map_err(|_| RdErr::Io)?;
         if !same(&before, &after) {
             return Err(RdErr::Replaced);

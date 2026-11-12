@@ -861,13 +861,29 @@ make_once_key() {
   [[ -n "$ONCE_PUB" ]] || return 1
   if has_meta "$ONCE_PUB"; then return 1; fi
 }
+# Every name the guest reads is planted before the VM. A lookup of a missing name sticks in virtiofs.
+# Guest reads host-write/hg-ping, host-write/gh-ready, host-write/gh-pong, and summary-host.
+# The same loops also plant the slots only the host reads. write_c1_names must list this set.
+seed_c1_slots() {
+  local mbx=$1 leaf name
+  for leaf in host-write guest-write; do
+    for name in hg-ping hg-pong gh-ping gh-pong hg-ready gh-ready; do
+      printf '%s\n' 'v=1 op=empty seq=0' >"$mbx/$leaf/$name" || return 1
+    done
+  done
+  printf '%s\n' 'v=1 op=empty seq=0' >"$mbx/summary-host" || return 1
+  printf '%s\n' 'v=1 op=empty seq=0' >"$mbx/summary-guest" || return 1
+}
 prepare_export() {
   EXPORT_DONE=0; EXPORT_STATE=absent
   EXPORT_DIR=$(mktemp -d "$OUT/s11m.XXXXXX") || return 1
   chmod 0700 "$EXPORT_DIR" || return 1
   mkdir -m 0700 "$EXPORT_DIR/mailbox" || return 1
   case "$M_CASE" in
-    C1) mkdir -m 0700 "$EXPORT_DIR/mailbox/host-write" "$EXPORT_DIR/mailbox/guest-write" || return 1 ;;
+    C1)
+      mkdir -m 0700 "$EXPORT_DIR/mailbox/host-write" "$EXPORT_DIR/mailbox/guest-write" || return 1
+      seed_c1_slots "$EXPORT_DIR/mailbox" || return 1
+      ;;
     C2)
       mkdir -m 0700 "$EXPORT_DIR/mailbox/data" "$EXPORT_DIR/mailbox/evidence" || return 1
       printf '%s\n' "$M_BOUNDARY" >"$EXPORT_DIR/mailbox/boundary" || return 1
@@ -905,10 +921,22 @@ wait_guest() {
   fi
   SSH_BG_PID=""
 }
+c1_retry_ok() {
+  case "$1" in
+    absent:*,replaced:*) ;;
+    *) return 1 ;;
+  esac
+  local body=${1#absent:}
+  local a=${body%%,replaced:*}
+  local b=${body#*,replaced:}
+  [[ "$1" == "absent:${a},replaced:${b}" ]] || return 1
+  [[ -n "$a" && ${#a} -le 7 && "$a" != *[!0-9]* ]] || return 1
+  [[ -n "$b" && ${#b} -le 7 && "$b" != *[!0-9]* ]] || return 1
+}
 parse_fields() {
   local line=$1 tok key val seen=" " nseen=0
   local v= op= role= verdict= reason= n= torn= lost= integrity= latency=
-  local vis= rtt= slice= wslice= openus= writeus= fsyncus= renameus= dsync= readus= peer= digest=
+  local vis= rtt= slice= wslice= openus= writeus= fsyncus= renameus= dsync= readus= peer= digest= gate= retry=
   local boundary= planned= attempted= renamed= visible= part= dirsync= ops= created= elevated=
   M_RECORD=$line; SHAPE_OK=0
   for tok in $line; do
@@ -924,7 +952,8 @@ parse_fields() {
       n) n=$val ;; torn) torn=$val ;; lost) lost=$val ;; integrity) integrity=$val ;; latency) latency=$val ;;
       vis_us) vis=$val ;; rtt_us) rtt=$val ;; slice_us) slice=$val ;; w_slice_us) wslice=$val ;;
       open_us) openus=$val ;; write_us) writeus=$val ;; fsync_us) fsyncus=$val ;; rename_us) renameus=$val ;;
-      dir_sync_us) dsync=$val ;; read_us) readus=$val ;; peer) peer=$val ;; digest) digest=$val ;;
+      dir_sync_us) dsync=$val ;; read_us) readus=$val ;; peer) peer=$val ;; digest) digest=$val ;; gate) gate=$val ;;
+      retry) retry=$val ;;
       boundary) boundary=$val ;; planned) planned=$val ;; attempted) attempted=$val ;; renamed) renamed=$val ;;
       visible) visible=$val ;; part) part=$val ;; dir_synced) dirsync=$val ;;
       ops) ops=$val ;; created) created=$val ;; elevated) elevated=$val ;;
@@ -933,16 +962,19 @@ parse_fields() {
   done
   [[ "$v" == 1 ]] || return 1
   case "$reason" in
-    -|deadline|no-peer-summary|single-principal|principal-unknown|mapping-not-measured|torn|bad-part|bad-record|not-sole|init-failed|upload-failed|verify-failed|run-failed|probe-failed|skipped|quarantine|subject-policy|io|nofollow|replaced|partial-coverage) ;;
+    -|deadline|timeout|peer-not-ready|no-peer-summary|single-principal|no-non-admin-principal|principal-unknown|mapping-not-measured|torn|bad-pong|bad-part|bad-record|not-sole|init-failed|upload-failed|verify-failed|run-failed|probe-failed|skipped|quarantine|subject-policy|io|nofollow|replaced|partial-coverage) ;;
     *) return 1 ;;
   esac
   case "$verdict" in ok|failed|unknown|not-ack) ;; *) return 1 ;; esac
   case "$op" in
     c1)
-      [[ "$nseen" -eq 22 && -n "$digest" && -n "$peer" && -n "$latency" && -n "$integrity" ]] || return 1
+      [[ "$nseen" -eq 24 && -n "$digest" && -n "$peer" && -n "$latency" && -n "$integrity" && -n "$vis" && -n "$rtt" && -n "$gate" && -n "$retry" ]] || return 1
+      c1_retry_ok "$retry" || return 1
+      case "$gate" in -|exceeds-2s) ;; *) return 1 ;; esac
       if [[ "$verdict" == ok ]]; then
-        [[ "$torn" == 0 && "$integrity" == ok && "$latency" == measured && "$peer" == 1 && "$role" == host && "$n" == 8 ]] || return 1
-        case "$lost$vis$rtt$slice$wslice$openus$writeus$fsyncus$renameus$readus" in *[!0-9]*) return 1 ;; esac
+        [[ "$torn" == 0 && "$integrity" == ok && "$latency" == measured && "$peer" == 1 && "$role" == host && "$n" == 8 && "$vis" == "≤rtt" ]] || return 1
+        case "$lost" in -) ;; *) case "$lost" in *[!0-9]*) return 1 ;; esac ;; esac
+        case "$slice$wslice$openus$writeus$fsyncus$renameus$readus" in *[!0-9]*|"") return 1 ;; esac
       fi
       ;;
     c2)
@@ -1073,6 +1105,16 @@ write_frames() {
     i=$((i + 1))
   done
 }
+# Same slot names as seed_c1_slots, plus the staging file publish renames over them.
+write_c1_names() {
+  local f=$1 flow kind
+  : >"$f"
+  for flow in hg gh; do
+    for kind in ping pong ready; do
+      printf '%s\n' "${flow}-${kind}" "${flow}-${kind}.tmp" >>"$f"
+    done
+  done
+}
 name_allowed() { grep -F -x -q -- "$1" "$2"; }
 scan_one() {
   local dir=$1 allow=$2 dirs=$3 raw=$WORKDIR/scan.raw path name count=0
@@ -1102,7 +1144,7 @@ audit_export() {
     C1)
       write_names "$WORKDIR/allow.root" host-write guest-write summary-host summary-guest result-host result-guest
       write_names "$WORKDIR/allow.dirs" host-write guest-write
-      write_frames "$WORKDIR/allow.child" 8
+      write_c1_names "$WORKDIR/allow.child"
       ;;
     C2)
       write_names "$WORKDIR/allow.root" boundary data evidence result-host result-guest summary-host summary-guest

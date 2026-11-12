@@ -1193,16 +1193,22 @@ peer=1
 digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 latency=measured
 [[ "$mode" == unmeasured ]] && latency=not_measured
+gate=-
+[[ "$mode" == gate ]] && gate=exceeds-2s
+c8_reason=single-principal
+c8_n=1
+if [[ "$mode" == noadmin ]]; then c8_reason=no-non-admin-principal; c8_n=0; fi
+rtt='hg=n=8,min=10,p50=20,max=30;gh=n=8,min=11,p50=21,max=40'
 line=""
 case "$cmd" in
   writer|reader)
-    line="v=1 op=c1 role=${role} verdict=ok reason=- n=8 torn=0 lost=0 integrity=ok latency=${latency} vis_us=1 rtt_us=1 slice_us=1 w_slice_us=1 open_us=1 write_us=1 fsync_us=1 rename_us=1 dir_sync_us=1 read_us=1 peer=${peer} digest=${digest}"
+    line="v=1 op=c1 role=${role} verdict=ok reason=- n=8 torn=0 lost=- integrity=ok latency=${latency} vis_us=≤rtt rtt_us=${rtt} slice_us=1 w_slice_us=1 open_us=1 write_us=1 fsync_us=1 rename_us=1 dir_sync_us=1 read_us=1 peer=${peer} digest=${digest} retry=absent:0,replaced:0 gate=${gate}"
     ;;
   c2)
     line="v=1 op=c2 role=${role} boundary=${boundary} verdict=not-ack reason=- planned=3 attempted=3 renamed=2 visible=2 part=ok dir_synced=0"
     ;;
   c8)
-    line="v=1 op=c8 role=${role} verdict=unknown reason=single-principal n=1 ops=0 created=0 elevated=0"
+    line="v=1 op=c8 role=${role} verdict=unknown reason=${c8_reason} n=${c8_n} ops=0 created=0 elevated=0"
     ;;
 esac
 if [[ "$mode" == nonewline ]]; then
@@ -1211,6 +1217,13 @@ else
   printf '%s\n' "$line" >"$dir/result-$role"
   [[ "$mode" == dup ]] && printf '%s\n' "$line" >>"$dir/result-$role"
 fi
+if [[ "$cmd" == writer || "$cmd" == reader ]]; then
+  printf '%s\n' 'v=1 op=ready' >"$dir/guest-write/hg-ready"
+  printf '%s\n' 'v=1 op=ready' >"$dir/guest-write/hg-ready.tmp"
+  printf '%s\n' 'v=1 op=ready' >"$dir/host-write/gh-ready"
+  printf '%s\n' 'v=1 op=ready' >"$dir/host-write/gh-ready.tmp"
+fi
+if [[ "$mode" == oldname ]]; then printf 'x\n' >"$dir/guest-write/hg-ping-1"; fi
 if [[ -f "${S11_STUB_ROOT:-}/plant_unknown" ]]; then printf 'x\n' >"$dir/pwned"; fi
 if [[ -f "${S11_STUB_ROOT:-}/plant_nl" ]]; then
   nlname=$(printf 'result-host\nX')
@@ -1322,6 +1335,28 @@ PY
   grep -F -q '"verdict":"ok"' "$CASE/out/report.json" || die "verdict"
   grep -F -q '"export_state":"retained"' "$CASE/out/report.json" || die "retained"
   find "$CASE/out" -name result-host -print | grep -q . || die "result removed"
+  find "$CASE/out" -name hg-ready -print | grep -q . || die "hg-ready removed"
+  find "$CASE/out" -name gh-ready -print | grep -q . || die "gh-ready removed"
+  find "$CASE/out" -name hg-ready.tmp -print | grep -q . || die "hg-ready.tmp removed"
+  find "$CASE/out" -name gh-ready.tmp -print | grep -q . || die "gh-ready.tmp removed"
+  local mbx leaf name
+  mbx=$(find "$CASE/out" -type d -name mailbox -print)
+  mbx=${mbx%%$'\n'*}
+  [[ -n "$mbx" && ! -L "$mbx" ]] || die "no mailbox"
+  for leaf in host-write guest-write; do
+    for name in hg-ping hg-pong gh-ping gh-pong hg-ready gh-ready; do
+      [[ -f "$mbx/$leaf/$name" && ! -L "$mbx/$leaf/$name" ]] || die "missing slot $leaf/$name"
+    done
+  done
+  [[ "$(cat "$mbx/guest-write/hg-ping")" == 'v=1 op=empty seq=0' ]] || die "guest ping placeholder"
+  [[ "$(cat "$mbx/host-write/hg-pong")" == 'v=1 op=empty seq=0' ]] || die "host pong placeholder"
+  [[ "$(cat "$mbx/host-write/hg-ready")" == 'v=1 op=empty seq=0' ]] || die "host ready placeholder"
+  [[ "$(cat "$mbx/guest-write/gh-ready")" == 'v=1 op=empty seq=0' ]] || die "guest gh-ready placeholder"
+  [[ "$(cat "$mbx/summary-host")" == 'v=1 op=empty seq=0' ]] || die "summary-host placeholder"
+  [[ "$(cat "$mbx/summary-guest")" == 'v=1 op=empty seq=0' ]] || die "summary-guest placeholder"
+  if find "$mbx" \( -name 'hg-ping-[0-9]*' -o -name 'hg-pong-[0-9]*' -o -name 'gh-ping-[0-9]*' -o -name 'gh-pong-[0-9]*' \) -print | grep -q .; then
+    die "numbered slot name"
+  fi
   cmp -s "$ROOT/inventory" "$ROOT/inventory.orig" || die "inventory"
 }
 
@@ -1348,6 +1383,19 @@ assert all(c["verdict"] == "not-ack" for c in stage["cases"])
 assert all("--dir" in c["argv"] and any(x.startswith("s11mbx:") for x in c["argv"]) for c in stage["cases"])
 PY
   fi
+}
+
+test_c1_old_name_quarantine() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_PROBE_MODE=oldname
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  find "$CASE/out" -name hg-ping-1 -print | grep -q . || die "numbered name removed"
+  find "$CASE/out" -name hg-ping -print | grep -q . || die "fixed slot removed"
 }
 
 test_stage_m_quarantine() {
@@ -1431,6 +1479,38 @@ test_record_dup_rejected() {
   need_ec 4
   common_end
   m_stage 'cases[0]["verdict"] != "ok"'
+}
+
+test_c1_rtt_fields_pass_through() {
+  setup
+  write_pinned
+  write_fake_probe
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 0
+  common_end
+  m_stage 'cases[0]["verdict"] == "ok" and "vis_us=≤rtt" in cases[0]["record"] and "rtt_us=hg=n=8,min=10,p50=20,max=30;gh=n=8,min=11,p50=21,max=40" in cases[0]["record"] and "gate=-" in cases[0]["record"] and "retry=absent:0,replaced:0" in cases[0]["record"] and "p99" not in cases[0]["record"]'
+}
+
+test_c1_gate_keeps_verdict() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_PROBE_MODE=gate
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 0
+  common_end
+  m_stage 'cases[0]["verdict"] == "ok" and cases[0]["reason"] == "-" and "gate=exceeds-2s" in cases[0]["record"] and "latency=measured" in cases[0]["record"]'
+}
+
+test_c8_no_non_admin_principal() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_PROBE_MODE=noadmin
+  run_probe 20 --stage M --case C8 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  m_stage 'cases[0]["verdict"] == "unknown" and cases[0]["reason"] == "no-non-admin-principal" and "n=0" in cases[0]["record"] and "created=0" in cases[0]["record"]'
 }
 
 test_peer0_is_not_reader_ok() {
@@ -1602,6 +1682,7 @@ run_case output-exists test_output_exists
 run_case route-fail test_route_fail
 run_case dispatcher test_dispatcher_literal
 run_case stage-m-c1 test_stage_m_c1
+run_case c1-old-name test_c1_old_name_quarantine
 run_case stage-m-c2 test_stage_m_c2
 run_case stage-m-quarantine test_stage_m_quarantine
 run_case stage-m-not-sole test_stage_m_not_sole
@@ -1609,6 +1690,9 @@ run_case stage-m-report test_stage_m_report_write
 run_case stage-m-usage test_stage_m_usage
 run_case record-eof test_record_eof_rejected
 run_case record-dup test_record_dup_rejected
+run_case c1-rtt-fields test_c1_rtt_fields_pass_through
+run_case c1-gate test_c1_gate_keeps_verdict
+run_case c8-zero test_c8_no_non_admin_principal
 run_case peer0 test_peer0_is_not_reader_ok
 run_case killed-after-ok test_killed_after_ok_is_not_success
 run_case reap-abandon test_reap_abandon
@@ -1618,4 +1702,4 @@ run_case stage-write-fail test_stage_write_fails_nonzero
 run_case share-space test_share_path_with_space
 run_case stop-unproven test_stop_unproven_quarantine
 echo "ALL_OK ${SECONDS}s"
-[[ "$SECONDS" -lt 60 ]] || { echo "suite took ${SECONDS}s" >&2; exit 1; }
+[[ "$SECONDS" -lt 90 ]] || { echo "suite took ${SECONDS}s" >&2; exit 1; }
