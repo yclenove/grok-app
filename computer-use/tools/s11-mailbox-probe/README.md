@@ -1,6 +1,6 @@
 # S11-0c 邮箱测量核心
 
-宿主编排在 `scripts/s11-0-probe.sh` 的阶段 M。这个二进制只测量一个目录。它不 clone，不做 SSH，也不调用 tart。只做 C1、C2、C8。只用标准库。生产代码不超过 1000 行，测试另计。
+宿主编排在 `scripts/s11-0-probe.sh` 的阶段 M。这个二进制只测量一个目录。它不 clone，不做 SSH，也不调用 tart。只做 C1、C2、C8。只用标准库。测试另计。
 
 导出目录是宿主上的普通私有目录，不是限容卷。HFSX 上的差异由后续 M2c/M7 补测。
 
@@ -19,7 +19,7 @@ s11-mailbox-probe c8 --dir <绝对目录> --role host|guest --count N --timeout 
 
 结果是固定格式的一行，不超过 4096 字节，写到 `result-host` 或 `result-guest`。读取同一目录 fd，并对这个 fd 做 fstat：普通文件、`nlink == 1`、大小不超过上限，读前后的 dev/inode 一致。符号链接、硬链接、FIFO 和超大文件都判失败。撕裂帧和混合帧是 `failed`。没有对端摘要不能报 `ok`。
 
-C1 双方各发布 `N` 帧。读者核对对端帧和对端 `summary-*` 的摘要。C2 的三个边界都是“写者在该点退出”。file-sync 完成的重命名是 `N-1`，第三次只 fsync 文件 `part`，不重命名，也不 fsync 数据目录；进度写在旁边的 `evidence` 目录。C2 的结论是 `not-ack` 或失败，不会报 `ok`。内容不对的 `part` 是 `failed` / `bad-part`。C8 只数非管理员主体。只有一个时是 `unknown` / `single-principal`。两个及以上仍是 `unknown` / `mapping-not-measured`。不建账户，不提权。
+C1 是乒乓：先 host→guest，再 guest→host，各 `N` 轮。发起方发布 `ping`，对端读到完整 ping 后发布带 seq 和 ping 摘要的 `pong`。往返记在发起方自己的单调时钟上，不比较两端时钟。`rtt_us` 是每个方向的 `n/min/p50/max`（样本少于 20 不报 p99）。`vis_us` 写成 `≤rtt`。两方向都完成且完整性 ok 才是 `latency=measured`。某一轮超时或缺失是 `unknown`，并保留已测样本。撕裂或替换是 `failed`。最大往返 ≥2s 时记录 `gate=exceeds-2s`，判定本身不因此改变。C2 的三个边界都是“写者在该点退出”。file-sync 完成的重命名是 `N-1`，第三次只 fsync 文件 `part`，不重命名，也不 fsync 数据目录；进度写在旁边的 `evidence` 目录。C2 的结论是 `not-ack` 或失败，不会报 `ok`。内容不对的 `part` 是 `failed` / `bad-part`。C8 只数非管理员主体。0 个是 `unknown` / `no-non-admin-principal`（`n=0`）。1 个是 `unknown` / `single-principal`。两个及以上是 `unknown` / `mapping-not-measured`。数不清是 `unknown` / `principal-unknown`。不建账户，不提权。
 
 退出码：`ok` 和 `not-ack` 是 0，其它测量结果是 1，用法错误是 2。
 

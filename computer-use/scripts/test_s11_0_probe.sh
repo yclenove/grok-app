@@ -1193,16 +1193,22 @@ peer=1
 digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 latency=measured
 [[ "$mode" == unmeasured ]] && latency=not_measured
+gate=-
+[[ "$mode" == gate ]] && gate=exceeds-2s
+c8_reason=single-principal
+c8_n=1
+if [[ "$mode" == noadmin ]]; then c8_reason=no-non-admin-principal; c8_n=0; fi
+rtt='hg=n=8,min=10,p50=20,max=30;gh=n=8,min=11,p50=21,max=40'
 line=""
 case "$cmd" in
   writer|reader)
-    line="v=1 op=c1 role=${role} verdict=ok reason=- n=8 torn=0 lost=0 integrity=ok latency=${latency} vis_us=1 rtt_us=1 slice_us=1 w_slice_us=1 open_us=1 write_us=1 fsync_us=1 rename_us=1 dir_sync_us=1 read_us=1 peer=${peer} digest=${digest}"
+    line="v=1 op=c1 role=${role} verdict=ok reason=- n=8 torn=0 lost=- integrity=ok latency=${latency} vis_us=≤rtt rtt_us=${rtt} slice_us=1 w_slice_us=1 open_us=1 write_us=1 fsync_us=1 rename_us=1 dir_sync_us=1 read_us=1 peer=${peer} digest=${digest} gate=${gate}"
     ;;
   c2)
     line="v=1 op=c2 role=${role} boundary=${boundary} verdict=not-ack reason=- planned=3 attempted=3 renamed=2 visible=2 part=ok dir_synced=0"
     ;;
   c8)
-    line="v=1 op=c8 role=${role} verdict=unknown reason=single-principal n=1 ops=0 created=0 elevated=0"
+    line="v=1 op=c8 role=${role} verdict=unknown reason=${c8_reason} n=${c8_n} ops=0 created=0 elevated=0"
     ;;
 esac
 if [[ "$mode" == nonewline ]]; then
@@ -1433,6 +1439,38 @@ test_record_dup_rejected() {
   m_stage 'cases[0]["verdict"] != "ok"'
 }
 
+test_c1_rtt_fields_pass_through() {
+  setup
+  write_pinned
+  write_fake_probe
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 0
+  common_end
+  m_stage 'cases[0]["verdict"] == "ok" and "vis_us=≤rtt" in cases[0]["record"] and "rtt_us=hg=n=8,min=10,p50=20,max=30;gh=n=8,min=11,p50=21,max=40" in cases[0]["record"] and "gate=-" in cases[0]["record"] and "p99" not in cases[0]["record"]'
+}
+
+test_c1_gate_keeps_verdict() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_PROBE_MODE=gate
+  run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 0
+  common_end
+  m_stage 'cases[0]["verdict"] == "ok" and cases[0]["reason"] == "-" and "gate=exceeds-2s" in cases[0]["record"] and "latency=measured" in cases[0]["record"]'
+}
+
+test_c8_no_non_admin_principal() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_PROBE_MODE=noadmin
+  run_probe 20 --stage M --case C8 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  m_stage 'cases[0]["verdict"] == "unknown" and cases[0]["reason"] == "no-non-admin-principal" and "n=0" in cases[0]["record"] and "created=0" in cases[0]["record"]'
+}
+
 test_peer0_is_not_reader_ok() {
   setup
   write_pinned
@@ -1609,6 +1647,9 @@ run_case stage-m-report test_stage_m_report_write
 run_case stage-m-usage test_stage_m_usage
 run_case record-eof test_record_eof_rejected
 run_case record-dup test_record_dup_rejected
+run_case c1-rtt-fields test_c1_rtt_fields_pass_through
+run_case c1-gate test_c1_gate_keeps_verdict
+run_case c8-zero test_c8_no_non_admin_principal
 run_case peer0 test_peer0_is_not_reader_ok
 run_case killed-after-ok test_killed_after_ok_is_not_success
 run_case reap-abandon test_reap_abandon

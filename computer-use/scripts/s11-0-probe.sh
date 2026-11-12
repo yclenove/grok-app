@@ -908,7 +908,7 @@ wait_guest() {
 parse_fields() {
   local line=$1 tok key val seen=" " nseen=0
   local v= op= role= verdict= reason= n= torn= lost= integrity= latency=
-  local vis= rtt= slice= wslice= openus= writeus= fsyncus= renameus= dsync= readus= peer= digest=
+  local vis= rtt= slice= wslice= openus= writeus= fsyncus= renameus= dsync= readus= peer= digest= gate=
   local boundary= planned= attempted= renamed= visible= part= dirsync= ops= created= elevated=
   M_RECORD=$line; SHAPE_OK=0
   for tok in $line; do
@@ -924,7 +924,7 @@ parse_fields() {
       n) n=$val ;; torn) torn=$val ;; lost) lost=$val ;; integrity) integrity=$val ;; latency) latency=$val ;;
       vis_us) vis=$val ;; rtt_us) rtt=$val ;; slice_us) slice=$val ;; w_slice_us) wslice=$val ;;
       open_us) openus=$val ;; write_us) writeus=$val ;; fsync_us) fsyncus=$val ;; rename_us) renameus=$val ;;
-      dir_sync_us) dsync=$val ;; read_us) readus=$val ;; peer) peer=$val ;; digest) digest=$val ;;
+      dir_sync_us) dsync=$val ;; read_us) readus=$val ;; peer) peer=$val ;; digest) digest=$val ;; gate) gate=$val ;;
       boundary) boundary=$val ;; planned) planned=$val ;; attempted) attempted=$val ;; renamed) renamed=$val ;;
       visible) visible=$val ;; part) part=$val ;; dir_synced) dirsync=$val ;;
       ops) ops=$val ;; created) created=$val ;; elevated) elevated=$val ;;
@@ -933,16 +933,18 @@ parse_fields() {
   done
   [[ "$v" == 1 ]] || return 1
   case "$reason" in
-    -|deadline|no-peer-summary|single-principal|principal-unknown|mapping-not-measured|torn|bad-part|bad-record|not-sole|init-failed|upload-failed|verify-failed|run-failed|probe-failed|skipped|quarantine|subject-policy|io|nofollow|replaced|partial-coverage) ;;
+    -|deadline|timeout|no-peer-summary|single-principal|no-non-admin-principal|principal-unknown|mapping-not-measured|torn|bad-pong|bad-part|bad-record|not-sole|init-failed|upload-failed|verify-failed|run-failed|probe-failed|skipped|quarantine|subject-policy|io|nofollow|replaced|partial-coverage) ;;
     *) return 1 ;;
   esac
   case "$verdict" in ok|failed|unknown|not-ack) ;; *) return 1 ;; esac
   case "$op" in
     c1)
-      [[ "$nseen" -eq 22 && -n "$digest" && -n "$peer" && -n "$latency" && -n "$integrity" ]] || return 1
+      [[ "$nseen" -eq 23 && -n "$digest" && -n "$peer" && -n "$latency" && -n "$integrity" && -n "$vis" && -n "$rtt" && -n "$gate" ]] || return 1
+      case "$gate" in -|exceeds-2s) ;; *) return 1 ;; esac
       if [[ "$verdict" == ok ]]; then
-        [[ "$torn" == 0 && "$integrity" == ok && "$latency" == measured && "$peer" == 1 && "$role" == host && "$n" == 8 ]] || return 1
-        case "$lost$vis$rtt$slice$wslice$openus$writeus$fsyncus$renameus$readus" in *[!0-9]*) return 1 ;; esac
+        [[ "$torn" == 0 && "$integrity" == ok && "$latency" == measured && "$peer" == 1 && "$role" == host && "$n" == 8 && "$vis" == "≤rtt" ]] || return 1
+        case "$lost" in -) ;; *) case "$lost" in *[!0-9]*) return 1 ;; esac ;; esac
+        case "$slice$wslice$openus$writeus$fsyncus$renameus$readus" in *[!0-9]*|"") return 1 ;; esac
       fi
       ;;
     c2)
