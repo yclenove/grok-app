@@ -279,31 +279,13 @@ case "$cmd" in
     put blocks 8
     put attached 0
     put mount ""
+    warn="'hdiutil create ...' is deprecated. Please use 'diskutil image create ...'"
+    printf '%s\n' "$warn" >>"$ROOT/create.err"
+    printf '%s\n' "$warn" >&2
     exit 0 ;;
   attach)
-    [[ $# -eq 10 ]] || exit 2
-    [[ "$1" == -plist && "$2" == -nobrowse && "$3" == -noautoopen && "$4" == -owners && "$5" == on && "$6" == -mountOptions && "$7" == nosuid,noexec,nodev && "$8" == -mountpoint ]] || exit 2
-    mp=$9; img=${10}
-    [[ "$img" == "$(get image)" ]] || exit 1
-    [[ -d "$mp" && ! -L "$mp" ]] || exit 1
-    set -- "$mp"/*
-    [[ -e "${1:-}" ]] && exit 1
-    case "$mp" in */mnt.*) ;; *) exit 2 ;; esac
-    mv "$mp" "$mp.under" || exit 1
-    mkdir -m 0700 "$mp" || exit 1
-    put mount "$mp"
-    put attached 1
-    if [[ -f "$ROOT/bad_plist" ]]; then
-      printf '%s\n' '#s11plist' 'system-entities.0.dev-entry=/dev/disk9'
-    else
-      printf '%s\n' '#s11plist' \
-        "system-entities.0.dev-entry=$(get disk)" \
-        "system-entities.0.mount-point=$mp" \
-        'content-hint=Apple_HFS' \
-        'volume-kind=hfs' \
-        'size-bytes=67108864'
-    fi
-    exit 0 ;;
+    printf '%s\n' 'hdiutil: attach: unknown option "-mountOptions"' >&2
+    exit 1 ;;
   info)
     [[ $# -eq 1 && "$1" == -plist ]] || exit 2
     n=0
@@ -313,12 +295,20 @@ case "$cmd" in
     if [[ -f "$ROOT/hang_info" && "$n" == 1 ]]; then while true; do sleep 30; done; fi
     att=$(get attached)
     mpt=$(get mount)
+    dev_entry=$(get disk)
+    [[ -f "$ROOT/info_bare" ]] && dev_entry=${dev_entry#/dev/}
+    [[ -f "$ROOT/info_dev" ]] && dev_entry=$(tr -d '\r\n' <"$ROOT/info_dev")
     if [[ -f "$ROOT/mismatch_on" && "$(cat "$ROOT/mismatch_on")" == "$n" ]]; then mpt=/volume-mismatch; fi
     if [[ "$att" == 1 ]]; then
+      printf '%s\n' "info dev-entry=$dev_entry" >>"$ROOT/dev-shape.log"
       printf '%s\n' '#s11plist' \
         "images.0.image-path=$(get image)" \
-        "images.0.system-entities.0.dev-entry=$(get disk)" \
-        "images.0.system-entities.0.mount-point=$mpt"
+        'images.0.owner-uid=501' \
+        'images.0.image-type=sparse' \
+        'images.0.writeable=true' \
+        "images.0.system-entities.0.dev-entry=$dev_entry" \
+        "images.0.system-entities.0.mount-point=$mpt" \
+        'images.0.system-entities.0.content-hint=Apple_HFS'
     else
       printf '%s\n' '#s11plist' 'images.count=0'
     fi
@@ -343,9 +333,61 @@ case "$cmd" in
     rm -rf "$mp"
     mv "$mp.under" "$mp" || exit 1
     put attached 0
+    printf '"%s" ejected.\n' "${dev#/dev/}" >>"$ROOT/detach.out"
+    printf '"%s" ejected.\n' "${dev#/dev/}"
     exit 0 ;;
   *) exit 2 ;;
 esac
+EOF
+  cat >"$BASE/tpl/diskutil" <<'EOF'
+#!/bin/bash
+ROOT=${S11_STUB_ROOT:?}
+printf '%s\n' "$*" >>"$ROOT/diskutil.log"
+STATE=$ROOT/vol.state
+get() { awk -F= -v k="$1" '$1==k{print substr($0, index($0, "=")+1); exit}' "$STATE"; }
+put() {
+  local k=$1 v=$2 tmp=$STATE.tmp
+  if [[ -f "$STATE" ]]; then
+    awk -F= -v k="$k" -v v="$v" 'BEGIN{found=0} $1==k{print k"="v; found=1; next} {print} END{if(!found) print k"="v}' "$STATE" >"$tmp"
+  else
+    printf '%s=%s\n' "$k" "$v" >"$tmp"
+  fi
+  mv "$tmp" "$STATE"
+}
+if [[ "${1:-}" == image && "${2:-}" == info ]]; then
+  printf '%s\n' 'Operation not supported' >&2
+  exit 1
+fi
+[[ "${1:-}" == image && "${2:-}" == attach ]] || exit 2
+shift 2
+[[ $# -eq 7 ]] || exit 2
+[[ "$1" == --plist && "$2" == --nobrowse && "$3" == --mountPoint && "$5" == --mountOptions && "$6" == nosuid,noexec,nodev,owners ]] || exit 2
+mp=$4; img=$7
+[[ "$img" == "$(get image)" ]] || exit 1
+[[ -d "$mp" && ! -L "$mp" ]] || exit 1
+set -- "$mp"/*
+[[ -e "${1:-}" ]] && exit 1
+case "$mp" in */mnt.*) ;; *) exit 2 ;; esac
+mv "$mp" "$mp.under" || exit 1
+mkdir -m 0700 "$mp" || exit 1
+put mount "$mp"
+put attached 1
+ent=disk9
+[[ -f "$ROOT/attach_prefixed" ]] && ent=$(get disk)
+printf '%s\n' "attach dev-entry=$ent" >>"$ROOT/dev-shape.log"
+if [[ -f "$ROOT/bad_plist" ]]; then
+  printf '%s\n' '#s11plist' 'system-entities.0.dev-entry=disk9'
+  exit 0
+fi
+printf '%s\n' '#s11plist' \
+  "system-entities.0.dev-entry=$ent" \
+  'system-entities.0.filesystem-name=Case-sensitive HFS+' \
+  'system-entities.0.filesystem-type=hfs' \
+  "system-entities.0.mount-point=$mp" \
+  'system-entities.0.size=67108864' \
+  'system-entities.0.volume-name=GCU-MAILBOX' \
+  'system-entities.0.content-hint=Apple_HFS'
+exit 0
 EOF
   cat >"$BASE/tpl/plutil" <<'EOF'
 #!/bin/bash
@@ -385,9 +427,12 @@ printf '%s\n' "$*" >>"$ROOT/mount.log"
 STATE=$ROOT/vol.state
 get() { awk -F= -v k="$1" '$1==k{print substr($0, index($0, "=")+1); exit}' "$STATE"; }
 [[ "$(get attached)" == 1 ]] || exit 0
-opts='hfs, local, nodev, nosuid, noexec, nobrowse'
-[[ -f "$ROOT/drop_nosuid" ]] && opts='hfs, local, nodev, noexec, nobrowse'
-printf '%s\n' "$(get disk) on $(get mount) ($opts)"
+opts='hfs, local, nodev, noexec, nosuid, nobrowse, mounted by stub'
+[[ -f "$ROOT/drop_nosuid" ]] && opts='hfs, local, nodev, noexec, nobrowse, mounted by stub'
+[[ -f "$ROOT/show_noowners" ]] && opts='hfs, local, nodev, noexec, nosuid, nobrowse, noowners, mounted by stub'
+line="$(get disk) on $(get mount) ($opts)"
+printf '%s\n' "$line" >>"$ROOT/mount.out"
+printf '%s\n' "$line"
 exit 0
 EOF
   cat >"$BASE/tpl/mdutil" <<'EOF'
@@ -403,9 +448,17 @@ EOF
 #!/bin/bash
 ROOT=${S11_STUB_ROOT:?}
 printf '%s\n' "$*" >>"$ROOT/tmutil.log"
+if [[ "$1" == addexclusion ]]; then
+  printf '%s\n' 'Operation not permitted' >&2
+  exit 1
+fi
 [[ "$1" == isexcluded && $# -eq 2 ]] || exit 2
-printf '%s\n' 'Operation not permitted' >&2
-exit 1
+if [[ -f "$ROOT/tmutil_fail" ]]; then
+  printf '%s\n' 'Operation not permitted' >&2
+  exit 1
+fi
+printf '%s\n' "[Included]  $2"
+exit 0
 EOF
   cat >"$BASE/tpl/statv" <<'EOF'
 #!/bin/bash
@@ -456,7 +509,7 @@ printf 'v=1 seq=1 bytes=%s files=%s enospc=%s\n' "$bytes" "$files" "$en" >"$mbx/
 printf 'v=1 op=c9 role=guest mode=%s enospc=%s bytes=%s files=%s batches=1\n' "$mode" "$en" "$bytes" "$files" >"$mbx/result-guest"
 exit 0
 EOF
-  chmod 700 "$BASE/tpl/hdiutil" "$BASE/tpl/plutil" "$BASE/tpl/mount" "$BASE/tpl/mdutil" "$BASE/tpl/tmutil" "$BASE/tpl/statv" "$BASE/tpl/df" "$BASE/tpl/c9write"
+  chmod 700 "$BASE/tpl/hdiutil" "$BASE/tpl/diskutil" "$BASE/tpl/plutil" "$BASE/tpl/mount" "$BASE/tpl/mdutil" "$BASE/tpl/tmutil" "$BASE/tpl/statv" "$BASE/tpl/df" "$BASE/tpl/c9write"
 }
 
 setup() {
@@ -478,7 +531,7 @@ setup() {
   export TMPDIR=$CASE/tmp
   export S11_START_SEC=0
   unset BASH_ENV S11_XTRACE S11_BOUND_SEC S11_BOUND_POLLS S11_FORCE_NAME S11_PROBE_BUDGET S11_CLEANUP_BUDGET S11_REAP_POLLS S11_FAIL_ROW_N S11_FAIL_STAGE S11_PROBE_MODE
-  unset S11_HDIUTIL S11_PLUTIL S11_MOUNT S11_MDUTIL S11_TMUTIL S11_STAT S11_DF
+  unset S11_HDIUTIL S11_DISKUTIL S11_PLUTIL S11_MOUNT S11_MDUTIL S11_TMUTIL S11_STAT S11_DF
   ARGS=(--ssh-key "$CASE/id_key" --tart-home "$CASE/thome" --out "$CASE/out")
 }
 
@@ -1921,6 +1974,7 @@ run_case stage-write-fail test_stage_write_fails_nonzero
 run_case share-space test_share_path_with_space
 enable_volume() {
   export S11_HDIUTIL=$ROOT/bin/hdiutil
+  export S11_DISKUTIL=$ROOT/bin/diskutil
   export S11_PLUTIL=$ROOT/bin/plutil
   export S11_MOUNT=$ROOT/bin/mount
   export S11_MDUTIL=$ROOT/bin/mdutil
@@ -1950,22 +2004,43 @@ assert_image_kept() {
 
 assert_create_argv() {
   grep -E '^create -size 64m -fs HFSX -type SPARSE -layout NONE -volname GCU-MAILBOX .*/mailbox\.sparseimage$' "$ROOT/hdiutil.log" >/dev/null || die "create argv"
-  grep -E '^attach -plist -nobrowse -noautoopen -owners on -mountOptions nosuid,noexec,nodev -mountpoint .* .*/mailbox\.sparseimage$' "$ROOT/hdiutil.log" >/dev/null || die "attach argv"
+  if grep -E '^attach( |$)' "$ROOT/hdiutil.log"; then die "hdiutil attach used"; fi
+  grep -E '^image attach --plist --nobrowse --mountPoint .+ --mountOptions nosuid,noexec,nodev,owners .+/mailbox\.sparseimage$' "$ROOT/diskutil.log" >/dev/null || die "attach argv"
   grep -F -q -- '-extract system-entities.0.dev-entry raw -o -' "$ROOT/plutil.log" || die "plutil extract"
+  grep -F -q -- '-extract system-entities.0.filesystem-type raw -o -' "$ROOT/plutil.log" || die "plutil fstype"
+  grep -F -q -- '-extract system-entities.0.size raw -o -' "$ROOT/plutil.log" || die "plutil size"
+  grep -F -q -- '-extract system-entities.0.content-hint raw -o -' "$ROOT/plutil.log" || die "plutil hint"
   grep -F -q -- '-extract images.0.image-path raw -o -' "$ROOT/plutil.log" || die "plutil info"
+  grep -F -q -- '-extract images.0.system-entities.0.dev-entry raw -o -' "$ROOT/plutil.log" || die "plutil info dev"
+  if grep -F -q -- 'volume-kind' "$ROOT/plutil.log"; then die "old volume-kind"; fi
+  if grep -F -q -- 'size-bytes' "$ROOT/plutil.log"; then die "old size-bytes"; fi
+  if grep -F -q -- 'image info' "$ROOT/diskutil.log"; then die "diskutil image info used"; fi
 }
 
 test_stage_v_c4_argv_and_cleanup() {
   setup
   enable_volume
   grep -F -q 'S11_HDIUTIL:-/usr/bin/hdiutil' "$PROBE" || die "default hdiutil"
+  grep -F -q 'S11_DISKUTIL:-/usr/sbin/diskutil' "$PROBE" || die "default diskutil"
   grep -F -q -- '-size 64m -fs HFSX -type SPARSE -layout NONE -volname GCU-MAILBOX' "$PROBE" || die "create literal"
-  grep -F -q -- '-plist -nobrowse -noautoopen -owners on -mountOptions nosuid,noexec,nodev' "$PROBE" || die "attach literal"
+  grep -F -q -- 'image attach --plist --nobrowse --mountPoint' "$PROBE" || die "attach literal"
+  grep -F -q -- '--mountOptions nosuid,noexec,nodev,owners' "$PROBE" || die "mount options"
+  if grep -F -q -- 'hdiutil attach' "$PROBE"; then die "hdiutil attach remains"; fi
+  if grep -F -q -- '-noautoopen' "$PROBE"; then die "old noautoopen"; fi
+  if grep -F -q -- '-owners on' "$PROBE"; then die "old owners flag"; fi
+  if grep -F -q -- '-mountpoint' "$PROBE"; then die "old mountpoint"; fi
+  if grep -F -q -- 'image info' "$PROBE"; then die "diskutil image info in probe"; fi
   run_probe 12 --stage V --case C4 "${ARGS[@]}"
   need_ec 0
   common_end
   assert_create_argv
   assert_image_gone
+  grep -F -q 'attach dev-entry=disk9' "$ROOT/dev-shape.log" || die "attach bare dev"
+  grep -F -q 'info dev-entry=/dev/disk9' "$ROOT/dev-shape.log" || die "info prefixed dev"
+  grep -E '^/dev/disk9 on .+ \(hfs, local, nodev, noexec, nosuid, nobrowse, mounted by stub\)$' "$ROOT/mount.out" >/dev/null || die "mount line"
+  if grep -F -q noowners "$ROOT/mount.out"; then die "owners dropped"; fi
+  grep -F -q '"disk9" ejected.' "$ROOT/detach.out" || die "eject text"
+  grep -F -q -- "'hdiutil create ...' is deprecated. Please use 'diskutil image create ...'" "$ROOT/create.err" || die "create warning"
   grep -F -q '"export":"capped HFSX volume"' "$CASE/out/report.json" || die "export label"
   grep -F -q '"evidence":"volume-only"' "$CASE/out/report.json" || die "c4 evidence"
   grep -F -q '"fstype":"hfs"' "$CASE/out/report.json" || die "fstype"
@@ -1973,10 +2048,16 @@ test_stage_v_c4_argv_and_cleanup() {
   grep -F -q '"noexec":"yes"' "$CASE/out/report.json" || die "noexec"
   grep -F -q '"nodev":"yes"' "$CASE/out/report.json" || die "nodev"
   grep -F -q '"nobrowse":"yes"' "$CASE/out/report.json" || die "nobrowse"
+  grep -F -q '"owners":"yes"' "$CASE/out/report.json" || die "owners"
   grep -F -q '"mdutil":"disabled"' "$CASE/out/report.json" || die "mdutil"
-  grep -F -q '"tmutil":"unknown"' "$CASE/out/report.json" || die "tmutil"
+  grep -F -q '"tmutil":"included"' "$CASE/out/report.json" || die "tmutil"
+  grep -F -q '"create_warn":"deprecated"' "$CASE/out/report.json" || die "create warn"
   grep -F -q '"capacity":"67108864"' "$CASE/out/report.json" || die "capacity"
   grep -F -q '"verdict":"ok"' "$CASE/out/report.json" || die "c4 ok"
+  local img
+  img=$(image_path)
+  grep -F -q -- "isexcluded $img" "$ROOT/tmutil.log" || die "tmutil target"
+  if grep -F -q addexclusion "$ROOT/tmutil.log"; then die "addexclusion called"; fi
   local n
   n=$(grep -c '^detach /dev/disk9$' "$ROOT/hdiutil.log" || true)
   [[ "$n" == 1 ]] || die "detach count $n"
@@ -2127,12 +2208,62 @@ test_stage_v_usage() {
   need_ec 0
   common_end
   grep -F -q '/usr/bin/hdiutil create -size 64m -fs HFSX -type SPARSE -layout NONE -volname GCU-MAILBOX' "$CASE/stdout" || die "dry create"
-  grep -F -q '/usr/bin/hdiutil attach -plist -nobrowse -noautoopen -owners on -mountOptions nosuid,noexec,nodev' "$CASE/stdout" || die "dry attach"
+  grep -F -q '/usr/sbin/diskutil image attach --plist --nobrowse --mountPoint' "$CASE/stdout" || die "dry attach"
+  grep -F -q -- '--mountOptions nosuid,noexec,nodev,owners' "$CASE/stdout" || die "dry options"
+  if grep -F -q 'hdiutil attach' "$CASE/stdout"; then die "dry hdiutil attach"; fi
   [[ ! -f "$ROOT/hdiutil.log" ]] || die "dry called hdiutil"
+  [[ ! -f "$ROOT/diskutil.log" ]] || die "dry called diskutil"
+}
+
+test_stage_v_dev_prefix_normalized() {
+  setup
+  enable_volume
+  touch "$ROOT/info_bare" "$ROOT/attach_prefixed"
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 0
+  common_end
+  assert_image_gone
+  grep -F -q 'attach dev-entry=/dev/disk9' "$ROOT/dev-shape.log" || die "prefixed attach"
+  grep -F -q 'info dev-entry=disk9' "$ROOT/dev-shape.log" || die "bare info"
+  grep -F -q '"owners":"yes"' "$CASE/out/report.json" || die "normalized owners"
+  local n
+  n=$(grep -c '^detach /dev/disk9$' "$ROOT/hdiutil.log" || true)
+  [[ "$n" == 1 ]] || die "normalized detach $n"
+  rm -rf "$CASE/out" "$ROOT/hdiutil.log" "$ROOT/diskutil.log" "$ROOT/dev-shape.log" "$ROOT/vol.state" "$ROOT/info.count" "$ROOT/detach.out" "$ROOT/mount.out" "$ROOT/create.err" "$ROOT/plutil.log" "$ROOT/tmutil.log"
+  rm -f "$ROOT/info_bare" "$ROOT/attach_prefixed"
+  printf '%s\n' '/dev/disk8' >"$ROOT/info_dev"
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  assert_image_kept
+  grep -F -q 'attach dev-entry=disk9' "$ROOT/dev-shape.log" || die "mismatch attach shape"
+  grep -F -q 'info dev-entry=/dev/disk8' "$ROOT/dev-shape.log" || die "mismatch info shape"
+}
+
+test_stage_v_noowners_unknown() {
+  setup
+  enable_volume
+  touch "$ROOT/show_noowners"
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 0
+  common_end
+  assert_image_gone
+  grep -F -q 'noowners' "$ROOT/mount.out" || die "noowners missing"
+  grep -F -q '"owners":"unknown"' "$CASE/out/report.json" || die "owners unknown"
+  grep -F -q '"nosuid":"yes"' "$CASE/out/report.json" || die "nosuid kept"
+  grep -F -q '"export_state":"removed"' "$CASE/out/report.json" || die "noowners cleaned"
+  grep -F -q '"verdict":"ok"' "$CASE/out/report.json" || die "noowners verdict"
+  if grep -F -q '"export_state":"quarantine"' "$CASE/out/report.json"; then die "noowners quarantined"; fi
+  local n
+  n=$(grep -c '^detach /dev/disk9$' "$ROOT/hdiutil.log" || true)
+  [[ "$n" == 1 ]] || die "noowners detach $n"
 }
 
 run_case stop-unproven test_stop_unproven_quarantine
 run_case stage-v-c4 test_stage_v_c4_argv_and_cleanup
+run_case stage-v-prefix test_stage_v_dev_prefix_normalized
+run_case stage-v-noowners test_stage_v_noowners_unknown
 run_case stage-v-mismatch test_stage_v_mismatch_quarantine
 run_case stage-v-force test_stage_v_detach_force_once
 run_case stage-v-no-force test_stage_v_no_force_if_vm_not_stopped

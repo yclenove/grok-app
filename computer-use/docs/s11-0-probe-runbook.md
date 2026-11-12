@@ -117,12 +117,18 @@ C2 对 `file-sync`、`dir-sync`、`rename` 各起一台新 clone。每个边界�
 
 真机跑阶段 V 之前必须先发一句：这次会在 Mini 上创建、挂载、卸载并删除一个 64MiB 的专用镜像。没有这句话就不要跑。本段不构成运行授权。真实机器上的阶段 V 仍是 not_run。
 
-镜像只用固定参数调用 `/usr/bin/hdiutil`（`create -size 64m -fs HFSX -type SPARSE -layout NONE -volname GCU-MAILBOX`，以及 `attach -plist -nobrowse -noautoopen -owners on -mountOptions nosuid,noexec,nodev`）。设备节点和挂载点只从 `/usr/bin/plutil -extract` 读出，再用 `hdiutil info -plist` 核对镜像路径、设备号和 inode。对不上、读回不完整或超时，脚本不做卸载、不删镜像，把尝试目录留在 `--out` 下，报告 `quarantine`，退出码 5。
+创建用 `/usr/bin/hdiutil create -size 64m -fs HFSX -type SPARSE -layout NONE -volname GCU-MAILBOX`。macOS 27 上这条命令退出码是 0，stderr 有弃用警告（`'hdiutil create ...' is deprecated. Please use 'diskutil image create ...'`）。`diskutil image create blank` 不能做 HFSX，也不能做单文件 sparse，所以仍用 hdiutil create。警告记成观测，不当错误。
+
+挂载不用 hdiutil 的旧 attach 参数（macOS 27 报 unknown option）。改用 `/usr/sbin/diskutil image attach --plist --nobrowse --mountPoint <挂载点> --mountOptions nosuid,noexec,nodev,owners <镜像>`。不要用 `diskutil image info`（对这份 sparseimage 返回 Operation not supported）。
+
+设备节点和挂载点只从 `/usr/bin/plutil -extract` 按真实键名读出。attach 的 plist 顶层只有 `system-entities`，元素里的 `dev-entry` 没有 `/dev/` 前缀（例如 `disk4`），还有 `filesystem-name`、`filesystem-type`、`mount-point`、`size`、`volume-name`、`content-hint`。再用 `/usr/bin/hdiutil info -plist` 核对 `image-path` 和 `system-entities` 里的 `dev-entry`（这里带 `/dev/` 前缀）、`mount-point`。比较前把两边的 `dev-entry` 都规范成 `/dev/diskN`。再对上这份镜像的设备号和 inode。对不上、读回不完整或超时，脚本不做卸载、不删镜像，把尝试目录留在 `--out` 下，报告 `quarantine`，退出码 5。
+
+`mdutil -s` 只认原文里的 `Indexing disabled.` 或 `Indexing enabled.`。`tmutil isexcluded` 对着镜像路径，认 `[Included]` 或 `[Excluded]`。`tmutil addexclusion` 没测，失败或要权限就记 unknown。
 
 quarantine 之后由人处理，脚本不会补一次删除。先在该次 `--out` 里找到留下的尝试目录和其中的 `mailbox.sparseimage`，再人工核对，不要凭目录名直接删：
 
-- `hdiutil info -plist`，看 `image-path` 是不是这一份镜像，`dev-entry` 和 `mount-point` 是不是同一次 attach 记下来的那一对
-- `mount`，看该挂载点上的实际选项
+- `hdiutil info -plist`，看 `image-path` 是不是这一份镜像。`dev-entry` 先规范成 `/dev/diskN`，再和 attach 记下来的设备、`mount-point` 比较
+- `mount`，看该挂载点上有没有 nosuid、noexec、nodev、nobrowse，并且没有 noowners。出现 noowners 时 owners 记 unknown，不因此跳过卸载
 - `stat` 这一份镜像的设备号和 inode，对照报告里记录的值
 
 只有这三项都指向同一次尝试，才可以手工 `hdiutil detach` 对应的整盘设备，再确认 `hdiutil info` 里已经没有这份镜像，然后删除镜像文件和空目录。对不上就停，留给下一次人工判断。不要用 `sudo`，不要 `detach -force`，除非已经证明没有 VM 还拿着这个卷。

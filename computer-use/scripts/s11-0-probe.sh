@@ -27,6 +27,7 @@ M_CASE=""; M_PROBE=""; PINNED_KEY=""; EXPORT_DIR=""; ONCE_KEY=""; ONCE_PUB=""; G
 M_VERDICT=unknown; M_REASON=skipped; EXPORT_STATE=absent; M_BOUNDARY=-
 EXPORT_DONE=0; SSH_BG_PID=""
 HDIUTIL=${S11_HDIUTIL:-/usr/bin/hdiutil}
+DISKUTIL=${S11_DISKUTIL:-/usr/sbin/diskutil}
 PLUTIL=${S11_PLUTIL:-/usr/bin/plutil}
 MOUNTBIN=${S11_MOUNT:-/sbin/mount}
 MDUTIL=${S11_MDUTIL:-/usr/bin/mdutil}
@@ -38,6 +39,7 @@ VOL_PHASE=none; VOL_MAYBE=0; VOL_ID_BROKEN=0; VOL_FORCE=0; VOL_OPT_REJECT=0
 VOL_CREATE_SEC=-1; VOL_ATTACH_SEC=-1; VOL_DETACH_SEC=-1
 VOL_FSTYPE=unknown; VOL_HINT=unknown; VOL_CAPACITY=unknown
 VOL_NOSUID=unknown; VOL_NOEXEC=unknown; VOL_NODEV=unknown; VOL_NOBROWSE=unknown
+VOL_OWNERS=unknown; VOL_CREATE_WARN=absent
 VOL_MDUTIL=unknown; VOL_TMUTIL=unknown
 VOL_IMAGE=0; VOL_ALLOC=0; VOL_HOST_DROP=0; VOL_ENOSPC=0; VOL_VOLFREE=unknown
 VOL_BASE_ALLOC=0; VOL_BASE_HOST=0; VOL_HAVE_BASE=0
@@ -1380,10 +1382,16 @@ pl_get() {
   case "$line" in *$'\r'*|*'$'*|*'`'*) return 1 ;; esac
   PL_VAL=$line
 }
-disk_ok() {
+# attach prints diskN; hdiutil info prints /dev/diskN. Compare only the normalized node.
+norm_disk() {
   local rest
-  case "$1" in /dev/disk*) rest=${1#/dev/disk} ;; *) return 1 ;; esac
-  vol_num "$rest"
+  case "$1" in
+    /dev/disk*) rest=${1#/dev/disk} ;;
+    disk*) rest=${1#disk} ;;
+    *) return 1 ;;
+  esac
+  vol_num "$rest" || return 1
+  printf '%s\n' "/dev/disk$rest"
 }
 stat_image() {
   local a b c d n st
@@ -1455,8 +1463,7 @@ info_holds() {
         st=$?
         [[ "$st" -eq 2 ]] && return 1
         [[ "$st" -ne 0 ]] && break
-        dev=$PL_VAL
-        disk_ok "$dev" || return 1
+        dev=$(norm_disk "$PL_VAL") || return 1
         if [[ "$dev" == "$VOL_DISK" ]]; then
           pl_get "images.$i.system-entities.$j.mount-point" "$WORKDIR/info.plist" || return 1
           [[ "$PL_VAL" == "$VOL_M" ]] || return 1
@@ -1480,21 +1487,27 @@ parse_attach() {
       [[ "$i" -eq 0 ]] && return 1
       break
     fi
-    dev=$PL_VAL
-    disk_ok "$dev" || return 1
+    dev=$(norm_disk "$PL_VAL") || return 1
     pl_get "system-entities.$i.mount-point" "$WORKDIR/attach.plist" || return 1
     [[ "$PL_VAL" == "$VOL_M" ]] || return 1
     [[ "$found" -eq 1 ]] && return 1
     VOL_DISK=$dev; found=1
+    pl_get "system-entities.$i.content-hint" "$WORKDIR/attach.plist"
+    st=$?
+    [[ "$st" -eq 2 ]] && return 1
+    [[ "$st" -eq 0 ]] && VOL_HINT=$(vol_tok "$PL_VAL")
+    pl_get "system-entities.$i.filesystem-type" "$WORKDIR/attach.plist"
+    st=$?
+    [[ "$st" -eq 2 ]] && return 1
+    [[ "$st" -eq 0 ]] && VOL_FSTYPE=$(vol_tok "$PL_VAL")
+    pl_get "system-entities.$i.size" "$WORKDIR/attach.plist"
+    st=$?
+    [[ "$st" -eq 2 ]] && return 1
+    if [[ "$st" -eq 0 ]] && vol_num "$PL_VAL"; then VOL_CAPACITY=$PL_VAL; fi
     i=$((i + 1))
   done
   [[ "$i" -eq 8 ]] && return 1
   [[ "$found" -eq 1 ]] || return 1
-  if pl_get content-hint "$WORKDIR/attach.plist"; then VOL_HINT=$(vol_tok "$PL_VAL"); fi
-  if pl_get volume-kind "$WORKDIR/attach.plist"; then VOL_FSTYPE=$(vol_tok "$PL_VAL"); fi
-  if pl_get size-bytes "$WORKDIR/attach.plist"; then
-    if vol_num "$PL_VAL"; then VOL_CAPACITY=$PL_VAL; fi
-  fi
 }
 flag_in() {
   case ",${1// /}," in *",$2,"*) return 0 ;; esac
@@ -1505,7 +1518,7 @@ read_mount() {
   vol_run 5 "$MOUNTBIN"
   st=$?
   [[ "$st" -eq 0 ]] || return 2
-  VOL_NOSUID=no; VOL_NOEXEC=no; VOL_NODEV=no; VOL_NOBROWSE=no
+  VOL_NOSUID=no; VOL_NOEXEC=no; VOL_NODEV=no; VOL_NOBROWSE=no; VOL_OWNERS=unknown
   while IFS= read -r line; do
     dev=${line%% on *}
     rest=${line#* on }
@@ -1513,11 +1526,14 @@ read_mount() {
       "$VOL_M ("*) ;;
       *) continue ;;
     esac
+    dev=$(norm_disk "$dev") || return 1
     [[ "$dev" == "$VOL_DISK" ]] || return 1
     opts=${rest#"$VOL_M ("}
     opts=${opts%)}
     fst=${opts%%,*}
     VOL_FSTYPE=$(vol_tok "$fst")
+    VOL_OWNERS=yes
+    flag_in "$opts" noowners && VOL_OWNERS=unknown
     flag_in "$opts" nosuid && VOL_NOSUID=yes
     flag_in "$opts" noexec && VOL_NOEXEC=yes
     flag_in "$opts" nodev && VOL_NODEV=yes
@@ -1530,20 +1546,48 @@ read_mount() {
   fi
 }
 note_mdutil() {
-  local line
+  local line word seen=""
   VOL_MDUTIL=unknown
   vol_bin_ok "$MDUTIL" || return 0
   vol_run 5 "$MDUTIL" -s "$VOL_M" || return 0
-  IFS= read -r line <"$WORKDIR/v.out" || return 0
-  case "$line" in *[Dd]isabled*) VOL_MDUTIL=disabled ;; *[Ee]nabled*) VOL_MDUTIL=enabled ;; esac
+  while IFS= read -r line; do
+    line=${line#"${line%%[![:space:]]*}"}
+    case "$line" in
+      "Indexing disabled.") word=disabled ;;
+      "Indexing enabled.") word=enabled ;;
+      *) continue ;;
+    esac
+    if [[ -n "$seen" && "$seen" != "$word" ]]; then VOL_MDUTIL=unknown; return 0; fi
+    seen=$word
+  done <"$WORKDIR/v.out"
+  [[ -n "$seen" ]] && VOL_MDUTIL=$seen
 }
 note_tmutil() {
-  local line
+  local line status path n
   VOL_TMUTIL=unknown
   vol_bin_ok "$TMUTIL" || return 0
-  vol_run 5 "$TMUTIL" isexcluded "$VOL_M" || return 0
+  # addexclusion is unmeasured. A failure or a permission error stays unknown.
+  vol_run 5 "$TMUTIL" isexcluded "$VOL_I" || return 0
+  n=$(wc -l <"$WORKDIR/v.out" | tr -d ' ')
+  [[ "$n" == 1 ]] || return 0
   IFS= read -r line <"$WORKDIR/v.out" || return 0
-  case "$line" in *[Ee]xcluded*) VOL_TMUTIL=excluded ;; *) VOL_TMUTIL=present ;; esac
+  case "$line" in
+    "[Excluded]"*) status=excluded ;;
+    "[Included]"*) status=included ;;
+    *) return 0 ;;
+  esac
+  path=${line#*]}
+  path=${path#"${path%%[![:space:]]*}"}
+  [[ "$path" == "$VOL_I" ]] || return 0
+  VOL_TMUTIL=$status
+}
+note_create_warn() {
+  local mark
+  VOL_CREATE_WARN=absent
+  [[ -s "$WORKDIR/v.err" ]] || return 0
+  mark="'hdiutil create ...' is deprecated. Please use 'diskutil image create ...'"
+  if grep -F -q -- "$mark" "$WORKDIR/v.err"; then VOL_CREATE_WARN=deprecated; return 0; fi
+  VOL_CREATE_WARN=unknown
 }
 unlink_image() {
   stat_image || return 1
@@ -1561,6 +1605,7 @@ reset_vol() {
   VOL_CREATE_SEC=-1; VOL_ATTACH_SEC=-1; VOL_DETACH_SEC=-1
   VOL_FSTYPE=unknown; VOL_HINT=unknown; VOL_CAPACITY=unknown
   VOL_NOSUID=unknown; VOL_NOEXEC=unknown; VOL_NODEV=unknown; VOL_NOBROWSE=unknown
+  VOL_OWNERS=unknown; VOL_CREATE_WARN=absent
   VOL_MDUTIL=unknown; VOL_TMUTIL=unknown
   VOL_IMAGE=0; VOL_ALLOC=0; VOL_HOST_DROP=0; VOL_ENOSPC=0; VOL_VOLFREE=unknown
   VOL_BASE_ALLOC=0; VOL_BASE_HOST=0; VOL_HAVE_BASE=0
@@ -1568,7 +1613,7 @@ reset_vol() {
 }
 volume_up() {
   local t0 st
-  if ! vol_bin_ok "$HDIUTIL" || ! vol_bin_ok "$PLUTIL" || ! vol_bin_ok "$MOUNTBIN" || ! vol_bin_ok "$STATBIN" || ! vol_bin_ok "$DFBIN"; then
+  if ! vol_bin_ok "$HDIUTIL" || ! vol_bin_ok "$DISKUTIL" || ! vol_bin_ok "$PLUTIL" || ! vol_bin_ok "$MOUNTBIN" || ! vol_bin_ok "$STATBIN" || ! vol_bin_ok "$DFBIN"; then
     M_VERDICT=unknown; M_REASON=tool-missing; ANY_COLLECTION_FAILED=1
     return 1
   fi
@@ -1578,6 +1623,8 @@ volume_up() {
   chmod 0700 "$VOL_M" || { M_VERDICT=unknown; M_REASON=io; ANY_COLLECTION_FAILED=1; return 1; }
   VOL_I=$VOL_A/mailbox.sparseimage
   t0=$SECONDS
+  # HFSX single-file sparse stays on hdiutil. diskutil image create blank cannot make it.
+  # macOS 27 prints a deprecation warning on stderr. That warning is an observation, not a failure.
   vol_run 20 "$HDIUTIL" create -size 64m -fs HFSX -type SPARSE -layout NONE -volname GCU-MAILBOX "$VOL_I"
   st=$?
   VOL_CREATE_SEC=$((SECONDS - t0))
@@ -1590,11 +1637,13 @@ volume_up() {
     VOL_A=""; VOL_PHASE=none
     return 1
   fi
+  note_create_warn
   if [[ -L "$VOL_I" || ! -f "$VOL_I" ]]; then vol_quarantine; return 4; fi
   if ! stat_image; then vol_quarantine; return 4; fi
   VOL_DEV=$ST_DEV; VOL_INO=$ST_INO; VOL_PHASE=created
   t0=$SECONDS
-  vol_run 10 "$HDIUTIL" attach -plist -nobrowse -noautoopen -owners on -mountOptions nosuid,noexec,nodev -mountpoint "$VOL_M" "$VOL_I"
+  # macOS 27 rejects hdiutil's old attach flags. This diskutil argv is the measured mount.
+  vol_run 10 "$DISKUTIL" image attach --plist --nobrowse --mountPoint "$VOL_M" --mountOptions nosuid,noexec,nodev,owners "$VOL_I"
   st=$?
   VOL_ATTACH_SEC=$((SECONDS - t0))
   if [[ "$st" -eq 2 ]]; then VOL_MAYBE=1; vol_quarantine; return 4; fi
@@ -1760,13 +1809,14 @@ m_run_c9() {
 }
 write_vol_meta() {
   local f=$WORKDIR/vol.$M_CASE.$M_BOUNDARY
-  printf '%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' \
+  printf '%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' \
     "$(vol_tok "$VOL_FSTYPE")" "$(vol_tok "$VOL_HINT")" "$(vol_tok "$VOL_CAPACITY")" \
     "$(vol_tok "$VOL_NOSUID")" "$(vol_tok "$VOL_NOEXEC")" "$(vol_tok "$VOL_NODEV")" "$(vol_tok "$VOL_NOBROWSE")" \
     "$(vol_tok "$VOL_MDUTIL")" "$(vol_tok "$VOL_TMUTIL")" \
     "$(vol_tok "$VOL_CREATE_SEC")" "$(vol_tok "$VOL_ATTACH_SEC")" "$(vol_tok "$VOL_DETACH_SEC")" \
     "$(vol_tok "$VOL_FORCE")" "$(vol_tok "$VOL_IMAGE")" "$(vol_tok "$VOL_ALLOC")" "$(vol_tok "$VOL_HOST_DROP")" \
-    "$(vol_tok "$VOL_ENOSPC")" "$(vol_tok "$VOL_VOLFREE")" >"$f" || IO_FAIL=1
+    "$(vol_tok "$VOL_ENOSPC")" "$(vol_tok "$VOL_VOLFREE")" \
+    "$(vol_tok "$VOL_OWNERS")" "$(vol_tok "$VOL_CREATE_WARN")" >"$f" || IO_FAIL=1
 }
 finish_c4() {
   [[ "$M_CASE" == C4 ]] || return 0
@@ -1781,7 +1831,7 @@ finish_c4() {
   elif [[ "$M_REASON" == skipped ]]; then
     M_VERDICT=unknown; M_REASON=incomplete; ANY_COLLECTION_FAILED=1
   fi
-  M_RECORD="v=1 op=c4 fstype=${VOL_FSTYPE} hint=${VOL_HINT} capacity=${VOL_CAPACITY} nosuid=${VOL_NOSUID} noexec=${VOL_NOEXEC} nodev=${VOL_NODEV} nobrowse=${VOL_NOBROWSE} mdutil=${VOL_MDUTIL} tmutil=${VOL_TMUTIL} force=${VOL_FORCE}"
+  M_RECORD="v=1 op=c4 fstype=${VOL_FSTYPE} hint=${VOL_HINT} capacity=${VOL_CAPACITY} nosuid=${VOL_NOSUID} noexec=${VOL_NOEXEC} nodev=${VOL_NODEV} nobrowse=${VOL_NOBROWSE} owners=${VOL_OWNERS} mdutil=${VOL_MDUTIL} tmutil=${VOL_TMUTIL} create=${VOL_CREATE_WARN} force=${VOL_FORCE}"
 }
 run_v_one() {
   local st=0 vrc=0
@@ -1848,7 +1898,7 @@ run_volume() {
 }
 save_stage_v() {
   local agg caseb boundary verd reason estate name created launch ssh argv cu stop del abs first=1 rec tmp
-  local fstype hint cap nosuid noexec nodev nobrowse mdutil tmutil csec asec dsec force ibytes ialloc hdrop enospc vfree ev
+  local fstype hint cap nosuid noexec nodev nobrowse mdutil tmutil csec asec dsec force ibytes ialloc hdrop enospc vfree owners cwarn ev
   if [[ "${S11_FAIL_STAGE:-0}" == 1 ]]; then IO_FAIL=1; rm -f "$WORKDIR/stage-V.json"; return 1; fi
   agg=$(cat "$WORKDIR/m.agg" 2>/dev/null || echo unknown)
   ev=$(cat "$WORKDIR/v.evidence" 2>/dev/null || echo volume-only)
@@ -1866,13 +1916,13 @@ save_stage_v() {
       set -- $cu; stop=${1:-not-run}; del=${2:-not-run}; abs=${3:-not-run}
       fstype=unknown; hint=unknown; cap=unknown; nosuid=unknown; noexec=unknown; nodev=unknown; nobrowse=unknown
       mdutil=unknown; tmutil=unknown; csec=-1; asec=-1; dsec=-1; force=0
-      ibytes=0; ialloc=0; hdrop=0; enospc=0; vfree=unknown
+      ibytes=0; ialloc=0; hdrop=0; enospc=0; vfree=unknown; owners=unknown; cwarn=absent
       if [[ -f "$WORKDIR/vol.$caseb.$boundary" ]]; then
-        read -r fstype hint cap nosuid noexec nodev nobrowse mdutil tmutil csec asec dsec force ibytes ialloc hdrop enospc vfree <"$WORKDIR/vol.$caseb.$boundary"
+        read -r fstype hint cap nosuid noexec nodev nobrowse mdutil tmutil csec asec dsec force ibytes ialloc hdrop enospc vfree owners cwarn <"$WORKDIR/vol.$caseb.$boundary"
       fi
-      printf '{"case":"%s","boundary":"%s","verdict":"%s","reason":"%s","export_state":"%s","clone":"%s","created":"%s","launch":"%s","ssh":"%s","argv":%s,"record":"%s","cleanup":{"stop":"%s","delete":"%s","absent":"%s"},"volume":{"fstype":"%s","hint":"%s","capacity":"%s","nosuid":"%s","noexec":"%s","nodev":"%s","nobrowse":"%s","mdutil":"%s","tmutil":"%s","create_sec":"%s","attach_sec":"%s","detach_sec":"%s","force":"%s","image_bytes":"%s","image_alloc":"%s","host_drop":"%s","enospc":"%s","vol_free":"%s"}}' \
+      printf '{"case":"%s","boundary":"%s","verdict":"%s","reason":"%s","export_state":"%s","clone":"%s","created":"%s","launch":"%s","ssh":"%s","argv":%s,"record":"%s","cleanup":{"stop":"%s","delete":"%s","absent":"%s"},"volume":{"fstype":"%s","hint":"%s","capacity":"%s","nosuid":"%s","noexec":"%s","nodev":"%s","nobrowse":"%s","owners":"%s","mdutil":"%s","tmutil":"%s","create_warn":"%s","create_sec":"%s","attach_sec":"%s","detach_sec":"%s","force":"%s","image_bytes":"%s","image_alloc":"%s","host_drop":"%s","enospc":"%s","vol_free":"%s"}}' \
         "$caseb" "$boundary" "$verd" "$reason" "$estate" "$name" "$created" "$launch" "$ssh" "$argv" "$rec" "$stop" "$del" "$abs" \
-        "$fstype" "$hint" "$cap" "$nosuid" "$noexec" "$nodev" "$nobrowse" "$mdutil" "$tmutil" "$csec" "$asec" "$dsec" "$force" "$ibytes" "$ialloc" "$hdrop" "$enospc" "$vfree"
+        "$fstype" "$hint" "$cap" "$nosuid" "$noexec" "$nodev" "$nobrowse" "$owners" "$mdutil" "$tmutil" "$cwarn" "$csec" "$asec" "$dsec" "$force" "$ibytes" "$ialloc" "$hdrop" "$enospc" "$vfree"
     done <"$WORKDIR/m.rows"
     printf ']}\n'
   } >"$tmp" || { IO_FAIL=1; rm -f "$tmp" "$WORKDIR/stage-V.json"; return 1; }
@@ -1886,7 +1936,7 @@ dry_stage_v() {
   m=$(mktemp -d "$a/mnt.XXXXXX") || return
   img=$a/mailbox.sparseimage
   printf '%s\n' "$HDIUTIL create -size 64m -fs HFSX -type SPARSE -layout NONE -volname GCU-MAILBOX $img"
-  printf '%s\n' "$HDIUTIL attach -plist -nobrowse -noautoopen -owners on -mountOptions nosuid,noexec,nodev -mountpoint $m $img"
+  printf '%s\n' "$DISKUTIL image attach --plist --nobrowse --mountPoint $m --mountOptions nosuid,noexec,nodev,owners $img"
   /bin/rmdir -- "$m" || true
   /bin/rmdir -- "$a" || true
   M_BOUNDARY=-
