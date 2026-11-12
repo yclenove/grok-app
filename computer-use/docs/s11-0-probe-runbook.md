@@ -125,7 +125,7 @@ C2 对 `file-sync`、`dir-sync`、`rename` 各起一台新 clone。每个边界�
 
 attach 的 plist 顶层是 `system-entities`。元素里的 `dev-entry` 没有 `/dev/` 前缀（例如 `disk4`），还有 `filesystem-name`、`filesystem-type`、`mount-point`、`size`、`volume-name`、`content-hint`。`filesystem-name` 为 `Case-sensitive HFS+` 时记成 `case-sensitive-hfs`。读不到文件系统名、容量或镜像大小时，C4 不能记成完整通过。`hdiutil info -plist` 里的 `dev-entry` 带 `/dev/` 前缀。比较前把两边都规范成 `/dev/diskN`，并核对镜像的设备号和 inode。对不上、读回不完整或超时，脚本不做卸载、不删镜像，把尝试目录留在 `--out` 下，报告 `quarantine`，退出码 5。
 
-创建之前先检查 `--out` 的每一级祖先：不能是符号链接，属主必须是当前用户或 root，并且没有组写和其他写。然后在 `--out` 下记下本次尝试目录、挂载目录和镜像的 dev/inode，并先写 `--out/volume-receipt`（镜像路径、dev/inode、设备、挂载点、生命周期）。每个阶段更新这份凭据。它在卷外，不在临时目录里。quarantine 时保留它。人工处理以这份凭据为准，不要凭目录名删除。
+创建之前先检查 `--out` 自己和它的每一级祖先：不能是符号链接，属主必须是当前用户或 root，并且没有组写和其他写。同一条路径再用 `/bin/ls -lde` 读 ACL。`deny` 条目留下（Mini 家目录上常见 `0: group:everyone deny delete`）。把 `write`、`append`、`delete`、`delete_child`、`add_file` 或 `add_subdirectory` 授给属主和 root 以外的人，包括新建的尝试目录和挂载目录上继承来的条目，就拒绝。读不到或解析不了也拒绝。然后在 `--out` 下记下本次尝试目录、挂载目录和镜像的 dev/inode，并先写 `--out/volume-receipt`（镜像路径、dev/inode、设备、挂载点、生命周期）。每个阶段更新这份凭据。它在卷外，不在临时目录里。quarantine 时保留它。人工处理以这份凭据为准，不要凭目录名删除。
 
 每次删除文件或空目录之前，重新核对父目录和目标的 dev/inode，并且目标不能是符号链接。对不上就 quarantine，不按路径兜底删除。创建失败和半路失败同样适用。
 
@@ -133,9 +133,9 @@ attach 的 plist 顶层是 `system-entities`。元素里的 `dev-entry` 没有 `
 
 卸载绑定的是只属于本次尝试的挂载点路径。新鲜的 `hdiutil info -plist` 必须同时满足：`image-path` 等于这份镜像且 dev/inode 一致，并且该镜像的挂载点等于本次在 0700 私有目录里创建的挂载点 M。然后执行 `/usr/bin/hdiutil detach <M>`。失败时，在再次确认 VM 已停止并且同一份 info 仍然成立之后，最多执行一次 `/usr/bin/hdiutil detach -force <M>`。然后再做一次 info，确认清单里已经没有这份镜像，才按身份删除镜像和空目录。同一用户的其它进程若同时改这个私有目录，不在这层保护范围内。
 
-开始前宿主所在卷的可用空间必须至少 256MiB，否则不创建镜像，结果是 unknown。C9 记录宿主可用空间下降的峰值，以及镜像逻辑大小（st_size）和占用（blocks×512）的峰值。`ok` 要同时满足：客机报告到达 ENOSPC、两个峰值都不超过 80MiB、宿主可用空间下降不超过镜像占用峰值加报告里的 `host_margin`（1048576 字节）。没观测到的 C4 大小、宿主下降和 enospc 记 unknown，不记 0。C9 终态记录必须是唯一、完整、以换行结束的一行，字段不重复，并且 v/op/role/mode 与本次边界一致。矛盾、截断，或客机非零、中止、溢出、超时，都记 unknown；留下结果文件也不能记 ok。
+开始前宿主所在卷的可用空间必须至少 256MiB，否则不创建镜像，结果是 unknown。这次观测记在 `host_pre`。C9 在放量开始前用同一条 256MiB 再查一次，记在 `host_fill`；不够则 unknown，原因 `host-space`，不发 `run C9`。客机报告 ENOSPC 时，卷上剩余必须不超过 8MiB，否则 unknown，原因 `enospc-origin`，以免把宿主卷写满当成卷满。C9 记录宿主可用空间下降的峰值，以及镜像逻辑大小（st_size）和占用（blocks×512）的峰值。`ok` 要同时满足：客机报告到达 ENOSPC、两个峰值都不超过 80MiB、宿主可用空间下降不超过同一时段镜像占用增量（峰值减去放量基线）再加报告里的 `host_margin`（1048576 字节）。基线时已经占用的块不算进允许下降。没观测到的 C4 大小、宿主下降和 enospc 记 unknown，不记 0。C9 终态记录必须是唯一、完整、以换行结束的一行，字段不重复，并且 v/op/role/mode 与本次边界一致。矛盾、截断，或客机非零、中止、溢出、超时，都记 unknown；留下结果文件也不能记 ok。后台 SSH 的标准输出和标准错误各自最多保留 65536 字节，到顶或收到取消就结束并回收，这两项观察在等待结束后仍然有效。
 
-真实运行拒绝 `S11_HDIUTIL`、`S11_DISKUTIL`、`S11_PLUTIL`、`S11_MOUNT`、`S11_MDUTIL`、`S11_TMUTIL`、`S11_STAT`、`S11_DF`、`S11_VOLIO` 这些工具路径覆盖，除非显式设置 `S11_TEST_MODE=1`。该变量只给桩测试用。
+真实运行拒绝 `S11_HDIUTIL`、`S11_DISKUTIL`、`S11_PLUTIL`、`S11_MOUNT`、`S11_MDUTIL`、`S11_TMUTIL`、`S11_STAT`、`S11_DF`、`S11_VOLIO`、`S11_LS` 这些工具路径覆盖，除非显式设置 `S11_TEST_MODE=1`。该变量只给桩测试用。
 
 `mdutil -s` 只认原文里的 `Indexing disabled.` 或 `Indexing enabled.`。读不到就保持 unknown，不把没观测写成已经关闭。`tmutil isexcluded` 对着镜像路径，认 `[Included]` 或 `[Excluded]`。`tmutil addexclusion` 没测，失败或要权限就记 unknown。
 

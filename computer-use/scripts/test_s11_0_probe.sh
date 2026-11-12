@@ -180,7 +180,7 @@ install_templates() {
     '  exit 0; fi' \
     'case " $* " in *s11m.XXXXXX*) cat >"$ROOT/init.body"; printf "init-ok\n"; exit 0 ;; esac' \
     'remote=""; for remote in "$@"; do :; done' \
-    'case "$remote" in upload|verify\ *|run\ C1|run\ C2|run\ C8) cat >/dev/null; exit 0 ;; "run C9") cat >/dev/null; "$ROOT/bin/c9write"; exit $? ;; esac' \
+    'case "$remote" in upload|verify\ *|run\ C1|run\ C2|run\ C8) cat >/dev/null; exit 0 ;; "run C9") cat >/dev/null; mode=""; mbx=$(awk '"'"'match($0,/--dir s11mbx:/){p=substr($0,RSTART+13)} END{print p}'"'"' "$ROOT/tart.log"); [[ -n "$mbx" && -f "$mbx/fill-mode" ]] && mode=$(tr -d "\r\n" <"$mbx/fill-mode"); if [[ -f "$ROOT/c9_hold_after" && "$mode" == small ]]; then "$ROOT/bin/c9write" & cpid=$!; trap "exit 0" TERM INT HUP; wait "$cpid"; exit $?; fi; "$ROOT/bin/c9write"; exit $? ;; esac' \
     '[[ -f "$ROOT/guest_fail" ]] && exit 9' \
     'if [[ -f "$ROOT/guest_hang" ]]; then trap "exit 143" TERM INT HUP; while true; do sleep 0.2; done; fi' \
     'last=""' \
@@ -551,6 +551,8 @@ case "\$fmt" in
     ids=\$("\$REALSTAT" -c '%d %i' "\$path") || exit 1
     if [[ -f "\$ROOT/stat_big" ]]; then size=90000000; blocks=200000; fi
     if [[ -f "\$ROOT/stat_big_arm" ]]; then size=90000000; blocks=200000; rm -f "\$ROOT/stat_big_arm"; fi
+    if [[ -f "\$ROOT/alloc_arm" ]]; then size=25165824; blocks=49152; rm -f "\$ROOT/alloc_arm"
+    elif [[ -f "\$ROOT/alloc_base" ]]; then size=16777216; blocks=32768; fi
     printf '%s %s %s\\n' "\$size" "\$blocks" "\$ids"
     ;;
   '%d %i')
@@ -578,9 +580,22 @@ if [[ -f "$ROOT/df_drop_arm" && "$path" != "$mount" ]]; then
   rm -f "$ROOT/df_drop_arm"
   hostk=$((hostk - 200000))
 fi
+if [[ -f "$ROOT/df_growth_arm" && "$path" != "$mount" ]]; then
+  rm -f "$ROOT/df_growth_arm"
+  hostk=$((hostk - 20480))
+fi
+if [[ -f "$ROOT/df_prefill_low" && "$path" != "$mount" ]]; then
+  n=0
+  [[ -f "$ROOT/df.hostn" ]] && n=$(tr -d '[:space:]' <"$ROOT/df.hostn")
+  n=$((n + 1))
+  printf '%s\n' "$n" >"$ROOT/df.hostn"
+  [[ "$n" == 2 ]] && hostk=8192
+fi
 printf '%s\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on'
 if [[ -n "$mount" && "$path" == "$mount" ]]; then
-  printf '%s %s %s %s %s %s\n' /dev/disk9 65536 1000 1024 50% "$path"
+  avail=1024
+  [[ -f "$ROOT/df_vol_room" ]] && avail=49152
+  printf '%s %s %s %s %s %s\n' /dev/disk9 65536 1000 "$avail" 50% "$path"
 else
   printf '%s %s %s %s %s %s\n' hostfs 8000000 1000 "$hostk" 50% "$path"
 fi
@@ -595,6 +610,9 @@ mode=$(tr -d '\r\n' <"$mbx/fill-mode")
 en=1; bytes=4096; files=4
 [[ -f "$ROOT/c9_no_enospc" ]] && en=0
 printf 'v=1 seq=1 bytes=%s files=%s enospc=%s\n' "$bytes" "$files" "$en" >"$mbx/progress"
+if [[ -f "$ROOT/arm_growth" && "$mode" == data ]]; then
+  touch "$ROOT/alloc_arm" "$ROOT/df_growth_arm"
+fi
 if [[ -f "$ROOT/c9_pause" ]]; then
   [[ "$mode" == data && -f "$ROOT/arm_stat" ]] && touch "$ROOT/stat_big_arm"
   [[ "$mode" == small && -f "$ROOT/df_drop" ]] && touch "$ROOT/df_drop_arm"
@@ -611,10 +629,48 @@ elif [[ -f "$ROOT/c9_trail" ]]; then
 else
   printf 'v=1 op=c9 role=guest mode=%s enospc=%s bytes=%s files=%s batches=1\n' "$mode" "$en" "$bytes" "$files" >"$mbx/result-guest"
 fi
+if [[ -f "$ROOT/c9_flood" && "$mode" == data ]]; then
+  wrote=0
+  chunk='diag................................................................................................'
+  trap 'printf "%s\n" "$wrote" >"$ROOT/capture.wrote"; exit 0' PIPE
+  while [[ "$wrote" -lt 200000 ]]; do
+    printf '%s\n' "$chunk" || break
+    wrote=$((wrote + ${#chunk} + 1))
+  done
+  printf '%s\n' "$wrote" >"$ROOT/capture.wrote"
+  exit 0
+fi
+if [[ -f "$ROOT/c9_hold_after" && "$mode" == small ]]; then
+  printf '%s\n' x >"$ROOT/c9_published"
+  printf '%s\n' "$$" >"$ROOT/target.pid"
+  while true; do sleep 1; done
+fi
 [[ -f "$ROOT/c9_ssh_fail" ]] && exit 9
 exit 0
 EOF
   chmod 700 "$BASE/tpl/hdiutil" "$BASE/tpl/diskutil" "$BASE/tpl/plutil" "$BASE/tpl/mount" "$BASE/tpl/mdutil" "$BASE/tpl/tmutil" "$BASE/tpl/statv" "$BASE/tpl/df" "$BASE/tpl/c9write"
+  cat >"$BASE/tpl/lsacl" <<'EOF'
+#!/bin/bash
+ROOT=${S11_STUB_ROOT:?}
+[[ $# -eq 2 && "$1" == -lde ]] || exit 2
+path=$2
+[[ -e "$path" || -L "$path" ]] || exit 1
+printf '%s\n' "$*" >>"$ROOT/ls.log"
+emit() { printf '%s\n' "$1"; printf '%s\n' "$1" >>"$ROOT/ls.log"; }
+emit "drwx------  2 stub staff  64 Nov 12 00:00 $path"
+emit ' 0: group:everyone deny delete'
+if [[ -f "$ROOT/acl_grant" ]]; then
+  emit ' 1: user:aclwriter allow add_file,delete,add_subdirectory,delete_child'
+fi
+if [[ -f "$ROOT/acl_on_attempt" ]]; then
+  case "$path" in
+    */mnt.*) ;;
+    */s11v.*) emit ' 1: user:aclwriter inherited allow add_file,delete' ;;
+  esac
+fi
+exit 0
+EOF
+  chmod 700 "$BASE/tpl/lsacl"
 }
 setup() {
   ROOT=$CASE/stub
@@ -635,7 +691,8 @@ setup() {
   export TMPDIR=$CASE/tmp
   export S11_START_SEC=0
   unset BASH_ENV S11_XTRACE S11_BOUND_SEC S11_BOUND_POLLS S11_FORCE_NAME S11_PROBE_BUDGET S11_CLEANUP_BUDGET S11_REAP_POLLS S11_FAIL_ROW_N S11_FAIL_STAGE S11_PROBE_MODE
-  unset S11_HDIUTIL S11_DISKUTIL S11_PLUTIL S11_MOUNT S11_MDUTIL S11_TMUTIL S11_STAT S11_DF S11_VOLIO S11_TEST_MODE
+  unset S11_HDIUTIL S11_DISKUTIL S11_PLUTIL S11_MOUNT S11_MDUTIL S11_TMUTIL S11_STAT S11_DF S11_VOLIO S11_LS S11_TEST_MODE
+  export S11_TEST_MODE=1
   ARGS=(--ssh-key "$CASE/id_key" --tart-home "$CASE/thome" --out "$CASE/out")
 }
 
@@ -763,7 +820,7 @@ static_checks() {
   bash -n "$HERE/test_s11_0_probe.sh"
   local n
   n=$(wc -l <"$PROBE" | tr -d ' ')
-  [[ "$n" -lt 2500 ]] || die "probe has $n lines"
+  [[ "$n" -lt 2700 ]] || die "probe has $n lines"
   [[ "$(head -n 1 "$PROBE")" == '#!/bin/bash' ]] || die "shebang"
   local pat
   for pat in 'mapfile' 'declare -A' 'readarray' 'readlink -f' 'ioreg' 'system_profiler' 'wait -n'; do
@@ -2086,6 +2143,7 @@ enable_volume() {
   export S11_TMUTIL=$ROOT/bin/tmutil
   export S11_STAT=$ROOT/bin/statv
   export S11_DF=$ROOT/bin/df
+  export S11_LS=$ROOT/bin/lsacl
 }
 
 
@@ -2549,12 +2607,156 @@ test_stage_v_c9_guest_fail() {
 
 test_stage_v_tool_override_refused() {
   setup
+  unset S11_TEST_MODE
   export S11_HDIUTIL=$ROOT/bin/hdiutil
   run_probe 8 --stage V --case C4 "${ARGS[@]}"
   need_ec 2
   common_end
   need_reason tool-override
   [[ ! -f "$ROOT/hdiutil.log" ]] || die "override invoked hdiutil"
+  rm -rf "$CASE/out"
+  unset S11_HDIUTIL
+  export S11_LS=$ROOT/bin/lsacl
+  run_probe 8 --stage V --case C4 "${ARGS[@]}"
+  need_ec 2
+  common_end
+  need_reason tool-override
+  [[ ! -f "$ROOT/ls.log" ]] || die "override invoked ls"
+}
+
+test_stage_v_c1_slot_stat_stall() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  cat >"$ROOT/bin/volio-slot" <<EOF
+#!/bin/bash
+if [[ "\${1:-}" == slot ]]; then
+  printf '%s\n' "\$\$" >"$ROOT/target.pid"
+  while true; do sleep 30; done
+fi
+exec bash "$PROBE" __volio "\$@"
+EOF
+  chmod 700 "$ROOT/bin/volio-slot"
+  export S11_VOLIO=$ROOT/bin/volio-slot
+  export S11_BOUND_POLLS=4
+  run_probe 20 --stage V --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  assert_image_kept
+}
+
+test_stage_v_acl_grant_rejected() {
+  setup
+  enable_volume
+  touch "$ROOT/acl_grant"
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 4
+  common_end
+  need_reason out-unsafe
+  [[ ! -f "$ROOT/hdiutil.log" ]] || die "acl grant created an image"
+  grep -F -q '0: group:everyone deny delete' "$ROOT/ls.log" || die "deny entry not observed"
+  rm -rf "$CASE/out"
+  rm -f "$ROOT/ls.log" "$ROOT/acl_grant" "$ROOT/hdiutil.log"
+  touch "$ROOT/acl_on_attempt"
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  grep -F -q '"export_state":"quarantine"' "$CASE/out/report.json" || die "attempt acl not quarantined"
+  [[ ! -f "$ROOT/hdiutil.log" ]] || die "attempt acl created an image"
+  grep -F -q '0: group:everyone deny delete' "$ROOT/ls.log" || die "deny entry dropped"
+  grep -F -q '1: user:aclwriter inherited allow add_file,delete' "$ROOT/ls.log" || die "attempt grant not observed"
+  find "$CASE/out" -maxdepth 1 -type d -name 's11v.*' | grep -q . || die "attempt dir missing"
+}
+
+test_stage_v_c9_capture_bound() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/c9_flood" "$ROOT/c9_hold_after"
+  start_probe 30 --stage V --case C9 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  local end=$((SECONDS + 25))
+  while [[ "$SECONDS" -lt "$end" ]]; do
+    [[ -f "$ROOT/capture.wrote" && -f "$ROOT/c9_published" ]] && break
+    sleep 0.05
+  done
+  [[ -f "$ROOT/capture.wrote" && -f "$ROOT/c9_published" ]] || die "capture not ready"
+  local wrote
+  wrote=$(tr -d '[:space:]' <"$ROOT/capture.wrote")
+  [[ "$wrote" -lt 160000 ]] || die "capture wrote $wrote"
+  kill -TERM "$PROBE_PID"
+  finish_probe
+  need_ec 4
+  common_end
+  "$PYTHON" - "$CASE/out/report.json" "$wrote" <<'PY' || die "capture bound"
+import json,sys
+rep=json.load(open(sys.argv[1]))
+wrote=int(sys.argv[2])
+cases=rep["stages"][0]["cases"]
+assert [c["boundary"] for c in cases]==["data","small"], [c["boundary"] for c in cases]
+data, small = cases
+assert wrote < 160000, wrote
+assert "op=c9" in data["record"] and "mode=data" in data["record"], data["record"]
+assert data["verdict"]!="ok" and data["reason"]=="probe-failed", (data["verdict"], data["reason"])
+assert small["verdict"]!="ok" and small["reason"]=="probe-failed", (small["verdict"], small["reason"])
+assert small["export_state"]!="quarantine", small["export_state"]
+PY
+  kill_target
+}
+
+test_stage_v_c9_prefill_and_origin() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/df_prefill_low" "$ROOT/df_vol_room"
+  run_probe 25 --stage V --case C9 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  local n
+  n=$(grep -c ' run C9$' "$ROOT/ssh.log" || true)
+  [[ "$n" == 1 ]] || die "c9 runs $n"
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "prefill origin"
+import json,sys
+rep=json.load(open(sys.argv[1]))
+cases=rep["stages"][0]["cases"]
+assert [c["boundary"] for c in cases]==["data","small"], [c["boundary"] for c in cases]
+data, small = cases
+assert data["verdict"]=="unknown" and data["reason"]=="host-space", (data["verdict"], data["reason"])
+assert data["volume"]["host_pre"]=="4096000000", data["volume"]["host_pre"]
+assert data["volume"]["host_fill"]=="8388608", data["volume"]["host_fill"]
+assert small["verdict"]=="unknown" and small["reason"]=="enospc-origin", (small["verdict"], small["reason"])
+assert small["volume"]["vol_free"]=="50331648", small["volume"]["vol_free"]
+assert int(small["volume"]["host_pre"])>=268435456, small["volume"]["host_pre"]
+assert int(small["volume"]["host_fill"])>=268435456, small["volume"]["host_fill"]
+PY
+}
+
+test_stage_v_c9_alloc_growth() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/alloc_base" "$ROOT/arm_growth"
+  run_probe 25 --stage V --case C9 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "alloc growth"
+import json,sys
+rep=json.load(open(sys.argv[1]))
+cases=rep["stages"][0]["cases"]
+assert [c["boundary"] for c in cases]==["data","small"], [c["boundary"] for c in cases]
+data, small = cases
+vol=data["volume"]
+assert data["verdict"]=="failed" and data["reason"]=="host-grew", (data["verdict"], data["reason"])
+assert vol["image_alloc_peak"]=="25165824", vol["image_alloc_peak"]
+assert vol["host_drop"]=="20971520", vol["host_drop"]
+assert int(vol["image_bytes_peak"])<=83886080
+assert small["verdict"]=="ok", (small["verdict"], small["reason"])
+PY
 }
 
 run_case stop-unproven test_stop_unproven_quarantine
@@ -2581,5 +2783,10 @@ run_case stage-v-c9-peak test_stage_v_c9_peak_and_margin
 run_case stage-v-c9-record test_stage_v_c9_bad_record
 run_case stage-v-c9-guest test_stage_v_c9_guest_fail
 run_case stage-v-override test_stage_v_tool_override_refused
+run_case stage-v-c1-slot-stall test_stage_v_c1_slot_stat_stall
+run_case stage-v-acl test_stage_v_acl_grant_rejected
+run_case stage-v-c9-capture test_stage_v_c9_capture_bound
+run_case stage-v-c9-origin test_stage_v_c9_prefill_and_origin
+run_case stage-v-c9-growth test_stage_v_c9_alloc_growth
 echo "ALL_OK ${SECONDS}s"
 [[ "$SECONDS" -lt 120 ]] || { echo "suite took ${SECONDS}s" >&2; exit 1; }

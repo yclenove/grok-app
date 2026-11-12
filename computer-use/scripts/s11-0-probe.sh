@@ -25,7 +25,7 @@ S_STAGE=""; S_NAME=""; S_CREATED=no; S_LAUNCH=not-run; S_COLL=not-run
 S_SSH=not-run; S_EXEC=not-run; S_V6=not-run
 M_CASE=""; M_PROBE=""; PINNED_KEY=""; EXPORT_DIR=""; ONCE_KEY=""; ONCE_PUB=""; GUEST_IP=""
 M_VERDICT=unknown; M_REASON=skipped; EXPORT_STATE=absent; M_BOUNDARY=-
-EXPORT_DONE=0; SSH_BG_PID=""
+EXPORT_DONE=0; SSH_BG_PID=""; SSH_BG_OV=0; SSH_BG_AB=0
 # Fixed tool paths. Overrides apply only in the stub suite (S11_TEST_MODE=1).
 HDIUTIL=/usr/bin/hdiutil
 DISKUTIL=/usr/sbin/diskutil
@@ -35,6 +35,7 @@ MDUTIL=/usr/bin/mdutil
 TMUTIL=/usr/bin/tmutil
 STATBIN=/usr/bin/stat
 DFBIN=/bin/df
+LSBIN=/bin/ls
 TOOL_OVERRIDE=0
 if [[ "${S11_TEST_MODE:-}" == 1 ]]; then
   [[ -n "${S11_HDIUTIL:-}" ]] && HDIUTIL=$S11_HDIUTIL
@@ -45,10 +46,13 @@ if [[ "${S11_TEST_MODE:-}" == 1 ]]; then
   [[ -n "${S11_TMUTIL:-}" ]] && TMUTIL=$S11_TMUTIL
   [[ -n "${S11_STAT:-}" ]] && STATBIN=$S11_STAT
   [[ -n "${S11_DF:-}" ]] && DFBIN=$S11_DF
-elif [[ -n "${S11_HDIUTIL:-}${S11_DISKUTIL:-}${S11_PLUTIL:-}${S11_MOUNT:-}${S11_MDUTIL:-}${S11_TMUTIL:-}${S11_STAT:-}${S11_DF:-}${S11_VOLIO:-}" ]]; then
+  [[ -n "${S11_LS:-}" ]] && LSBIN=$S11_LS
+elif [[ -n "${S11_HDIUTIL:-}${S11_DISKUTIL:-}${S11_PLUTIL:-}${S11_MOUNT:-}${S11_MDUTIL:-}${S11_TMUTIL:-}${S11_STAT:-}${S11_DF:-}${S11_VOLIO:-}${S11_LS:-}" ]]; then
   TOOL_OVERRIDE=1
 fi
 VOL_PREP_BUDGET=40; HOST_RESERVE=268435456; HOST_MARGIN=1048576; IMAGE_CAP=83886080
+# ENOSPC is the volume only when HFS still reports at most this much free.
+VOL_FULL_MAX=8388608
 PL_CAP_IMAGES=32; PL_CAP_ENTS=8
 VOL_A=""; VOL_I=""; VOL_M=""; VOL_DEV=""; VOL_INO=""; VOL_DISK=""
 VOL_A_DEV=""; VOL_A_INO=""; VOL_M_DEV=""; VOL_M_INO=""; VOL_OUT_DEV=""; VOL_OUT_INO=""
@@ -62,6 +66,7 @@ VOL_MDUTIL=unknown; VOL_TMUTIL=unknown
 VOL_IMAGE=unknown; VOL_ALLOC=unknown; VOL_HOST_DROP=unknown; VOL_ENOSPC=unknown; VOL_VOLFREE=unknown
 VOL_IMAGE_PEAK=unknown; VOL_ALLOC_PEAK=unknown; VOL_HOST_DROP_PEAK=unknown; VOL_SAMPLES=0
 VOL_BASE_ALLOC=0; VOL_BASE_HOST=0; VOL_HAVE_BASE=0
+VOL_HOST_PRE=unknown; VOL_HOST_FILL=unknown
 PL_VAL=""; PL_TYPE=""; PL_COUNT=0; ST_SIZE=0; ST_BLOCKS=0; ST_DEV=0; ST_INO=0
 DF_AVAIL=0; DF_TOTAL=0; C9_ENOSPC=""; PROG_SEQ=0
 
@@ -135,15 +140,17 @@ term_kill_reap() {
   REAP_STATUS=$?
 }
 capture_over() {
-  local n
-  # One wc for both files. Arithmetic accepts wc's leading spaces.
-  for n in $(wc -c <"$1" 2>/dev/null; wc -c <"$2" 2>/dev/null); do
-    [[ $((n)) -ge "$CAP" ]] && return 0
-  done
+  local n rest
+  # One wc. Skip its total line so two half-full streams are not an overflow.
+  while read -r n rest; do
+    [[ "$rest" == total ]] && continue
+    case "$n" in ''|*[!0-9]*) continue ;; esac
+    [[ "$n" -ge "$CAP" ]] && return 0
+  done < <(wc -c "$1" "$2" 2>/dev/null)
   return 1
 }
 run_bounded() {
-  local secs="$1" out="$2" err="$3" infile="$4" t0 pid reaped=0 left polls=0 pb="" hit=0
+  local secs="$1" out="$2" err="$3" infile="$4" t0 pid reaped=0 left polls=0 pb="" hit=0 spins=0
   shift 4
   [[ "${1:-}" == -- ]] && shift
   secs=$(cap_secs "$secs"); : >"$out"; : >"$err"
@@ -173,22 +180,37 @@ run_bounded() {
     exec "$@" <"$infile" >"$out" 2>"$err"
   ) &
   pid=$!
-  while :; do
-    if ! job_running "$pid"; then break; fi
-    polls=$((polls + 1))
-    hit=0
-    [[ -n "$pb" && "$polls" -ge "$pb" ]] && hit=1
-    [[ "$SECONDS" -ge $((t0 + secs)) ]] && hit=1
-    cleanup_past && hit=1
-    if [[ "$hit" == 1 ]]; then
-      RB_TIMED_OUT=1; term_kill_reap "$pid"; reaped=1; break
-    fi
-    if [[ "$IN_CLEANUP" != 1 && "$REQUEST_CLEANUP" == 1 ]]; then
-      RB_ABORTED=1; term_kill_reap "$pid"; reaped=1; break
-    fi
-    if capture_over "$out" "$err"; then RB_OVERFLOW=1; term_kill_reap "$pid"; reaped=1; break; fi
-    if [[ "${S11_TEST_MODE:-}" == 1 ]]; then sleep 0.01; else sleep 0.02; fi
-  done
+  # Stub runs have no poll cap: spin instead of paying /bin/sleep after every fast child.
+  # A set poll cap keeps the timed sleep so a count of polls still means time.
+  if [[ "${S11_TEST_MODE:-}" == 1 && -z "$pb" ]]; then
+    spins=0
+    while job_running "$pid"; do
+      spins=$((spins + 1))
+      hit=0
+      [[ "$SECONDS" -ge $((t0 + secs)) ]] && hit=1
+      cleanup_past && hit=1
+      if [[ "$hit" == 1 ]]; then RB_TIMED_OUT=1; term_kill_reap "$pid"; reaped=1; break; fi
+      if [[ "$IN_CLEANUP" != 1 && "$REQUEST_CLEANUP" == 1 ]]; then RB_ABORTED=1; term_kill_reap "$pid"; reaped=1; break; fi
+      if [[ $((spins % 16)) -eq 0 ]] && capture_over "$out" "$err"; then RB_OVERFLOW=1; term_kill_reap "$pid"; reaped=1; break; fi
+    done
+  else
+    while :; do
+      if ! job_running "$pid"; then break; fi
+      polls=$((polls + 1))
+      hit=0
+      [[ -n "$pb" && "$polls" -ge "$pb" ]] && hit=1
+      [[ "$SECONDS" -ge $((t0 + secs)) ]] && hit=1
+      cleanup_past && hit=1
+      if [[ "$hit" == 1 ]]; then
+        RB_TIMED_OUT=1; term_kill_reap "$pid"; reaped=1; break
+      fi
+      if [[ "$IN_CLEANUP" != 1 && "$REQUEST_CLEANUP" == 1 ]]; then
+        RB_ABORTED=1; term_kill_reap "$pid"; reaped=1; break
+      fi
+      if capture_over "$out" "$err"; then RB_OVERFLOW=1; term_kill_reap "$pid"; reaped=1; break; fi
+      if [[ "${S11_TEST_MODE:-}" == 1 ]]; then sleep 0.01; else sleep 0.02; fi
+    done
+  fi
   if [[ "$reaped" != 1 ]]; then
     if job_running "$pid"; then disown "$pid" 2>/dev/null || true; mark_reap_unknown
     else wait "$pid" 2>/dev/null; REAP_STATUS=$?; fi
@@ -887,7 +909,10 @@ ssh_bg() {
   sole_running || return 1
   write_known "$kh" || return 1
   fill_ssh "$key" "$remote" "$kh"
-  "${SSH_ARGV[@]}" </dev/null >"$WORKDIR/ssh.bg.out" 2>"$WORKDIR/ssh.bg.err" &
+  SSH_BG_OV=0; SSH_BG_AB=0
+  : >"$WORKDIR/ssh.bg.out"; : >"$WORKDIR/ssh.bg.err"
+  # head -c closes the pipe at CAP, so the capture file cannot grow past it.
+  "${SSH_ARGV[@]}" </dev/null > >(head -c "$CAP" >"$WORKDIR/ssh.bg.out") 2> >(head -c "$CAP" >"$WORKDIR/ssh.bg.err") &
   SSH_BG_PID=$!
 }
 boot_ready_m() {
@@ -995,17 +1020,30 @@ clear_snaps() {
 snap1() { H1_ST=$RB_STATUS; H1_TO=$RB_TIMED_OUT; H1_AB=$RB_ABORTED; H1_OV=$RB_OVERFLOW; H1_RU=$REAP_UNKNOWN; }
 snap2() { H2_ST=$RB_STATUS; H2_TO=$RB_TIMED_OUT; H2_AB=$RB_ABORTED; H2_OV=$RB_OVERFLOW; H2_RU=$REAP_UNKNOWN; }
 snapg() { G_ST=$RB_STATUS; G_TO=$RB_TIMED_OUT; G_AB=$RB_ABORTED; G_OV=$RB_OVERFLOW; G_RU=$REAP_UNKNOWN; }
+note_ssh_bg() {
+  local gpid=$1
+  if [[ "$REQUEST_CLEANUP" == 1 ]]; then SSH_BG_AB=1; term_kill_reap "$gpid"; return 0; fi
+  if capture_over "$WORKDIR/ssh.bg.out" "$WORKDIR/ssh.bg.err"; then SSH_BG_OV=1; term_kill_reap "$gpid"; return 0; fi
+  return 1
+}
 wait_guest() {
   local gpid=$1 st
-  while [[ "$SECONDS" -lt "$M_LOAD_END" ]] && job_running "$gpid"; do sleep 0.05; done
+  while [[ "$SECONDS" -lt "$M_LOAD_END" ]] && job_running "$gpid"; do
+    note_ssh_bg "$gpid" && break
+    sleep 0.05
+  done
   if job_running "$gpid"; then
     term_kill_reap "$gpid"
-    G_ST=$REAP_STATUS; G_TO=1; G_AB=0; G_OV=0; G_RU=$REAP_UNKNOWN
+    G_ST=$REAP_STATUS; G_TO=1; G_RU=$REAP_UNKNOWN
   else
     wait "$gpid" 2>/dev/null
     st=$?
-    G_ST=$st; G_TO=0; G_AB=0; G_OV=0; G_RU=0
+    G_ST=$st; G_TO=0; G_RU=0
   fi
+  capture_over "$WORKDIR/ssh.bg.out" "$WORKDIR/ssh.bg.err" && SSH_BG_OV=1
+  G_OV=$SSH_BG_OV; G_AB=$SSH_BG_AB
+  if [[ "$SSH_BG_AB" == 1 && "$G_TO" != 1 ]]; then G_ST=130; fi
+  if [[ "$SSH_BG_OV" == 1 && "$G_TO" != 1 && "$SSH_BG_AB" != 1 ]]; then G_ST=125; fi
   SSH_BG_PID=""
 }
 c1_retry_ok() {
@@ -1081,11 +1119,23 @@ parse_fields() {
   SHAPE_OK=1
 }
 read_slot_verdict() {
-  local f=$1 raw=$WORKDIR/slot.raw line n
+  local f=$1 raw=$WORKDIR/slot.raw line n st
   SHAPE_OK=0; M_RECORD=""
-  [[ -f "$f" && ! -L "$f" ]] || return 1
-  run_bounded 5 "$raw" "$WORKDIR/slot.err" - -- head -c 4097 -- "$f" || true
-  [[ "$RB_STATUS" -eq 0 && "$RB_TIMED_OUT" != 1 && "$RB_OVERFLOW" != 1 && "$RB_ABORTED" != 1 && "$REAP_UNKNOWN" != 1 ]] || return 1
+  if [[ "$S_STAGE" == V ]]; then
+    vol_io 5 slot "$f"
+    st=$?
+    if [[ "$st" -eq 2 ]]; then
+      VOL_MAYBE=1; vol_quarantine
+      M_VERDICT=unknown; M_REASON=quarantine; ANY_COLLECTION_FAILED=1
+      return 2
+    fi
+    [[ "$st" -eq 0 ]] || return 1
+    cp "$WORKDIR/v.out" "$raw" || return 1
+  else
+    [[ -f "$f" && ! -L "$f" ]] || return 1
+    run_bounded 5 "$raw" "$WORKDIR/slot.err" - -- head -c 4097 -- "$f" || true
+    [[ "$RB_STATUS" -eq 0 && "$RB_TIMED_OUT" != 1 && "$RB_OVERFLOW" != 1 && "$RB_ABORTED" != 1 && "$REAP_UNKNOWN" != 1 ]] || return 1
+  fi
   [[ -s "$raw" ]] || return 1
   n=$(wc -l <"$raw" | tr -d ' ')
   [[ "$n" == 1 ]] || return 1
@@ -1128,6 +1178,7 @@ m_run_c1() {
   snap2
   wait_guest "$gpid"
   read_slot_verdict "$EXPORT_DIR/mailbox/result-host" || true
+  [[ "$S_STAGE" == V && "$VOL_PHASE" == quarantine ]] && return 1
   settle_host c1 || true
 }
 m_run_c2() {
@@ -1140,6 +1191,7 @@ m_run_c2() {
   run_bounded "$left" "$WORKDIR/ph.out" "$WORKDIR/ph.err" - -- "$M_PROBE" c2 "$M_BOUNDARY" --dir "$EXPORT_DIR/mailbox" --role host --count 3 --timeout "$left" || true
   snap1
   read_slot_verdict "$EXPORT_DIR/mailbox/result-host" || true
+  [[ "$S_STAGE" == V && "$VOL_PHASE" == quarantine ]] && return 1
   settle_host c2 || true
 }
 m_run_c8() {
@@ -1541,12 +1593,60 @@ mode_writes() {
   case "$o" in 2|3|6|7) return 0 ;; esac
   return 1
 }
+# 0 = block. deny entries are kept. allow of namespace mutation is only for owner and root.
+acl_blocks() {
+  local path=$1 st line first=1 rest qual action perms tok me
+  me=$(id -un)
+  vol_run 5 "$LSBIN" -lde "$path"
+  st=$?
+  [[ "$st" -eq 0 && -s "$WORKDIR/v.out" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$first" == 1 ]]; then first=0; continue; fi
+    line=${line#"${line%%[![:space:]]*}"}
+    [[ -z "$line" ]] && continue
+    case "$line" in
+      [0-9]:*|[0-9][0-9]:*|[0-9][0-9][0-9]:*) ;;
+      *) return 0 ;;
+    esac
+    rest=${line#*:}
+    rest=${rest#"${rest%%[![:space:]]*}"}
+    qual=${rest%%[[:space:]]*}
+    rest=${rest#"$qual"}
+    rest=${rest#"${rest%%[![:space:]]*}"}
+    [[ -n "$qual" && -n "$rest" ]] || return 0
+    action=""; perms=""
+    for tok in $rest; do
+      case "$tok" in
+        allow|deny)
+          [[ -n "$action" ]] && return 0
+          action=$tok ;;
+        *)
+          if [[ -n "$action" ]]; then
+            [[ -n "$perms" ]] && return 0
+            perms=$tok
+          else
+            case "$tok" in
+              inherited|file_inherit|directory_inherit|limit_inherit|only_inherit) ;;
+              *) return 0 ;;
+            esac
+          fi ;;
+      esac
+    done
+    [[ -n "$action" && -n "$perms" ]] || return 0
+    [[ "$action" == deny ]] && continue
+    case "$qual" in
+      owner|user:root|"user:${me}") continue ;;
+    esac
+    case ",$perms," in
+      *,add_file,*|*,add_subdirectory,*|*,delete,*|*,delete_child,*|*,write,*|*,append,*) return 0 ;;
+    esac
+  done <"$WORKDIR/v.out"
+  return 1
+}
 out_ancestors_ok() {
   local p owner mode st n=0 uid
   uid=$(id -u)
   p=$OUT
-  [[ -L "$p" ]] && return 1
-  p=$(dirname -- "$p")
   while [[ "$n" -lt 64 ]]; do
     [[ -L "$p" ]] && return 1
     vol_run 5 "$STATBIN" -f '%u %OLp' "$p"
@@ -1555,6 +1655,7 @@ out_ancestors_ok() {
     read -r owner mode <"$WORKDIR/v.out" || return 1
     [[ "$owner" == "$uid" || "$owner" == 0 ]] || return 1
     mode_writes "$mode" && return 1
+    acl_blocks "$p" && return 1
     [[ "$p" == "/" ]] && return 0
     p=$(dirname -- "$p")
     n=$((n + 1))
@@ -1786,11 +1887,12 @@ reset_vol() {
   VOL_IMAGE=unknown; VOL_ALLOC=unknown; VOL_HOST_DROP=unknown; VOL_ENOSPC=unknown; VOL_VOLFREE=unknown
   VOL_IMAGE_PEAK=unknown; VOL_ALLOC_PEAK=unknown; VOL_HOST_DROP_PEAK=unknown; VOL_SAMPLES=0
   VOL_BASE_ALLOC=0; VOL_BASE_HOST=0; VOL_HAVE_BASE=0
+  VOL_HOST_PRE=unknown; VOL_HOST_FILL=unknown
   EXPORT_DIR=""; EXPORT_STATE=absent; EXPORT_DONE=0
 }
 volume_up() {
   local t0 st alloc ist=0
-  if ! vol_bin_ok "$HDIUTIL" || ! vol_bin_ok "$DISKUTIL" || ! vol_bin_ok "$PLUTIL" || ! vol_bin_ok "$MOUNTBIN" || ! vol_bin_ok "$STATBIN" || ! vol_bin_ok "$DFBIN"; then
+  if ! vol_bin_ok "$HDIUTIL" || ! vol_bin_ok "$DISKUTIL" || ! vol_bin_ok "$PLUTIL" || ! vol_bin_ok "$MOUNTBIN" || ! vol_bin_ok "$STATBIN" || ! vol_bin_ok "$DFBIN" || ! vol_bin_ok "$LSBIN"; then
     M_VERDICT=unknown; M_REASON=tool-missing; ANY_COLLECTION_FAILED=1
     return 1
   fi
@@ -1801,7 +1903,12 @@ volume_up() {
     M_VERDICT=unknown; M_REASON=out-unsafe; ANY_COLLECTION_FAILED=1; VOL_IN_PREP=0
     return 1
   fi
-  if ! df_avail "$OUT" || [[ "$DF_AVAIL" -lt "$HOST_RESERVE" ]]; then
+  if ! df_avail "$OUT"; then
+    M_VERDICT=unknown; M_REASON=host-space; ANY_COLLECTION_FAILED=1; VOL_IN_PREP=0
+    return 1
+  fi
+  VOL_HOST_PRE=$DF_AVAIL
+  if [[ "$DF_AVAIL" -lt "$HOST_RESERVE" ]]; then
     M_VERDICT=unknown; M_REASON=host-space; ANY_COLLECTION_FAILED=1; VOL_IN_PREP=0
     return 1
   fi
@@ -1809,10 +1916,12 @@ volume_up() {
   VOL_OUT_DEV=$ST_DEV; VOL_OUT_INO=$ST_INO
   VOL_A=$(mktemp -d "$OUT/s11v.XXXXXX") || { M_VERDICT=unknown; M_REASON=io; ANY_COLLECTION_FAILED=1; return 1; }
   chmod 0700 "$VOL_A" || { vol_quarantine; return 4; }
+  if acl_blocks "$VOL_A"; then M_REASON=out-unsafe; vol_quarantine; return 4; fi
   stat_id "$VOL_A" || { vol_quarantine; return 4; }
   VOL_A_DEV=$ST_DEV; VOL_A_INO=$ST_INO
   VOL_M=$(mktemp -d "$VOL_A/mnt.XXXXXX") || { vol_quarantine; return 4; }
   chmod 0700 "$VOL_M" || { vol_quarantine; return 4; }
+  if acl_blocks "$VOL_M"; then M_REASON=out-unsafe; vol_quarantine; return 4; fi
   stat_id "$VOL_M" || { vol_quarantine; return 4; }
   VOL_M_DEV=$ST_DEV; VOL_M_INO=$ST_INO
   VOL_I=$VOL_A/mailbox.sparseimage
@@ -1933,7 +2042,7 @@ measure_now() {
   df_avail "$VOL_A" || return 1
   host=$DF_AVAIL
   if [[ "$1" == base ]]; then
-    VOL_BASE_ALLOC=$alloc; VOL_BASE_HOST=$host; VOL_HAVE_BASE=1
+    VOL_BASE_ALLOC=$alloc; VOL_BASE_HOST=$host; VOL_HAVE_BASE=1; VOL_HOST_FILL=$host
     VOL_HOST_DROP_PEAK=0; VOL_HOST_DROP=0
     return 0
   fi
@@ -2031,7 +2140,12 @@ judge_c9() {
     return 0
   fi
   VOL_ENOSPC=1
-  limit=$((VOL_ALLOC_PEAK + HOST_MARGIN))
+  if [[ "$VOL_VOLFREE" == unknown || "$VOL_VOLFREE" -gt "$VOL_FULL_MAX" ]]; then
+    M_VERDICT=unknown; M_REASON=enospc-origin; ANY_COLLECTION_FAILED=1
+    return 0
+  fi
+  if [[ "$VOL_ALLOC_PEAK" -ge "$VOL_BASE_ALLOC" ]]; then limit=$((VOL_ALLOC_PEAK - VOL_BASE_ALLOC + HOST_MARGIN))
+  else limit=$HOST_MARGIN; fi
   if [[ "$VOL_HOST_DROP_PEAK" == unknown || "$VOL_HOST_DROP_PEAK" -gt "$limit" ]]; then
     M_VERDICT=failed; M_REASON=host-grew; ANY_COLLECTION_FAILED=1
     return 0
@@ -2042,12 +2156,21 @@ m_run_c9() {
   local gpid last=0 st
   clear_snaps; arm_m_load
   if ! measure_now base; then M_VERDICT=unknown; M_REASON=incomplete; ANY_COLLECTION_FAILED=1; return 1; fi
+  if [[ "$VOL_BASE_HOST" -lt "$HOST_RESERVE" ]]; then
+    M_VERDICT=unknown; M_REASON=host-space; ANY_COLLECTION_FAILED=1
+    return 1
+  fi
   ssh_bg "$ONCE_KEY" "run C9" || { M_VERDICT=unknown; M_REASON=not-sole; return 1; }
   gpid=$SSH_BG_PID
   while [[ "$SECONDS" -lt "$M_LOAD_END" ]] && job_running "$gpid"; do
+    note_ssh_bg "$gpid" && break
     read_progress
     st=$?
-    if [[ "$st" -eq 2 ]]; then VOL_MAYBE=1; vol_quarantine; break; fi
+    if [[ "$st" -eq 2 ]]; then
+      # Controller cancel aborted this read. That is not an uncertain volume syscall.
+      if [[ "$REQUEST_CLEANUP" == 1 ]]; then SSH_BG_AB=1; break; fi
+      VOL_MAYBE=1; vol_quarantine; break
+    fi
     if [[ "$st" -eq 0 && "$PROG_SEQ" -gt "$last" ]]; then
       measure_now sample || VOL_ID_BROKEN=1
       last=$PROG_SEQ
@@ -2063,7 +2186,7 @@ m_run_c9() {
   fi
   st=0
   read_c9 || st=$?
-  if [[ "${st:-0}" -eq 2 ]]; then
+  if [[ "${st:-0}" -eq 2 && "$G_AB" != 1 && "$G_OV" != 1 && "$REQUEST_CLEANUP" != 1 ]]; then
     VOL_MAYBE=1; vol_quarantine
     M_VERDICT=unknown; M_REASON=quarantine; ANY_COLLECTION_FAILED=1
     return 1
@@ -2072,7 +2195,7 @@ m_run_c9() {
     M_VERDICT=unknown; M_REASON=deadline; ANY_COLLECTION_FAILED=1
     return 1
   fi
-  if [[ "$G_AB" == 1 || "$G_OV" == 1 || "$G_ST" != 0 ]]; then
+  if [[ "$G_AB" == 1 || "$G_OV" == 1 || "$G_ST" != 0 || "$REQUEST_CLEANUP" == 1 ]]; then
     M_VERDICT=unknown; M_REASON=probe-failed; ANY_COLLECTION_FAILED=1
     return 1
   fi
@@ -2080,7 +2203,7 @@ m_run_c9() {
 }
 write_vol_meta() {
   local f=$WORKDIR/vol.$M_CASE.$M_BOUNDARY
-  printf '%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' \
+  printf '%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' \
     "$(vol_tok "$VOL_FSTYPE")" "$(vol_tok "$VOL_HINT")" "$(vol_tok "$VOL_CAPACITY")" \
     "$(vol_tok "$VOL_NOSUID")" "$(vol_tok "$VOL_NOEXEC")" "$(vol_tok "$VOL_NODEV")" "$(vol_tok "$VOL_NOBROWSE")" \
     "$(vol_tok "$VOL_MDUTIL")" "$(vol_tok "$VOL_TMUTIL")" \
@@ -2089,7 +2212,8 @@ write_vol_meta() {
     "$(vol_tok "$VOL_ENOSPC")" "$(vol_tok "$VOL_VOLFREE")" \
     "$(vol_tok "$VOL_OWNERS")" "$(vol_tok "$VOL_CREATE_WARN")" \
     "$(vol_tok "$VOL_FSNAME")" "$(vol_tok "$VOL_IMAGE_PEAK")" "$(vol_tok "$VOL_ALLOC_PEAK")" \
-    "$(vol_tok "$HOST_MARGIN")" "$(vol_tok "$VOL_SAMPLES")" >"$f" || IO_FAIL=1
+    "$(vol_tok "$HOST_MARGIN")" "$(vol_tok "$VOL_SAMPLES")" \
+    "$(vol_tok "$VOL_HOST_PRE")" "$(vol_tok "$VOL_HOST_FILL")" >"$f" || IO_FAIL=1
 }
 finish_c4() {
   [[ "$M_CASE" == C4 ]] || return 0
@@ -2181,7 +2305,7 @@ run_volume() {
 save_stage_v() {
   local agg caseb boundary verd reason estate name created launch ssh argv cu stop del abs first=1 rec tmp
   local fstype hint cap nosuid noexec nodev nobrowse mdutil tmutil csec asec dsec force ibytes ialloc hdrop enospc vfree owners cwarn ev
-  local fsname ibpeak iapeak hmargin samples
+  local fsname ibpeak iapeak hmargin samples host_pre host_fill
   if [[ "${S11_FAIL_STAGE:-0}" == 1 ]]; then IO_FAIL=1; rm -f "$WORKDIR/stage-V.json"; return 1; fi
   agg=$(cat "$WORKDIR/m.agg" 2>/dev/null || echo unknown)
   ev=$(cat "$WORKDIR/v.evidence" 2>/dev/null || echo volume-only)
@@ -2200,13 +2324,13 @@ save_stage_v() {
       fstype=unknown; hint=unknown; cap=unknown; nosuid=unknown; noexec=unknown; nodev=unknown; nobrowse=unknown
       mdutil=unknown; tmutil=unknown; csec=-1; asec=-1; dsec=-1; force=0
       ibytes=unknown; ialloc=unknown; hdrop=unknown; enospc=unknown; vfree=unknown; owners=unknown; cwarn=absent
-      fsname=unknown; ibpeak=unknown; iapeak=unknown; hmargin=$HOST_MARGIN; samples=0
+      fsname=unknown; ibpeak=unknown; iapeak=unknown; hmargin=$HOST_MARGIN; samples=0; host_pre=unknown; host_fill=unknown
       if [[ -f "$WORKDIR/vol.$caseb.$boundary" ]]; then
-        read -r fstype hint cap nosuid noexec nodev nobrowse mdutil tmutil csec asec dsec force ibytes ialloc hdrop enospc vfree owners cwarn fsname ibpeak iapeak hmargin samples <"$WORKDIR/vol.$caseb.$boundary"
+        read -r fstype hint cap nosuid noexec nodev nobrowse mdutil tmutil csec asec dsec force ibytes ialloc hdrop enospc vfree owners cwarn fsname ibpeak iapeak hmargin samples host_pre host_fill <"$WORKDIR/vol.$caseb.$boundary"
       fi
-      printf '{"case":"%s","boundary":"%s","verdict":"%s","reason":"%s","export_state":"%s","clone":"%s","created":"%s","launch":"%s","ssh":"%s","argv":%s,"record":"%s","cleanup":{"stop":"%s","delete":"%s","absent":"%s"},"volume":{"fstype":"%s","fsname":"%s","hint":"%s","capacity":"%s","nosuid":"%s","noexec":"%s","nodev":"%s","nobrowse":"%s","owners":"%s","mdutil":"%s","tmutil":"%s","create_warn":"%s","create_sec":"%s","attach_sec":"%s","detach_sec":"%s","force":"%s","image_bytes":"%s","image_alloc":"%s","image_bytes_peak":"%s","image_alloc_peak":"%s","host_drop":"%s","host_margin":"%s","samples":"%s","enospc":"%s","vol_free":"%s"}}' \
+      printf '{"case":"%s","boundary":"%s","verdict":"%s","reason":"%s","export_state":"%s","clone":"%s","created":"%s","launch":"%s","ssh":"%s","argv":%s,"record":"%s","cleanup":{"stop":"%s","delete":"%s","absent":"%s"},"volume":{"fstype":"%s","fsname":"%s","hint":"%s","capacity":"%s","nosuid":"%s","noexec":"%s","nodev":"%s","nobrowse":"%s","owners":"%s","mdutil":"%s","tmutil":"%s","create_warn":"%s","create_sec":"%s","attach_sec":"%s","detach_sec":"%s","force":"%s","image_bytes":"%s","image_alloc":"%s","image_bytes_peak":"%s","image_alloc_peak":"%s","host_drop":"%s","host_margin":"%s","samples":"%s","enospc":"%s","vol_free":"%s","host_pre":"%s","host_fill":"%s"}}' \
         "$caseb" "$boundary" "$verd" "$reason" "$estate" "$name" "$created" "$launch" "$ssh" "$argv" "$rec" "$stop" "$del" "$abs" \
-        "$fstype" "$fsname" "$hint" "$cap" "$nosuid" "$noexec" "$nodev" "$nobrowse" "$owners" "$mdutil" "$tmutil" "$cwarn" "$csec" "$asec" "$dsec" "$force" "$ibytes" "$ialloc" "$ibpeak" "$iapeak" "$hdrop" "$hmargin" "$samples" "$enospc" "$vfree"
+        "$fstype" "$fsname" "$hint" "$cap" "$nosuid" "$noexec" "$nodev" "$nobrowse" "$owners" "$mdutil" "$tmutil" "$cwarn" "$csec" "$asec" "$dsec" "$force" "$ibytes" "$ialloc" "$ibpeak" "$iapeak" "$hdrop" "$hmargin" "$samples" "$enospc" "$vfree" "$host_pre" "$host_fill"
     done <"$WORKDIR/m.rows"
     printf ']}\n'
   } >"$tmp" || { IO_FAIL=1; rm -f "$tmp" "$WORKDIR/stage-V.json"; return 1; }
@@ -2232,7 +2356,7 @@ volio_remove() {
   if [[ -e "$target" || -L "$target" ]]; then exit 1; fi
 }
 volio_main() {
-  local cmd=${1:-} f d
+  local cmd=${1:-} f d got
   shift || exit 2
   case "$cmd" in
     prepare)
@@ -2251,6 +2375,13 @@ volio_main() {
     remove)
       [[ $# -eq 7 ]] || exit 2
       volio_remove "$@"
+      ;;
+    slot)
+      [[ $# -eq 1 ]] || exit 2
+      f=$1
+      got=$("$STATBIN" -f '%d %i' "$f" 2>/dev/null) || exit 3
+      [[ "$got" == link ]] && exit 3
+      head -c 4097 -- "$f" || exit 3
       ;;
     *) exit 2 ;;
   esac
