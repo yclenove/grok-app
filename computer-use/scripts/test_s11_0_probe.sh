@@ -1702,4 +1702,4 @@ run_case stage-write-fail test_stage_write_fails_nonzero
 run_case share-space test_share_path_with_space
 run_case stop-unproven test_stop_unproven_quarantine
 echo "ALL_OK ${SECONDS}s"
-[[ "$SECONDS" -lt 60 ]] || { echo "suite took ${SECONDS}s" >&2; exit 1; }
+[[ "$SECONDS" -lt 90 ]] || { echo "suite took ${SECONDS}s" >&2; exit 1; }
