@@ -1217,6 +1217,12 @@ else
   printf '%s\n' "$line" >"$dir/result-$role"
   [[ "$mode" == dup ]] && printf '%s\n' "$line" >>"$dir/result-$role"
 fi
+if [[ "$cmd" == writer || "$cmd" == reader ]]; then
+  printf '%s\n' 'v=1 op=ready' >"$dir/guest-write/hg-ready"
+  printf '%s\n' 'v=1 op=ready' >"$dir/guest-write/hg-ready.tmp"
+  printf '%s\n' 'v=1 op=ready' >"$dir/host-write/gh-ready"
+  printf '%s\n' 'v=1 op=ready' >"$dir/host-write/gh-ready.tmp"
+fi
 if [[ -f "${S11_STUB_ROOT:-}/plant_unknown" ]]; then printf 'x\n' >"$dir/pwned"; fi
 if [[ -f "${S11_STUB_ROOT:-}/plant_nl" ]]; then
   nlname=$(printf 'result-host\nX')
@@ -1328,6 +1334,10 @@ PY
   grep -F -q '"verdict":"ok"' "$CASE/out/report.json" || die "verdict"
   grep -F -q '"export_state":"retained"' "$CASE/out/report.json" || die "retained"
   find "$CASE/out" -name result-host -print | grep -q . || die "result removed"
+  find "$CASE/out" -name hg-ready -print | grep -q . || die "hg-ready removed"
+  find "$CASE/out" -name gh-ready -print | grep -q . || die "gh-ready removed"
+  find "$CASE/out" -name hg-ready.tmp -print | grep -q . || die "hg-ready.tmp removed"
+  find "$CASE/out" -name gh-ready.tmp -print | grep -q . || die "gh-ready.tmp removed"
   cmp -s "$ROOT/inventory" "$ROOT/inventory.orig" || die "inventory"
 }
 

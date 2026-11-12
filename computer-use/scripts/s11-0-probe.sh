@@ -933,7 +933,7 @@ parse_fields() {
   done
   [[ "$v" == 1 ]] || return 1
   case "$reason" in
-    -|deadline|timeout|no-peer-summary|single-principal|no-non-admin-principal|principal-unknown|mapping-not-measured|torn|bad-pong|bad-part|bad-record|not-sole|init-failed|upload-failed|verify-failed|run-failed|probe-failed|skipped|quarantine|subject-policy|io|nofollow|replaced|partial-coverage) ;;
+    -|deadline|timeout|peer-not-ready|no-peer-summary|single-principal|no-non-admin-principal|principal-unknown|mapping-not-measured|torn|bad-pong|bad-part|bad-record|not-sole|init-failed|upload-failed|verify-failed|run-failed|probe-failed|skipped|quarantine|subject-policy|io|nofollow|replaced|partial-coverage) ;;
     *) return 1 ;;
   esac
   case "$verdict" in ok|failed|unknown|not-ack) ;; *) return 1 ;; esac
@@ -1086,6 +1086,7 @@ write_c1_frames() {
     done
     i=$((i + 1))
   done
+  printf '%s\n' hg-ready hg-ready.tmp gh-ready gh-ready.tmp >>"$f"
 }
 name_allowed() { grep -F -x -q -- "$1" "$2"; }
 scan_one() {
