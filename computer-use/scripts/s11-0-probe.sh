@@ -861,7 +861,9 @@ make_once_key() {
   [[ -n "$ONCE_PUB" ]] || return 1
   if has_meta "$ONCE_PUB"; then return 1; fi
 }
-# Slots exist before the VM. A guest lookup of a missing name sticks in virtiofs.
+# Every name the guest reads is planted before the VM. A lookup of a missing name sticks in virtiofs.
+# Guest reads host-write/hg-ping, host-write/gh-ready, host-write/gh-pong, and summary-host.
+# The same loops also plant the slots only the host reads. write_c1_names must list this set.
 seed_c1_slots() {
   local mbx=$1 leaf name
   for leaf in host-write guest-write; do
@@ -919,10 +921,22 @@ wait_guest() {
   fi
   SSH_BG_PID=""
 }
+c1_retry_ok() {
+  case "$1" in
+    absent:*,replaced:*) ;;
+    *) return 1 ;;
+  esac
+  local body=${1#absent:}
+  local a=${body%%,replaced:*}
+  local b=${body#*,replaced:}
+  [[ "$1" == "absent:${a},replaced:${b}" ]] || return 1
+  [[ -n "$a" && ${#a} -le 7 && "$a" != *[!0-9]* ]] || return 1
+  [[ -n "$b" && ${#b} -le 7 && "$b" != *[!0-9]* ]] || return 1
+}
 parse_fields() {
   local line=$1 tok key val seen=" " nseen=0
   local v= op= role= verdict= reason= n= torn= lost= integrity= latency=
-  local vis= rtt= slice= wslice= openus= writeus= fsyncus= renameus= dsync= readus= peer= digest= gate=
+  local vis= rtt= slice= wslice= openus= writeus= fsyncus= renameus= dsync= readus= peer= digest= gate= retry=
   local boundary= planned= attempted= renamed= visible= part= dirsync= ops= created= elevated=
   M_RECORD=$line; SHAPE_OK=0
   for tok in $line; do
@@ -939,6 +953,7 @@ parse_fields() {
       vis_us) vis=$val ;; rtt_us) rtt=$val ;; slice_us) slice=$val ;; w_slice_us) wslice=$val ;;
       open_us) openus=$val ;; write_us) writeus=$val ;; fsync_us) fsyncus=$val ;; rename_us) renameus=$val ;;
       dir_sync_us) dsync=$val ;; read_us) readus=$val ;; peer) peer=$val ;; digest) digest=$val ;; gate) gate=$val ;;
+      retry) retry=$val ;;
       boundary) boundary=$val ;; planned) planned=$val ;; attempted) attempted=$val ;; renamed) renamed=$val ;;
       visible) visible=$val ;; part) part=$val ;; dir_synced) dirsync=$val ;;
       ops) ops=$val ;; created) created=$val ;; elevated) elevated=$val ;;
@@ -953,7 +968,8 @@ parse_fields() {
   case "$verdict" in ok|failed|unknown|not-ack) ;; *) return 1 ;; esac
   case "$op" in
     c1)
-      [[ "$nseen" -eq 23 && -n "$digest" && -n "$peer" && -n "$latency" && -n "$integrity" && -n "$vis" && -n "$rtt" && -n "$gate" ]] || return 1
+      [[ "$nseen" -eq 24 && -n "$digest" && -n "$peer" && -n "$latency" && -n "$integrity" && -n "$vis" && -n "$rtt" && -n "$gate" && -n "$retry" ]] || return 1
+      c1_retry_ok "$retry" || return 1
       case "$gate" in -|exceeds-2s) ;; *) return 1 ;; esac
       if [[ "$verdict" == ok ]]; then
         [[ "$torn" == 0 && "$integrity" == ok && "$latency" == measured && "$peer" == 1 && "$role" == host && "$n" == 8 && "$vis" == "≤rtt" ]] || return 1
@@ -1089,6 +1105,7 @@ write_frames() {
     i=$((i + 1))
   done
 }
+# Same slot names as seed_c1_slots, plus the staging file publish renames over them.
 write_c1_names() {
   local f=$1 flow kind
   : >"$f"

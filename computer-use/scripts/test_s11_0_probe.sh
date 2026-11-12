@@ -1202,7 +1202,7 @@ rtt='hg=n=8,min=10,p50=20,max=30;gh=n=8,min=11,p50=21,max=40'
 line=""
 case "$cmd" in
   writer|reader)
-    line="v=1 op=c1 role=${role} verdict=ok reason=- n=8 torn=0 lost=- integrity=ok latency=${latency} vis_us=≤rtt rtt_us=${rtt} slice_us=1 w_slice_us=1 open_us=1 write_us=1 fsync_us=1 rename_us=1 dir_sync_us=1 read_us=1 peer=${peer} digest=${digest} gate=${gate}"
+    line="v=1 op=c1 role=${role} verdict=ok reason=- n=8 torn=0 lost=- integrity=ok latency=${latency} vis_us=≤rtt rtt_us=${rtt} slice_us=1 w_slice_us=1 open_us=1 write_us=1 fsync_us=1 rename_us=1 dir_sync_us=1 read_us=1 peer=${peer} digest=${digest} retry=absent:0,replaced:0 gate=${gate}"
     ;;
   c2)
     line="v=1 op=c2 role=${role} boundary=${boundary} verdict=not-ack reason=- planned=3 attempted=3 renamed=2 visible=2 part=ok dir_synced=0"
@@ -1488,7 +1488,7 @@ test_c1_rtt_fields_pass_through() {
   run_probe 20 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
   need_ec 0
   common_end
-  m_stage 'cases[0]["verdict"] == "ok" and "vis_us=≤rtt" in cases[0]["record"] and "rtt_us=hg=n=8,min=10,p50=20,max=30;gh=n=8,min=11,p50=21,max=40" in cases[0]["record"] and "gate=-" in cases[0]["record"] and "p99" not in cases[0]["record"]'
+  m_stage 'cases[0]["verdict"] == "ok" and "vis_us=≤rtt" in cases[0]["record"] and "rtt_us=hg=n=8,min=10,p50=20,max=30;gh=n=8,min=11,p50=21,max=40" in cases[0]["record"] and "gate=-" in cases[0]["record"] and "retry=absent:0,replaced:0" in cases[0]["record"] and "p99" not in cases[0]["record"]'
 }
 
 test_c1_gate_keeps_verdict() {
