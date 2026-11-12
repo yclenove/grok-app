@@ -121,19 +121,33 @@ C2 对 `file-sync`、`dir-sync`、`rename` 各起一台新 clone。每个边界�
 
 挂载不用 hdiutil 的旧 attach 参数（macOS 27 报 unknown option）。改用 `/usr/sbin/diskutil image attach --plist --nobrowse --mountPoint <挂载点> --mountOptions nosuid,noexec,nodev,owners <镜像>`。不要用 `diskutil image info`（对这份 sparseimage 返回 Operation not supported）。
 
-设备节点和挂载点只从 `/usr/bin/plutil -extract` 按真实键名读出。attach 的 plist 顶层只有 `system-entities`，元素里的 `dev-entry` 没有 `/dev/` 前缀（例如 `disk4`），还有 `filesystem-name`、`filesystem-type`、`mount-point`、`size`、`volume-name`、`content-hint`。再用 `/usr/bin/hdiutil info -plist` 核对 `image-path` 和 `system-entities` 里的 `dev-entry`（这里带 `/dev/` 前缀）、`mount-point`。比较前把两边的 `dev-entry` 都规范成 `/dev/diskN`。再对上这份镜像的设备号和 inode。对不上、读回不完整或超时，脚本不做卸载、不删镜像，把尝试目录留在 `--out` 下，报告 `quarantine`，退出码 5。
+设备节点和挂载点只从 `/usr/bin/plutil` 读出。先 `plutil -lint` 确认整份 plist 有效，再用 `plutil -type` 和 `plutil -extract <键> raw -o -` 取得数组的权威长度（`images` 或 `system-entities` 的 raw 输出是元素个数，例如 0 或 2；type 输出 `array`）。长度设有上限，超限就 quarantine。然后对 `0..count-1` 的每个元素抽取全部必需字段；任一抽取失败、类型不对或互相冲突，都 quarantine。不存在的键会报 “Could not extract value…”，这不是空数组。只有完整校验后的清单（含显式的空数组）才能当作没有这份镜像。路径里的 `$` 等字节是数据，不能当成数组结束。
 
-`mdutil -s` 只认原文里的 `Indexing disabled.` 或 `Indexing enabled.`。`tmutil isexcluded` 对着镜像路径，认 `[Included]` 或 `[Excluded]`。`tmutil addexclusion` 没测，失败或要权限就记 unknown。
+attach 的 plist 顶层是 `system-entities`。元素里的 `dev-entry` 没有 `/dev/` 前缀（例如 `disk4`），还有 `filesystem-name`、`filesystem-type`、`mount-point`、`size`、`volume-name`、`content-hint`。`filesystem-name` 为 `Case-sensitive HFS+` 时记成 `case-sensitive-hfs`。读不到文件系统名、容量或镜像大小时，C4 不能记成完整通过。`hdiutil info -plist` 里的 `dev-entry` 带 `/dev/` 前缀。比较前把两边都规范成 `/dev/diskN`，并核对镜像的设备号和 inode。对不上、读回不完整或超时，脚本不做卸载、不删镜像，把尝试目录留在 `--out` 下，报告 `quarantine`，退出码 5。
 
-quarantine 之后由人处理，脚本不会补一次删除。先在该次 `--out` 里找到留下的尝试目录和其中的 `mailbox.sparseimage`，再人工核对，不要凭目录名直接删：
+创建之前先检查 `--out` 的每一级祖先：不能是符号链接，属主必须是当前用户或 root，并且没有组写和其他写。然后在 `--out` 下记下本次尝试目录、挂载目录和镜像的 dev/inode，并先写 `--out/volume-receipt`（镜像路径、dev/inode、设备、挂载点、生命周期）。每个阶段更新这份凭据。它在卷外，不在临时目录里。quarantine 时保留它。人工处理以这份凭据为准，不要凭目录名删除。
 
-- `hdiutil info -plist`，看 `image-path` 是不是这一份镜像。`dev-entry` 先规范成 `/dev/diskN`，再和 attach 记下来的设备、`mount-point` 比较
-- `mount`，看该挂载点上有没有 nosuid、noexec、nodev、nobrowse，并且没有 noowners。出现 noowners 时 owners 记 unknown，不因此跳过卸载
-- `stat` 这一份镜像的设备号和 inode，对照报告里记录的值
+每次删除文件或空目录之前，重新核对父目录和目标的 dev/inode，并且目标不能是符号链接。对不上就 quarantine，不按路径兜底删除。创建失败和半路失败同样适用。
 
-只有这三项都指向同一次尝试，才可以手工 `hdiutil detach` 对应的整盘设备，再确认 `hdiutil info` 里已经没有这份镜像，然后删除镜像文件和空目录。对不上就停，留给下一次人工判断。不要用 `sudo`，不要 `detach -force`，除非已经证明没有 VM 还拿着这个卷。
+卷上的写入、建目录和删除（含 `.metadata_never_index`、槽位预建、删除文件和空目录）都放进有界子进程，不在 bash 主进程里直接对卷做文件 IO。卷准备阶段的绝对截止是 40 秒。清理开始时算一个绝对截止，之后每条命令连同 TERM、KILL 和回收都夹在剩余时间里，不把额度重新加满。子进程无法确认退出就 quarantine，并且不再做后续动作。客机里卡住的系统调用仍由本次尝试的 VM 停止时限盖住；客机自己的计时器单独不构成硬上限。
 
-C9 让客机通过固定的 `run C9` 写满卷（`data` 最多 80 个 1MiB，`small` 最多 8192 个 1KiB，遇到空间不足就停）。宿主看镜像的逻辑大小和占用是否都不超过 80MiB，以及宿主所在卷有没有额外增长。卷满且没有越界才是 `ok`；客机没有报告空间不足是 `unknown`；镜像或宿主其他目录越界是 `failed`。判定之后仍然按上面的身份规则卸载和删除。
+卸载绑定的是只属于本次尝试的挂载点路径。新鲜的 `hdiutil info -plist` 必须同时满足：`image-path` 等于这份镜像且 dev/inode 一致，并且该镜像的挂载点等于本次在 0700 私有目录里创建的挂载点 M。然后执行 `/usr/bin/hdiutil detach <M>`。失败时，在再次确认 VM 已停止并且同一份 info 仍然成立之后，最多执行一次 `/usr/bin/hdiutil detach -force <M>`。然后再做一次 info，确认清单里已经没有这份镜像，才按身份删除镜像和空目录。同一用户的其它进程若同时改这个私有目录，不在这层保护范围内。
+
+开始前宿主所在卷的可用空间必须至少 256MiB，否则不创建镜像，结果是 unknown。C9 记录宿主可用空间下降的峰值，以及镜像逻辑大小（st_size）和占用（blocks×512）的峰值。`ok` 要同时满足：客机报告到达 ENOSPC、两个峰值都不超过 80MiB、宿主可用空间下降不超过镜像占用峰值加报告里的 `host_margin`（1048576 字节）。没观测到的 C4 大小、宿主下降和 enospc 记 unknown，不记 0。C9 终态记录必须是唯一、完整、以换行结束的一行，字段不重复，并且 v/op/role/mode 与本次边界一致。矛盾、截断，或客机非零、中止、溢出、超时，都记 unknown；留下结果文件也不能记 ok。
+
+真实运行拒绝 `S11_HDIUTIL`、`S11_DISKUTIL`、`S11_PLUTIL`、`S11_MOUNT`、`S11_MDUTIL`、`S11_TMUTIL`、`S11_STAT`、`S11_DF`、`S11_VOLIO` 这些工具路径覆盖，除非显式设置 `S11_TEST_MODE=1`。该变量只给桩测试用。
+
+`mdutil -s` 只认原文里的 `Indexing disabled.` 或 `Indexing enabled.`。读不到就保持 unknown，不把没观测写成已经关闭。`tmutil isexcluded` 对着镜像路径，认 `[Included]` 或 `[Excluded]`。`tmutil addexclusion` 没测，失败或要权限就记 unknown。
+
+quarantine 之后由人处理，脚本不会补一次删除。打开该次 `--out/volume-receipt`，按其中的镜像路径、dev/inode、设备、挂载点和生命周期核对，不要凭目录名直接删：
+
+- `hdiutil info -plist`，看 `image-path` 是不是凭据里的镜像，挂载点是不是凭据里的 M。`dev-entry` 先规范成 `/dev/diskN`
+- `stat` 凭据里的镜像，设备号和 inode 要和凭据一致
+- `mount`，看该挂载点上有没有 nosuid、noexec、nodev、nobrowse。出现 noowners 时 owners 记 unknown，不因此跳过卸载
+
+只有这些都指向同一次尝试，才可以手工 `/usr/bin/hdiutil detach` 凭据里的挂载点路径，再确认 info 里已经没有这份镜像，然后删除镜像和空目录。对不上就停，留给下一次人工判断。不要用 `sudo`。不要 `detach -force`，除非已经证明没有 VM 还拿着这个卷，并且仍然只对凭据里的挂载点路径执行一次。
+
+C9 让客机通过固定的 `run C9` 写满卷（`data` 最多 80 个 1MiB，`small` 最多 8192 个 1KiB，遇到空间不足就停）。判定用上面的峰值和 `host_margin`。客机没有报告空间不足是 `unknown`；镜像或宿主可用空间下降越界是 `failed`。判定之后仍然按上面的身份规则卸载和删除。
 
 ## 桩测试
 

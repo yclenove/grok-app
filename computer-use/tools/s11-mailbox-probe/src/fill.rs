@@ -1,6 +1,6 @@
 use crate::io::{self, Dir};
 #[cfg(test)]
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::{self as stdio, ErrorKind};
 use std::time::Instant;
 
@@ -48,6 +48,7 @@ pub fn is_enospc(err: &stdio::Error) -> bool {
 #[cfg(test)]
 thread_local! {
     static PLAN_OVERRIDE: RefCell<Option<Plan>> = const { RefCell::new(None) };
+    static UNLINK_FAIL: Cell<bool> = const { Cell::new(false) };
 }
 #[cfg(test)]
 pub fn test_set_plan(plan: Plan) {
@@ -56,6 +57,10 @@ pub fn test_set_plan(plan: Plan) {
 #[cfg(test)]
 pub fn test_clear_plan() {
     PLAN_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+}
+#[cfg(test)]
+pub fn test_fail_unlink(fail: bool) {
+    UNLINK_FAIL.with(|slot| slot.set(fail));
 }
 pub fn resolve(mode: &str) -> Option<Plan> {
     #[cfg(test)]
@@ -119,12 +124,16 @@ pub fn run(payload: &Dir, mailbox: &Dir, plan: Plan, end: Instant) -> Report {
     report.batches = seq;
     report
 }
-pub fn remove_last(payload: &Dir, plan: Plan, files: u64) {
+pub fn remove_last(payload: &Dir, plan: Plan, files: u64) -> bool {
     if files == 0 {
-        return;
+        return false;
+    }
+    #[cfg(test)]
+    if UNLINK_FAIL.with(|slot| slot.replace(false)) {
+        return false;
     }
     let name = format!("{}-{:04}", plan.tag, files - 1);
-    let _ = payload.unlink_file(&name);
+    payload.unlink_file(&name).is_ok()
 }
 
 #[cfg(test)]

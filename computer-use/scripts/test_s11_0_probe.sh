@@ -8,7 +8,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 PROBE=$HERE/s11-0-probe.sh
 VERIFY=$HERE/verify.sh
 RUNBOOK=$HERE/../docs/s11-0-probe-runbook.md
-BASE=$(mktemp -d)
+BASE=$(mktemp -d /home/claude/s11-stub.XXXXXX)
 SYS=$BASE/sys
 PYTHON=$(PATH=/usr/bin:/bin:/usr/local/bin command -v python3 || true)
 PROBE_PID=""
@@ -88,7 +88,7 @@ die() {
 link_sys() {
   local c p
   mkdir -p "$SYS"
-  for c in bash awk sed grep mktemp head tr cut od readlink dirname id wc sleep \
+  for c in bash awk sed grep mktemp head tail tr cut od readlink dirname id wc sleep \
     cat rm mkdir mv cp ln chmod touch kill cmp find; do
     p=$(PATH=/usr/bin:/bin command -v "$c" || true)
     [[ -n "$p" ]] || die "missing system tool $c"
@@ -246,6 +246,9 @@ install_templates() {
 }
 
 write_volume_stubs() {
+  local realstat
+  realstat=$(PATH=/usr/bin:/bin command -v stat)
+  [[ -n "$realstat" && -x "$realstat" ]] || die "no stat"
   cat >"$BASE/tpl/hdiutil" <<'EOF'
 #!/bin/bash
 ROOT=${S11_STUB_ROOT:?}
@@ -296,43 +299,91 @@ case "$cmd" in
     att=$(get attached)
     mpt=$(get mount)
     dev_entry=$(get disk)
+    img=$(get image)
     [[ -f "$ROOT/info_bare" ]] && dev_entry=${dev_entry#/dev/}
     [[ -f "$ROOT/info_dev" ]] && dev_entry=$(tr -d '\r\n' <"$ROOT/info_dev")
     if [[ -f "$ROOT/mismatch_on" && "$(cat "$ROOT/mismatch_on")" == "$n" ]]; then mpt=/volume-mismatch; fi
+    [[ -f "$ROOT/info_retain" ]] && att=1
+    if [[ -f "$ROOT/info_hole" ]]; then
+      printf '%s\n' '#s11plist' \
+        'images.n=3' \
+        'images.0.image-path=/var/empty/unrelated.sparseimage' \
+        'images.0.system-entities.n=1' \
+        'images.0.system-entities.0.dev-entry=/dev/disk3' \
+        'images.0.system-entities.0.mount-point=/var/empty/unrelated' \
+        "images.2.image-path=$img" \
+        'images.2.system-entities.n=1' \
+        "images.2.system-entities.0.dev-entry=$dev_entry" \
+        "images.2.system-entities.0.mount-point=$mpt"
+      exit 0
+    fi
+    if [[ -f "$ROOT/info_dollar" ]]; then
+      if [[ "$att" == 1 ]]; then
+        printf '%s\n' '#s11plist' \
+          'images.n=2' \
+          'images.0.image-path=/var/empty/fee$bar`tick' \
+          'images.0.system-entities.n=1' \
+          'images.0.system-entities.0.dev-entry=/dev/disk3' \
+          'images.0.system-entities.0.mount-point=/var/empty/fee' \
+          "images.1.image-path=$img" \
+          'images.1.system-entities.n=1' \
+          "images.1.system-entities.0.dev-entry=$dev_entry" \
+          "images.1.system-entities.0.mount-point=$mpt"
+      else
+        printf '%s\n' '#s11plist' \
+          'images.n=1' \
+          'images.0.image-path=/var/empty/fee$bar`tick' \
+          'images.0.system-entities.n=1' \
+          'images.0.system-entities.0.dev-entry=/dev/disk3' \
+          'images.0.system-entities.0.mount-point=/var/empty/fee'
+      fi
+      exit 0
+    fi
     if [[ "$att" == 1 ]]; then
       printf '%s\n' "info dev-entry=$dev_entry" >>"$ROOT/dev-shape.log"
       printf '%s\n' '#s11plist' \
-        "images.0.image-path=$(get image)" \
+        'images.n=1' \
+        "images.0.image-path=$img" \
         'images.0.owner-uid=501' \
         'images.0.image-type=sparse' \
         'images.0.writeable=true' \
+        'images.0.system-entities.n=1' \
         "images.0.system-entities.0.dev-entry=$dev_entry" \
         "images.0.system-entities.0.mount-point=$mpt" \
         'images.0.system-entities.0.content-hint=Apple_HFS'
     else
-      printf '%s\n' '#s11plist' 'images.count=0'
+      printf '%s\n' '#s11plist' 'images.n=0'
     fi
     exit 0 ;;
   detach)
-    force=0; dev=
+    force=0; arg=
     if [[ "${1:-}" == -force ]]; then
       [[ $# -eq 2 ]] || exit 2
-      force=1; dev=$2
+      force=1; arg=$2
       printf '%s\n' force >>"$ROOT/force.count"
       [[ -f "$ROOT/fail_force" ]] && exit 1
     else
       [[ $# -eq 1 ]] || exit 2
-      dev=$1
+      arg=$1
       [[ -f "$ROOT/fail_detach" ]] && exit 1
     fi
-    [[ "$dev" == "$(get disk)" ]] || exit 1
-    [[ "$(get attached)" == 1 ]] || exit 1
     mp=$(get mount)
+    [[ "$arg" == "$mp" ]] || exit 1
+    [[ "$(get attached)" == 1 ]] || exit 1
     case "$mp" in */mnt.*) ;; *) exit 2 ;; esac
     [[ -d "$mp.under" && ! -L "$mp" ]] || exit 1
     rm -rf "$mp"
     mv "$mp.under" "$mp" || exit 1
     put attached 0
+    if [[ -f "$ROOT/replace_mount" ]]; then
+      rm -rf "$mp"
+      # Hold the freed inode so the replacement directory cannot reuse it.
+      mkdir -m 0700 "$mp.burn" || exit 1
+      mkdir -m 0700 "$mp" || exit 1
+      rm -rf "$mp.burn"
+      printf '%s\n' 1 >"$ROOT/replaced"
+    fi
+    dev=$(get disk)
     printf '"%s" ejected.\n' "${dev#/dev/}" >>"$ROOT/detach.out"
     printf '"%s" ejected.\n' "${dev#/dev/}"
     exit 0 ;;
@@ -375,11 +426,13 @@ put attached 1
 ent=disk9
 [[ -f "$ROOT/attach_prefixed" ]] && ent=$(get disk)
 printf '%s\n' "attach dev-entry=$ent" >>"$ROOT/dev-shape.log"
+if [[ -f "$ROOT/attach_fail_live" ]]; then exit 1; fi
 if [[ -f "$ROOT/bad_plist" ]]; then
   printf '%s\n' '#s11plist' 'system-entities.0.dev-entry=disk9'
   exit 0
 fi
 printf '%s\n' '#s11plist' \
+  'system-entities.n=1' \
   "system-entities.0.dev-entry=$ent" \
   'system-entities.0.filesystem-name=Case-sensitive HFS+' \
   'system-entities.0.filesystem-type=hfs' \
@@ -401,12 +454,25 @@ case "$cmd" in
     [[ "$line" == '#s11plist' ]] || exit 1
     printf '%s\n' "$1: OK"
     exit 0 ;;
+  -type)
+    [[ $# -eq 2 && -f "$2" ]] || exit 1
+    key=$1; file=$2
+    if awk -F= -v k="$key.n" '$1==k{found=1; exit} END{exit !found}' "$file"; then
+      printf '%s\n' array
+      exit 0
+    fi
+    if awk -F= -v k="$key" '$1==k{found=1; exit} END{exit !found}' "$file"; then
+      printf '%s\n' string
+      exit 0
+    fi
+    printf '%s\n' "Could not extract value, error: $key" >&2
+    exit 1 ;;
   -extract)
     [[ $# -eq 5 && "$2" == raw || $# -eq 5 && "$2" == json ]] || exit 2
     [[ "$3" == -o && "$4" == - && -f "$5" ]] || exit 2
     key=$1; form=$2; file=$5
     if [[ "$key" == images && "$form" == json ]]; then
-      if awk -F= '$1=="images.0.image-path"{found=1} END{exit !found}' "$file"; then
+      if awk -F= '$1=="images.n"{found=1} END{exit !found}' "$file"; then
         printf '%s\n' '[{"image-path":"present"}]'
       else
         printf '%s\n' '[]'
@@ -414,7 +480,13 @@ case "$cmd" in
       exit 0
     fi
     [[ "$form" == raw ]] || exit 2
-    awk -F= -v k="$key" '$1==k{print substr($0, index($0, "=")+1); found=1; exit} END{exit !found}' "$file" || exit 1
+    if awk -F= -v k="$key.n" '$1==k{print substr($0, index($0, "=")+1); found=1; exit} END{exit !found}' "$file"; then
+      exit 0
+    fi
+    awk -F= -v k="$key" '$1==k{print substr($0, index($0, "=")+1); found=1; exit} END{exit !found}' "$file" || {
+      printf '%s\n' "Could not extract value, error: $key" >&2
+      exit 1
+    }
     exit 0 ;;
   *) exit 2 ;;
 esac
@@ -460,17 +532,35 @@ fi
 printf '%s\n' "[Included]  $2"
 exit 0
 EOF
-  cat >"$BASE/tpl/statv" <<'EOF'
+  cat >"$BASE/tpl/statv" <<EOF
 #!/bin/bash
-ROOT=${S11_STUB_ROOT:?}
-printf '%s\n' "$*" >>"$ROOT/statv.log"
-[[ $# -eq 3 && "$1" == -f && "$2" == '%z %b %d %i' ]] || exit 2
-STATE=$ROOT/vol.state
-get() { awk -F= -v k="$1" '$1==k{print substr($0, index($0, "=")+1); exit}' "$STATE"; }
-[[ "$3" == "$(get image)" ]] || exit 1
-size=$(get size); blocks=$(get blocks); dev=$(get dev); ino=$(get ino)
-if [[ -f "$ROOT/stat_big" ]]; then size=90000000; blocks=200000; fi
-printf '%s %s %s %s\n' "$size" "$blocks" "$dev" "$ino"
+ROOT=\${S11_STUB_ROOT:?}
+REALSTAT=$realstat
+printf '%s\\n' "\$*" >>"\$ROOT/statv.log"
+[[ \$# -eq 3 && "\$1" == -f ]] || exit 2
+fmt=\$2
+path=\$3
+[[ -e "\$path" || -L "\$path" ]] || exit 1
+if [[ -L "\$path" ]]; then printf '%s\\n' link; exit 0; fi
+case "\$fmt" in
+  '%z %b %d %i')
+    STATE=\$ROOT/vol.state
+    get() { awk -F= -v k="\$1" '\$1==k{print substr(\$0, index(\$0, "=")+1); exit}' "\$STATE"; }
+    [[ "\$path" == "\$(get image)" ]] || exit 1
+    size=\$(get size); blocks=\$(get blocks)
+    ids=\$("\$REALSTAT" -c '%d %i' "\$path") || exit 1
+    if [[ -f "\$ROOT/stat_big" ]]; then size=90000000; blocks=200000; fi
+    if [[ -f "\$ROOT/stat_big_arm" ]]; then size=90000000; blocks=200000; rm -f "\$ROOT/stat_big_arm"; fi
+    printf '%s %s %s\\n' "\$size" "\$blocks" "\$ids"
+    ;;
+  '%d %i')
+    "\$REALSTAT" -c '%d %i' "\$path" || exit 1
+    ;;
+  '%u %OLp')
+    "\$REALSTAT" -c '%u %a' "\$path" || exit 1
+    ;;
+  *) exit 2 ;;
+esac
 exit 0
 EOF
   cat >"$BASE/tpl/df" <<'EOF'
@@ -479,18 +569,17 @@ ROOT=${S11_STUB_ROOT:?}
 printf '%s\n' "$*" >>"$ROOT/df.log"
 [[ $# -eq 3 && "$1" == -k && "$2" == -P ]] || exit 2
 STATE=$ROOT/vol.state
-get() { awk -F= -v k="$1" '$1==k{print substr($0, index($0, "=")+1); exit}' "$STATE"; }
+get() { [[ -f "$STATE" ]] || return 0; awk -F= -v k="$1" '$1==k{print substr($0, index($0, "=")+1); exit}' "$STATE"; }
 path=$3
 hostk=4000000
-if [[ -f "$ROOT/df_drop" && "$path" != "$(get mount)" ]]; then
-  n=0
-  [[ -f "$ROOT/df.hostn" ]] && n=$(cat "$ROOT/df.hostn")
-  n=$((n + 1))
-  printf '%s\n' "$n" >"$ROOT/df.hostn"
-  [[ "$n" -gt 1 ]] && hostk=$((hostk - 200000))
+mount=$(get mount)
+if [[ -f "$ROOT/df_low" && "$path" != "$mount" ]]; then hostk=100000; fi
+if [[ -f "$ROOT/df_drop_arm" && "$path" != "$mount" ]]; then
+  rm -f "$ROOT/df_drop_arm"
+  hostk=$((hostk - 200000))
 fi
 printf '%s\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on'
-if [[ "$path" == "$(get mount)" ]]; then
+if [[ -n "$mount" && "$path" == "$mount" ]]; then
   printf '%s %s %s %s %s %s\n' /dev/disk9 65536 1000 1024 50% "$path"
 else
   printf '%s %s %s %s %s %s\n' hostfs 8000000 1000 "$hostk" 50% "$path"
@@ -506,12 +595,27 @@ mode=$(tr -d '\r\n' <"$mbx/fill-mode")
 en=1; bytes=4096; files=4
 [[ -f "$ROOT/c9_no_enospc" ]] && en=0
 printf 'v=1 seq=1 bytes=%s files=%s enospc=%s\n' "$bytes" "$files" "$en" >"$mbx/progress"
-printf 'v=1 op=c9 role=guest mode=%s enospc=%s bytes=%s files=%s batches=1\n' "$mode" "$en" "$bytes" "$files" >"$mbx/result-guest"
+if [[ -f "$ROOT/c9_pause" ]]; then
+  [[ "$mode" == data && -f "$ROOT/arm_stat" ]] && touch "$ROOT/stat_big_arm"
+  [[ "$mode" == small && -f "$ROOT/df_drop" ]] && touch "$ROOT/df_drop_arm"
+  sleep 1
+fi
+if [[ -f "$ROOT/c9_dup" && "$mode" == data ]]; then
+  printf 'v=1 op=c9 role=guest mode=%s enospc=%s enospc=1 bytes=%s files=%s batches=1\n' "$mode" "$en" "$bytes" "$files" >"$mbx/result-guest"
+elif [[ -f "$ROOT/c9_trail" && "$mode" == small ]]; then
+  printf 'v=1 op=c9 role=guest mode=%s enospc=%s bytes=%s files=%s batches=1\nTRAIL' "$mode" "$en" "$bytes" "$files" >"$mbx/result-guest"
+elif [[ -f "$ROOT/c9_dup" ]]; then
+  printf 'v=1 op=c9 role=guest mode=%s enospc=%s enospc=1 bytes=%s files=%s batches=1\n' "$mode" "$en" "$bytes" "$files" >"$mbx/result-guest"
+elif [[ -f "$ROOT/c9_trail" ]]; then
+  printf 'v=1 op=c9 role=guest mode=%s enospc=%s bytes=%s files=%s batches=1\nTRAIL' "$mode" "$en" "$bytes" "$files" >"$mbx/result-guest"
+else
+  printf 'v=1 op=c9 role=guest mode=%s enospc=%s bytes=%s files=%s batches=1\n' "$mode" "$en" "$bytes" "$files" >"$mbx/result-guest"
+fi
+[[ -f "$ROOT/c9_ssh_fail" ]] && exit 9
 exit 0
 EOF
   chmod 700 "$BASE/tpl/hdiutil" "$BASE/tpl/diskutil" "$BASE/tpl/plutil" "$BASE/tpl/mount" "$BASE/tpl/mdutil" "$BASE/tpl/tmutil" "$BASE/tpl/statv" "$BASE/tpl/df" "$BASE/tpl/c9write"
 }
-
 setup() {
   ROOT=$CASE/stub
   mkdir -p "$ROOT/bin" "$ROOT/mid" "$ROOT/real" "$CASE/thome" "$CASE/tmp"
@@ -531,7 +635,7 @@ setup() {
   export TMPDIR=$CASE/tmp
   export S11_START_SEC=0
   unset BASH_ENV S11_XTRACE S11_BOUND_SEC S11_BOUND_POLLS S11_FORCE_NAME S11_PROBE_BUDGET S11_CLEANUP_BUDGET S11_REAP_POLLS S11_FAIL_ROW_N S11_FAIL_STAGE S11_PROBE_MODE
-  unset S11_HDIUTIL S11_DISKUTIL S11_PLUTIL S11_MOUNT S11_MDUTIL S11_TMUTIL S11_STAT S11_DF
+  unset S11_HDIUTIL S11_DISKUTIL S11_PLUTIL S11_MOUNT S11_MDUTIL S11_TMUTIL S11_STAT S11_DF S11_VOLIO S11_TEST_MODE
   ARGS=(--ssh-key "$CASE/id_key" --tart-home "$CASE/thome" --out "$CASE/out")
 }
 
@@ -1973,6 +2077,7 @@ run_case c2-row-loss test_c2_row_loss_is_not_success
 run_case stage-write-fail test_stage_write_fails_nonzero
 run_case share-space test_share_path_with_space
 enable_volume() {
+  export S11_TEST_MODE=1
   export S11_HDIUTIL=$ROOT/bin/hdiutil
   export S11_DISKUTIL=$ROOT/bin/diskutil
   export S11_PLUTIL=$ROOT/bin/plutil
@@ -1981,6 +2086,25 @@ enable_volume() {
   export S11_TMUTIL=$ROOT/bin/tmutil
   export S11_STAT=$ROOT/bin/statv
   export S11_DF=$ROOT/bin/df
+}
+
+
+mount_point() {
+  sed -n 's/.*--mountPoint \(.*\) --mountOptions.*/\1/p' "$ROOT/diskutil.log" | head -n 1
+}
+assert_detach_count() {
+  local want=$1 mp n
+  mp=$(mount_point)
+  [[ -n "$mp" ]] || die "no mount point"
+  n=$(grep -F -x -c -- "detach $mp" "$ROOT/hdiutil.log" || true)
+  [[ "$n" == "$want" ]] || die "detach count $n want $want"
+}
+assert_force_count() {
+  local mp f
+  mp=$(mount_point)
+  [[ -n "$mp" ]] || die "no mount point"
+  f=$(grep -F -x -c -- "detach -force $mp" "$ROOT/hdiutil.log" || true)
+  [[ "$f" == "$1" ]] || die "force count $f"
 }
 
 image_path() {
@@ -2020,8 +2144,9 @@ assert_create_argv() {
 test_stage_v_c4_argv_and_cleanup() {
   setup
   enable_volume
-  grep -F -q 'S11_HDIUTIL:-/usr/bin/hdiutil' "$PROBE" || die "default hdiutil"
-  grep -F -q 'S11_DISKUTIL:-/usr/sbin/diskutil' "$PROBE" || die "default diskutil"
+  grep -F -q 'HDIUTIL=/usr/bin/hdiutil' "$PROBE" || die "default hdiutil"
+  grep -F -q 'DISKUTIL=/usr/sbin/diskutil' "$PROBE" || die "default diskutil"
+  grep -F -q 'S11_TEST_MODE' "$PROBE" || die "test mode gate"
   grep -F -q -- '-size 64m -fs HFSX -type SPARSE -layout NONE -volname GCU-MAILBOX' "$PROBE" || die "create literal"
   grep -F -q -- 'image attach --plist --nobrowse --mountPoint' "$PROBE" || die "attach literal"
   grep -F -q -- '--mountOptions nosuid,noexec,nodev,owners' "$PROBE" || die "mount options"
@@ -2058,10 +2183,17 @@ test_stage_v_c4_argv_and_cleanup() {
   img=$(image_path)
   grep -F -q -- "isexcluded $img" "$ROOT/tmutil.log" || die "tmutil target"
   if grep -F -q addexclusion "$ROOT/tmutil.log"; then die "addexclusion called"; fi
-  local n
-  n=$(grep -c '^detach /dev/disk9$' "$ROOT/hdiutil.log" || true)
-  [[ "$n" == 1 ]] || die "detach count $n"
+  assert_detach_count 1
   if grep -F -q -- '-force' "$ROOT/hdiutil.log"; then die "unexpected force"; fi
+  grep -F -q '"fsname":"case-sensitive-hfs"' "$CASE/out/report.json" || die "fsname"
+  grep -F -q '"image_bytes":"4096"' "$CASE/out/report.json" || die "image bytes"
+  grep -F -q '"image_alloc":"4096"' "$CASE/out/report.json" || die "image alloc"
+  grep -F -q '"host_drop":"unknown"' "$CASE/out/report.json" || die "host drop zeroed"
+  grep -F -q '"enospc":"unknown"' "$CASE/out/report.json" || die "enospc zeroed"
+  grep -F -q '"host_margin":"1048576"' "$CASE/out/report.json" || die "host margin"
+  grep -E -q '^phase=gone$' "$CASE/out/volume-receipt" || die "receipt phase"
+  grep -E -q '^image_dev=[0-9]+$' "$CASE/out/volume-receipt" || die "receipt dev"
+  grep -E -q '^mount_ino=[0-9]+$' "$CASE/out/volume-receipt" || die "receipt mount"
   if grep -E '^(clone|run) ' "$ROOT/tart.log"; then die "c4 started a vm"; fi
 }
 
@@ -2085,10 +2217,8 @@ test_stage_v_detach_force_once() {
   need_ec 0
   common_end
   assert_image_gone
-  local n f
-  n=$(grep -c '^detach /dev/disk9$' "$ROOT/hdiutil.log" || true)
-  f=$(grep -c '^detach -force /dev/disk9$' "$ROOT/hdiutil.log" || true)
-  [[ "$n" == 1 && "$f" == 1 ]] || die "force counts detach=$n force=$f"
+  assert_detach_count 1
+  assert_force_count 1
   grep -F -q '"force":"1"' "$CASE/out/report.json" || die "force flag"
 }
 
@@ -2175,6 +2305,7 @@ test_stage_v_c9_ok() {
   grep -F -q '"boundary":"small"' "$CASE/out/report.json" || die "small mode"
   grep -F -q '"enospc":"1"' "$CASE/out/report.json" || die "enospc"
   grep -F -q '"verdict":"ok"' "$CASE/out/report.json" || die "c9 ok"
+  grep -F -q '"host_margin":"1048576"' "$CASE/out/report.json" || die "c9 margin"
   "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "cap"
 import json,sys
 rep=json.load(open(sys.argv[1]))
@@ -2226,9 +2357,7 @@ test_stage_v_dev_prefix_normalized() {
   grep -F -q 'attach dev-entry=/dev/disk9' "$ROOT/dev-shape.log" || die "prefixed attach"
   grep -F -q 'info dev-entry=disk9' "$ROOT/dev-shape.log" || die "bare info"
   grep -F -q '"owners":"yes"' "$CASE/out/report.json" || die "normalized owners"
-  local n
-  n=$(grep -c '^detach /dev/disk9$' "$ROOT/hdiutil.log" || true)
-  [[ "$n" == 1 ]] || die "normalized detach $n"
+  assert_detach_count 1
   rm -rf "$CASE/out" "$ROOT/hdiutil.log" "$ROOT/diskutil.log" "$ROOT/dev-shape.log" "$ROOT/vol.state" "$ROOT/info.count" "$ROOT/detach.out" "$ROOT/mount.out" "$ROOT/create.err" "$ROOT/plutil.log" "$ROOT/tmutil.log"
   rm -f "$ROOT/info_bare" "$ROOT/attach_prefixed"
   printf '%s\n' '/dev/disk8' >"$ROOT/info_dev"
@@ -2255,9 +2384,177 @@ test_stage_v_noowners_unknown() {
   grep -F -q '"export_state":"removed"' "$CASE/out/report.json" || die "noowners cleaned"
   grep -F -q '"verdict":"ok"' "$CASE/out/report.json" || die "noowners verdict"
   if grep -F -q '"export_state":"quarantine"' "$CASE/out/report.json"; then die "noowners quarantined"; fi
-  local n
-  n=$(grep -c '^detach /dev/disk9$' "$ROOT/hdiutil.log" || true)
-  [[ "$n" == 1 ]] || die "noowners detach $n"
+  assert_detach_count 1
+}
+
+test_stage_v_plist_hole_quarantine() {
+  setup
+  enable_volume
+  touch "$ROOT/attach_fail_live" "$ROOT/info_hole"
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  assert_image_kept
+  if grep -E '^detach( |$)' "$ROOT/hdiutil.log"; then die "hole detached"; fi
+  grep -F -q -- '-extract images.1.image-path raw -o -' "$ROOT/plutil.log" || die "hole did not read middle"
+  grep -E -q '^phase=quarantine$' "$CASE/out/volume-receipt" || die "hole receipt"
+  grep -F -q -- "image=$(image_path)" "$CASE/out/volume-receipt" || die "hole receipt image"
+}
+
+test_stage_v_plist_dollar_path() {
+  setup
+  enable_volume
+  touch "$ROOT/info_dollar"
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 0
+  common_end
+  assert_image_gone
+  assert_detach_count 1
+  grep -F -q '"verdict":"ok"' "$CASE/out/report.json" || die "dollar not ok"
+}
+
+test_stage_v_replaced_dir_quarantine() {
+  setup
+  enable_volume
+  touch "$ROOT/replace_mount"
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  [[ -f "$ROOT/replaced" ]] || die "mount was not replaced"
+  local mp
+  mp=$(mount_point)
+  [[ -n "$mp" && -d "$mp" && ! -L "$mp" ]] || die "replaced mount removed"
+  if grep -F -q -- '-force' "$ROOT/hdiutil.log"; then die "replace forced"; fi
+}
+
+test_stage_v_volio_hang_quarantine() {
+  setup
+  enable_volume
+  printf '%s\n' '#!/bin/bash' 'while true; do sleep 30; done' >"$ROOT/bin/volio-hang"
+  chmod 700 "$ROOT/bin/volio-hang"
+  export S11_VOLIO=$ROOT/bin/volio-hang
+  export S11_BOUND_POLLS=4
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  assert_image_kept
+}
+
+test_stage_v_host_space_unknown() {
+  setup
+  enable_volume
+  touch "$ROOT/df_low"
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 4
+  common_end
+  need_reason host-space
+  grep -F -q '"verdict":"unknown"' "$CASE/out/report.json" || die "host space verdict"
+  [[ ! -f "$ROOT/hdiutil.log" ]] || die "host space created an image"
+}
+
+test_stage_v_over_cap_before_attach() {
+  setup
+  enable_volume
+  touch "$ROOT/stat_big"
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 4
+  common_end
+  grep -F -q '"verdict":"failed"' "$CASE/out/report.json" || die "over cap verdict"
+  grep -F -q '"reason":"over-cap"' "$CASE/out/report.json" || die "over cap reason"
+  [[ ! -f "$ROOT/diskutil.log" ]] || die "over cap attached"
+}
+
+test_stage_v_still_attached_quarantine() {
+  setup
+  enable_volume
+  touch "$ROOT/info_retain"
+  run_probe 12 --stage V --case C4 "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  local img
+  img=$(image_path)
+  [[ -n "$img" && -f "$img" && ! -L "$img" ]] || die "image unlinked while still attached"
+  assert_detach_count 1
+}
+
+test_stage_v_c9_peak_and_margin() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/c9_pause" "$ROOT/arm_stat" "$ROOT/df_drop"
+  run_probe 25 --stage V --case C9 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "peak judge"
+import json,sys
+rep=json.load(open(sys.argv[1]))
+cases=rep["stages"][0]["cases"]
+assert len(cases)==2, len(cases)
+data, small = cases
+assert data["boundary"]=="data" and small["boundary"]=="small"
+vol=data["volume"]
+assert data["verdict"]=="failed" and data["reason"]=="over-cap", (data["verdict"], data["reason"])
+assert vol["image_bytes"]=="4096", vol["image_bytes"]
+assert int(vol["image_bytes_peak"])==90000000, vol["image_bytes_peak"]
+assert int(vol["image_alloc_peak"])>83886080, vol["image_alloc_peak"]
+assert vol["host_margin"]=="1048576", vol["host_margin"]
+assert int(vol["samples"])>=4, vol["samples"]
+vol=small["volume"]
+assert small["verdict"]=="failed" and small["reason"]=="host-grew", (small["verdict"], small["reason"])
+assert int(vol["host_drop"])==200000*1024, vol["host_drop"]
+assert int(vol["image_alloc_peak"])<=83886080, vol["image_alloc_peak"]
+assert vol["host_margin"]=="1048576"
+assert int(vol["samples"])>=4, vol["samples"]
+PY
+}
+
+test_stage_v_c9_bad_record() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/c9_dup" "$ROOT/c9_trail"
+  run_probe 25 --stage V --case C9 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "bad record"
+import json,sys
+rep=json.load(open(sys.argv[1]))
+cases=rep["stages"][0]["cases"]
+assert [c["boundary"] for c in cases]==["data","small"], [c["boundary"] for c in cases]
+for c in cases:
+    assert c["verdict"]!="ok", c["boundary"]
+    assert c["reason"]=="probe-failed", (c["boundary"], c["reason"])
+PY
+}
+
+test_stage_v_c9_guest_fail() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/c9_ssh_fail"
+  run_probe 25 --stage V --case C9 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  if grep -F -q '"verdict":"ok"' "$CASE/out/report.json"; then die "guest fail ok"; fi
+  grep -F -q '"reason":"probe-failed"' "$CASE/out/report.json" || die "guest fail reason"
+  grep -F -q 'op=c9' "$CASE/out/report.json" || die "guest record dropped"
+}
+
+test_stage_v_tool_override_refused() {
+  setup
+  export S11_HDIUTIL=$ROOT/bin/hdiutil
+  run_probe 8 --stage V --case C4 "${ARGS[@]}"
+  need_ec 2
+  common_end
+  need_reason tool-override
+  [[ ! -f "$ROOT/hdiutil.log" ]] || die "override invoked hdiutil"
 }
 
 run_case stop-unproven test_stop_unproven_quarantine
@@ -2273,5 +2570,16 @@ run_case stage-v-option test_stage_v_option_rejected
 run_case stage-v-c1 test_stage_v_c1_on_volume
 run_case stage-v-c9 test_stage_v_c9_ok
 run_case stage-v-usage test_stage_v_usage
+run_case stage-v-hole test_stage_v_plist_hole_quarantine
+run_case stage-v-dollar test_stage_v_plist_dollar_path
+run_case stage-v-replaced test_stage_v_replaced_dir_quarantine
+run_case stage-v-volio-hang test_stage_v_volio_hang_quarantine
+run_case stage-v-host-space test_stage_v_host_space_unknown
+run_case stage-v-over-cap test_stage_v_over_cap_before_attach
+run_case stage-v-still test_stage_v_still_attached_quarantine
+run_case stage-v-c9-peak test_stage_v_c9_peak_and_margin
+run_case stage-v-c9-record test_stage_v_c9_bad_record
+run_case stage-v-c9-guest test_stage_v_c9_guest_fail
+run_case stage-v-override test_stage_v_tool_override_refused
 echo "ALL_OK ${SECONDS}s"
-[[ "$SECONDS" -lt 90 ]] || { echo "suite took ${SECONDS}s" >&2; exit 1; }
+[[ "$SECONDS" -lt 120 ]] || { echo "suite took ${SECONDS}s" >&2; exit 1; }
