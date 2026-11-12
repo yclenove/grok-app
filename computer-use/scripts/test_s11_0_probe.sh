@@ -1,5 +1,8 @@
 #!/bin/bash
 # Manual stub suite for s11-0-probe.sh. Not invoked by scripts/verify.sh.
+# Linux with gawk and GNU userland: the stubs and poll timings assume them, so on
+# macOS the timing and stage V cases fail, and on mawk the inventory parser segfaults.
+# S11_STUB_ONLY=<case> runs one case.
 # Bounds each probe with a background sleep and kill. No external timer program.
 set -euo pipefail
 export LC_ALL=C
@@ -8,7 +11,8 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 PROBE=$HERE/s11-0-probe.sh
 VERIFY=$HERE/verify.sh
 RUNBOOK=$HERE/../docs/s11-0-probe-runbook.md
-BASE=$(mktemp -d /home/claude/s11-stub.XXXXXX)
+# Not under /tmp: the probe refuses out dirs with world-writable ancestors.
+BASE=$(mktemp -d "${S11_STUB_ROOT:-$HOME}/s11-stub.XXXXXX")
 SYS=$BASE/sys
 PYTHON=$(PATH=/usr/bin:/bin:/usr/local/bin command -v python3 || true)
 PROBE_PID=""
@@ -366,6 +370,7 @@ case "$cmd" in
       [[ $# -eq 1 ]] || exit 2
       arg=$1
       [[ -f "$ROOT/fail_detach" ]] && exit 1
+      [[ -f "$ROOT/slow_detach" ]] && sleep 6
     fi
     mp=$(get mount)
     [[ "$arg" == "$mp" ]] || exit 1
@@ -1580,6 +1585,7 @@ test_help() {
 run_case() {
   local name=$1
   shift
+  [[ -z "${S11_STUB_ONLY:-}" || "$name" == "$S11_STUB_ONLY" ]] || return 0
   CASE=$(mktemp -d "$BASE/case.XXXXXX")
   local start=$SECONDS
   if ( trap - EXIT; "$@" ); then
@@ -2286,6 +2292,22 @@ test_stage_v_detach_force_once() {
   grep -F -q '"force":"1"' "$CASE/out/report.json" || die "force flag"
 }
 
+# A normal detach past the 5s design target must finish, not be killed into
+# an unmounted-but-attached image (seen once on the Mini).
+test_stage_v_slow_detach_completes() {
+  setup
+  enable_volume
+  touch "$ROOT/slow_detach"
+  run_probe 20 --stage V --case C4 "${ARGS[@]}"
+  need_ec 0
+  common_end
+  assert_image_gone
+  assert_detach_count 1
+  if grep -F -q -- '-force' "$ROOT/hdiutil.log"; then die "slow detach forced"; fi
+  grep -E -q '"detach_sec":"([6-9]|1[0-9])"' "$CASE/out/report.json" || die "detach sec"
+  grep -F -q '"verdict":"ok"' "$CASE/out/report.json" || die "slow detach verdict"
+}
+
 test_stage_v_no_force_if_vm_not_stopped() {
   setup
   enable_volume
@@ -2781,6 +2803,7 @@ run_case stage-v-prefix test_stage_v_dev_prefix_normalized
 run_case stage-v-noowners test_stage_v_noowners_unknown
 run_case stage-v-mismatch test_stage_v_mismatch_quarantine
 run_case stage-v-force test_stage_v_detach_force_once
+run_case stage-v-slow-detach test_stage_v_slow_detach_completes
 run_case stage-v-no-force test_stage_v_no_force_if_vm_not_stopped
 run_case stage-v-timeout test_stage_v_timeout_quarantine
 run_case stage-v-incomplete test_stage_v_incomplete_quarantine

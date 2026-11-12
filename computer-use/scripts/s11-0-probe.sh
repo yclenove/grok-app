@@ -140,13 +140,16 @@ term_kill_reap() {
   REAP_STATUS=$?
 }
 capture_over() {
-  local n rest
-  # One wc. Skip its total line so two half-full streams are not an overflow.
-  while read -r n rest; do
-    [[ "$rest" == total ]] && continue
+  local f n
+  # Per-file size, so two half-full streams are not an overflow. No process
+  # substitution: macOS bash 3.2 keeps its pipe open until the reader is
+  # reaped, and this runs every poll; the suite hit EMFILE (ulimit -n 256).
+  for f in "$1" "$2"; do
+    n=$(wc -c <"$f" 2>/dev/null) || continue
+    n=${n//[[:space:]]/}
     case "$n" in ''|*[!0-9]*) continue ;; esac
     [[ "$n" -ge "$CAP" ]] && return 0
-  done < <(wc -c "$1" "$2" 2>/dev/null)
+  done
   return 1
 }
 run_bounded() {
@@ -207,7 +210,9 @@ run_bounded() {
       if [[ "$IN_CLEANUP" != 1 && "$REQUEST_CLEANUP" == 1 ]]; then
         RB_ABORTED=1; term_kill_reap "$pid"; reaped=1; break
       fi
-      if capture_over "$out" "$err"; then RB_OVERFLOW=1; term_kill_reap "$pid"; reaped=1; break; fi
+      # Every 8th poll: two wc forks per poll would make a poll cost more than
+      # its 20ms sleep on macOS. The post-exit check below catches the rest.
+      if [[ $((polls % 8)) -eq 0 ]] && capture_over "$out" "$err"; then RB_OVERFLOW=1; term_kill_reap "$pid"; reaped=1; break; fi
       if [[ "${S11_TEST_MODE:-}" == 1 ]]; then sleep 0.01; else sleep 0.02; fi
     done
   fi
@@ -2014,13 +2019,16 @@ volume_down() {
     if ! info_holds; then vol_quarantine; return 0; fi
     t0=$SECONDS
     # Bind detach to this attempt's mount directory, not a reusable /dev/diskN.
-    vol_run 5 "$HDIUTIL" detach "$VOL_M"
+    # Bound it by the whole 20s volume-cleanup share, not the 5s design target:
+    # on the Mini a normal detach once ran past 5s, and killing it mid-way left
+    # the image unmounted but attached. detach_sec records the real time.
+    vol_run 20 "$HDIUTIL" detach "$VOL_M"
     st=$?
     VOL_DETACH_SEC=$((SECONDS - t0))
     if [[ "$st" -eq 2 ]]; then vol_quarantine; return 0; fi
     if [[ "$st" -ne 0 ]]; then
       if vm_proven_stopped && info_holds; then
-        vol_run 5 "$HDIUTIL" detach -force "$VOL_M"
+        vol_run 10 "$HDIUTIL" detach -force "$VOL_M"
         st=$?
         if [[ "$st" -eq 2 ]]; then VOL_MAYBE=1; vol_quarantine; return 0; fi
         if [[ "$st" -ne 0 ]]; then vol_quarantine; return 0; fi
