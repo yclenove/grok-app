@@ -911,8 +911,9 @@ ssh_bg() {
   fill_ssh "$key" "$remote" "$kh"
   SSH_BG_OV=0; SSH_BG_AB=0
   : >"$WORKDIR/ssh.bg.out"; : >"$WORKDIR/ssh.bg.err"
-  # head -c closes the pipe at CAP, so the capture file cannot grow past it.
-  "${SSH_ARGV[@]}" </dev/null > >(head -c "$CAP" >"$WORKDIR/ssh.bg.out") 2> >(head -c "$CAP" >"$WORKDIR/ssh.bg.err") &
+  # Direct file capture: no asynchronous reader can finish after ssh exits, so the
+  # post-exit size check is exact. note_ssh_bg polls the size and kills ssh at CAP.
+  "${SSH_ARGV[@]}" </dev/null >"$WORKDIR/ssh.bg.out" 2>"$WORKDIR/ssh.bg.err" &
   SSH_BG_PID=$!
 }
 boot_ready_m() {
@@ -1637,9 +1638,17 @@ acl_blocks() {
     case "$qual" in
       owner|user:root|"user:${me}") continue ;;
     esac
-    case ",$perms," in
-      *,add_file,*|*,add_subdirectory,*|*,delete,*|*,delete_child,*|*,write,*|*,append,*) return 0 ;;
-    esac
+    # Allowlist: another principal may hold only understood read-only rights.
+    # Anything else (writesecurity, chown, add/delete, unknown words) blocks.
+    local perm rest=$perms
+    while [[ -n "$rest" ]]; do
+      perm=${rest%%,*}
+      [[ "$rest" == *,* ]] && rest=${rest#*,} || rest=
+      case "$perm" in
+        list|search|read|readattr|readextattr|readsecurity|execute) ;;
+        *) return 0 ;;
+      esac
+    done
   done <"$WORKDIR/v.out"
   return 1
 }
