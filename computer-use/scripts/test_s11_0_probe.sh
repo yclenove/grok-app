@@ -194,7 +194,7 @@ install_templates() {
     '  exit 0; fi' \
     'case " $* " in *s11m.XXXXXX*) cat >"$ROOT/init.body"; printf "init-ok\n"; exit 0 ;; esac' \
     'remote=""; for remote in "$@"; do :; done' \
-    'case "$remote" in upload|verify\ *|run\ C2|run\ C8) cat >/dev/null; exit 0 ;; "run C1"|"run C7") "$ROOT/bin/c7guest" "$remote"; exit $? ;; "run C9") cat >/dev/null; mode=""; mbx=$(awk '"'"'match($0,/--dir s11mbx:/){p=substr($0,RSTART+13)} END{print p}'"'"' "$ROOT/tart.log"); [[ -n "$mbx" && -f "$mbx/fill-mode" ]] && mode=$(tr -d "\r\n" <"$mbx/fill-mode"); if [[ -f "$ROOT/c9_hold_after" && "$mode" == small ]]; then "$ROOT/bin/c9write" & cpid=$!; trap "kill -KILL $cpid 2>/dev/null; exit 0" TERM INT HUP; wait "$cpid"; exit $?; fi; "$ROOT/bin/c9write"; exit $? ;; "run C6 file"|"run C6 dir") kind=file; [[ "$remote" == "run C6 dir" ]] && kind=dir; [[ -f "$ROOT/c6_nohold" ]] && exit 0; printf "v=1 op=c6 role=guest kind=%s held=1\n" "$kind"; pp=$PPID; trap "exit 0" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done ;; esac' \
+    'case "$remote" in upload|verify\ *|run\ C2|run\ C8|run\ C11\ fd|run\ C11\ reopen) cat >/dev/null; exit 0 ;; "run C1"|"run C7") "$ROOT/bin/c7guest" "$remote"; exit $? ;; "run C9") cat >/dev/null; mode=""; mbx=$(awk '"'"'match($0,/--dir s11mbx:/){p=substr($0,RSTART+13)} END{print p}'"'"' "$ROOT/tart.log"); [[ -n "$mbx" && -f "$mbx/fill-mode" ]] && mode=$(tr -d "\r\n" <"$mbx/fill-mode"); if [[ -f "$ROOT/c9_hold_after" && "$mode" == small ]]; then "$ROOT/bin/c9write" & cpid=$!; trap "kill -KILL $cpid 2>/dev/null; exit 0" TERM INT HUP; wait "$cpid"; exit $?; fi; "$ROOT/bin/c9write"; exit $? ;; "run C6 file"|"run C6 dir") kind=file; [[ "$remote" == "run C6 dir" ]] && kind=dir; [[ -f "$ROOT/c6_nohold" ]] && exit 0; printf "v=1 op=c6 role=guest kind=%s held=1\n" "$kind"; pp=$PPID; trap "exit 0" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done ;; esac' \
     '[[ -f "$ROOT/guest_fail" ]] && exit 9' \
     'if [[ -f "$ROOT/guest_hang" ]]; then pp=$PPID; trap "exit 143" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done; exit 143; fi' \
     'last=""' \
@@ -1062,7 +1062,8 @@ static_checks() {
   grep -F -q 'h1_independent_of_ip' "$RUNBOOK" || grep -F -q 'unknown' "$RUNBOOK"
   if grep -F -q 'reachable' "$RUNBOOK"; then die "runbook reachable"; fi
   if grep -F -q 'blocked' "$RUNBOOK"; then die "runbook blocked"; fi
-  if grep -F -q '/Volumes/' "$RUNBOOK"; then die "runbook volume"; fi
+  # The C8 owner-prep host path is the one allowed /Volumes/ mention. Any other one is still rejected.
+  if grep -F '/Volumes/' "$RUNBOOK" | grep -v -F 'TART_HOME="/Volumes/Mini扩展/VMs/tart"' | grep -q .; then die "runbook volume"; fi
   if grep -F -q '2400' "$RUNBOOK"; then die "runbook old budget"; fi
 }
 
@@ -1806,10 +1807,12 @@ boundary=-
 if [[ "$cmd" == c2 ]]; then boundary=$1; shift; fi
 dir=""
 role=""
+modeflag=-
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dir) dir=$2; shift 2 ;;
     --role) role=$2; shift 2 ;;
+    --mode) modeflag=$2; shift 2 ;;
     *) shift ;;
   esac
 done
@@ -1836,6 +1839,10 @@ case "$cmd" in
     ;;
   c8)
     line="v=1 op=c8 role=${role} verdict=unknown reason=${c8_reason} n=${c8_n} ops=0 created=0 elevated=0"
+    ;;
+  c11)
+    line="v=1 op=c11 role=${role} mode=${modeflag} n=8 torn=0 rtt_us=n=8,min=10,p50=20,max=30 verdict=ok reason=-"
+    printf '%s\n' "c11 role=${role} mode=${modeflag}" >>"${S11_STUB_ROOT:?}/probe.argv"
     ;;
 esac
 if [[ "$mode" == nonewline ]]; then
@@ -1925,6 +1932,80 @@ test_dispatcher_c6_c7_literals() {
     [[ "$?" == 6 ]] || die "accept ec for [$cmd]"
     grep -F -q fail-run "$CASE/disp.out" || die "accept text for [$cmd]"
   done
+}
+
+test_dispatcher_c11_literals() {
+  setup
+  extract_dispatcher
+  expect_reject 'run C11'
+  expect_reject 'run C11 fd extra'
+  expect_reject 'run C11 FD'
+  expect_reject 'run C11 fd; id'
+  expect_reject 'run C11 fd '
+  expect_reject 'run C11  fd'
+  expect_reject 'run c11 fd'
+  expect_reject 'run C11 fd reopen'
+  expect_reject 'run C11 reopen extra'
+  local cmd
+  for cmd in 'run C11 fd' 'run C11 reopen'; do
+    SSH_ORIGINAL_COMMAND="$cmd" bash "$CASE/dispatcher.sh" >"$CASE/disp.out"
+    [[ "$?" == 6 ]] || die "accept ec for [$cmd]"
+    grep -F -q fail-run "$CASE/disp.out" || die "accept text for [$cmd]"
+  done
+  grep -F -q 'c11 --dir "$MBX" --role guest --mode fd --count 8 --timeout 50' "$CASE/dispatcher.sh" || die "guest fd argv"
+  grep -F -q 'c11 --dir "$MBX" --role guest --mode reopen --count 8 --timeout 50' "$CASE/dispatcher.sh" || die "guest reopen argv"
+}
+
+test_stage_m_c11() {
+  setup
+  write_pinned
+  write_fake_probe
+  run_probe 25 --stage M --case C11 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 0
+  common_end
+  local n
+  n=$(grep -E -c '^run s11-0-probe-M-[0-9]+-[0-9a-f]+ --no-graphics --net-softnet --dir s11mbx:.*/mailbox$' "$ROOT/tart.log" || true)
+  [[ "$n" == 2 ]] || die "C11 argv count $n"
+  n=$(grep -F -c 'run C11 fd' "$ROOT/ssh.log" || true)
+  [[ "$n" == 1 ]] || die "remote fd $n"
+  n=$(grep -F -c 'run C11 reopen' "$ROOT/ssh.log" || true)
+  [[ "$n" == 1 ]] || die "remote reopen $n"
+  grep -F -q 'c11 role=host mode=fd' "$ROOT/probe.argv" || die "host fd argv"
+  grep -F -q 'c11 role=host mode=reopen' "$ROOT/probe.argv" || die "host reopen argv"
+  grep -F -q '"evidence":"DEFAULT-network/mechanics-only"' "$CASE/out/report.json" || die "evidence"
+  grep -F -q '"export":"host-private-directory (not the capped HFSX volume)"' "$CASE/out/report.json" || die "export"
+  "$PYTHON" - "$CASE/out/report.json" "$CASE/out" <<'PY' || die "C11 rows"
+import json, os, sys
+report, root = sys.argv[1:]
+r = json.load(open(report))
+stage = [s for s in r["stages"] if s["stage"] == "M"][0]
+assert stage["verdict"] == "ok", stage["verdict"]
+assert stage["evidence"] == "DEFAULT-network/mechanics-only"
+assert stage["export"] == "host-private-directory (not the capped HFSX volume)"
+cases = stage["cases"]
+assert [c["boundary"] for c in cases] == ["fd", "reopen"], [c["boundary"] for c in cases]
+for c in cases:
+    assert c["verdict"] == "ok", c
+    assert c["reason"] == "-", c
+    assert c["export_state"] == "retained", c
+    rec = c["record"]
+    assert "op=c11" in rec and "role=host" in rec, rec
+    assert "mode=%s" % c["boundary"] in rec, rec
+    assert "n=8" in rec and "torn=" in rec, rec
+    assert "rtt_us=n=8,min=" in rec and "verdict=ok" in rec and "reason=-" in rec, rec
+    assert any(x.startswith("s11mbx:") for x in c["argv"]), c["argv"]
+found = []
+for dirpath, _dirs, _names in os.walk(root):
+    if os.path.basename(dirpath) == "mailbox":
+        found.append(dirpath)
+assert len(found) == 2, found
+for mbx in found:
+    for name in ("ip-hg", "ip-gh"):
+        path = os.path.join(mbx, name)
+        data = open(path, "rb").read()
+        assert data == b"\0" * 64, (path, len(data))
+PY
+  cmp -s "$ROOT/inventory" "$ROOT/inventory.orig" || die "inventory"
 }
 
 test_stage_m_c1() {
@@ -2281,6 +2362,10 @@ test_stage_m_usage() {
   run_probe 6 --stage A --case C1 "${ARGS[@]}"
   need_ec 2
   need_reason usage
+  rm -rf "$CASE/out"
+  run_probe 6 --stage V --case C11 "${ARGS[@]}"
+  need_ec 2
+  need_reason usage
 }
 
 link_sys
@@ -2328,9 +2413,11 @@ run_case output-exists test_output_exists
 run_case route-fail test_route_fail
 run_case dispatcher test_dispatcher_literal
 run_case dispatcher-c6 test_dispatcher_c6_c7_literals
+run_case dispatcher-c11 test_dispatcher_c11_literals
 run_case stage-m-c1 test_stage_m_c1
 run_case c1-old-name test_c1_old_name_quarantine
 run_case stage-m-c2 test_stage_m_c2
+run_case stage-m-c11 test_stage_m_c11
 run_case stage-m-quarantine test_stage_m_quarantine
 run_case stage-m-not-sole test_stage_m_not_sole
 run_case stage-m-report test_stage_m_report_write

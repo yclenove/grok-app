@@ -4,7 +4,7 @@ use std::ffi::CString;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::raw::c_char;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::time::{Duration, Instant};
 #[cfg(test)]
@@ -33,6 +33,7 @@ const DIRECTORY: i32 = pick(0x100000, 0x4000, 0x10000);
 const CLOEXEC: i32 = pick(0x1000000, 0x80000, 0x80000);
 const NONBLOCK: i32 = pick(4, 0x800, 0x800);
 const WRONLY: i32 = 1;
+const RDWR: i32 = 2;
 const CREAT: i32 = pick(0x200, 0x40, 0x40);
 const EXCL: i32 = pick(0x800, 0x80, 0x80);
 const ELOOP: i32 = pick(62, 40, 40);
@@ -537,6 +538,69 @@ impl Dir {
     pub fn unlink_file(&self, name: &str) -> io::Result<()> {
         let c = c_name(name).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name"))?;
         unlink_name(self.file.as_raw_fd(), &c)
+    }
+    /// Existing regular file, no `O_CREAT`. C11 holds this fd and `pwrite`s in place.
+    pub(crate) fn open_held(&self, name: &str, write: bool) -> Result<Held, RdErr> {
+        self.confirm_bind()?;
+        let c = c_name(name)?;
+        let flags = (if write { RDWR } else { 0 }) | NOFOLLOW | NONBLOCK | CLOEXEC;
+        let fd = open_at(self.file.as_raw_fd(), c.as_ptr(), flags, 0);
+        if fd < 0 {
+            return Err(map_open(io::Error::last_os_error()));
+        }
+        // SAFETY: `fd` is a fresh openat result, owned by this `File` from here on.
+        let file = unsafe { File::from_raw_fd(fd) };
+        let snap = snap_of(&file).map_err(|_| RdErr::Io)?;
+        if !snap.is_reg {
+            return Err(RdErr::NotFile);
+        }
+        if snap.nlink == 0 {
+            return Err(RdErr::Replaced);
+        }
+        if snap.nlink != 1 {
+            return Err(RdErr::HardLink);
+        }
+        if snap.dev != self.dev {
+            return Err(RdErr::Replaced);
+        }
+        Ok(Held { file })
+    }
+    /// One open, one `pread` of 64 bytes at offset 0, then close. C11's reopen poll.
+    pub(crate) fn read_inplace(&self, name: &str) -> Result<[u8; 64], RdErr> {
+        self.open_held(name, false)?.pread64()
+    }
+}
+/// Fd held across C11's in-place reads or writes. Drop closes it.
+pub(crate) struct Held {
+    file: File,
+}
+impl Held {
+    /// One `pread(fd, 64, 0)`. A short read is returned zero-padded; the caller treats it as torn.
+    pub(crate) fn pread64(&self) -> Result<[u8; 64], RdErr> {
+        loop {
+            let mut buf = [0u8; 64];
+            match self.file.read_at(&mut buf, 0) {
+                Ok(_) => return Ok(buf),
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err(RdErr::Io),
+            }
+        }
+    }
+    /// `pwrite` of exactly 64 bytes at offset 0, then `fsync` on this fd.
+    pub(crate) fn pwrite64(&self, bytes: &[u8; 64]) -> Result<(), RdErr> {
+        let mut off = 0usize;
+        while off < 64 {
+            match self.file.write_at(&bytes[off..], off as u64) {
+                Ok(0) => return Err(RdErr::Io),
+                Ok(n) => off += n,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err(RdErr::Io),
+            }
+        }
+        if unsafe { fsync(self.file.as_raw_fd()) } != 0 {
+            return Err(RdErr::Io);
+        }
+        Ok(())
     }
 }
 #[cfg(test)]
