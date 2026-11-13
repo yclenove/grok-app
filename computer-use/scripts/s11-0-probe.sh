@@ -999,14 +999,6 @@ seed_c1_slots() {
 # Both 64-byte placeholders are created in the private export itself.
 # O_EXCL|O_NOFOLLOW, no temp file, no cross-filesystem move or copy.
 # 2 means the bounded helper was not proved finished (timeout, overflow, abort, reap-unknown).
-c11_seed_visible() {
-  local mbx=$1 name sz
-  for name in ip-hg ip-gh; do
-    [[ -f "$mbx/$name" && ! -L "$mbx/$name" ]] || return 1
-    sz=$(wc -c <"$mbx/$name" | tr -d ' ')
-    [[ "$sz" == 64 ]] || return 1
-  done
-}
 seed_c11_files() {
   local mbx=$1
   [[ -d "$mbx" && ! -L "$mbx" ]] || return 1
@@ -1037,8 +1029,9 @@ for name in ("ip-hg", "ip-gh"):
   if [[ "$RB_TIMED_OUT" == 1 || "$RB_OVERFLOW" == 1 || "$RB_ABORTED" == 1 || "$REAP_UNKNOWN" == 1 ]]; then
     return 2
   fi
-  [[ "$RB_STATUS" -eq 0 ]] || return 1
-  c11_seed_visible "$mbx"
+  # Type, size and link count are checked inside the bounded helper; no
+  # further export IO here, so a stalled volume cannot block the shell.
+  [[ "$RB_STATUS" -eq 0 ]]
 }
 prepare_mailbox() {
   local root=$1 st=0
@@ -1217,7 +1210,7 @@ c11_polls_ok() {
 }
 # 0 and C11G_* set on a schema match. 2 is missing/empty. 1 is malformed.
 c11_take_guest() {
-  local line bytes n marker tok key val seen=" " nseen=0
+  local line first bytes n marker tok key val seen=" " nseen=0
   local v= op= role= mode= gn= torn= polls= gap= verdict= reason=
   C11G_OK=0
   C11G_MODE=; C11G_N=; C11G_TORN=; C11G_POLLS=; C11G_GAP=; C11G_VERDICT=; C11G_REASON=
@@ -1227,11 +1220,17 @@ c11_take_guest() {
   [[ "$bytes" -ge 1 ]] || return 2
   [[ "$bytes" -le 4096 ]] || return 1
   n=$(wc -l <"$WORKDIR/ssh.bg.out" | tr -d ' ')
-  [[ "$n" == 1 ]] || return 1
+  [[ "$n" == 1 || "$n" == 2 ]] || return 1
   marker=$(tail -c 1 "$WORKDIR/ssh.bg.out"; printf x)
   [[ "$marker" == $'\nx' ]] || return 1
   if grep -q $'\r' "$WORKDIR/ssh.bg.out"; then return 1; fi
-  IFS= read -r line <"$WORKDIR/ssh.bg.out" || return 1
+  if [[ "$n" == 2 ]]; then
+    # Exact readiness line first, then the one summary.
+    { IFS= read -r first && IFS= read -r line; } <"$WORKDIR/ssh.bg.out" || return 1
+    [[ "$first" == "v=1 op=c11 role=guest ready=1 mode=$M_BOUNDARY" ]] || return 1
+  else
+    IFS= read -r line <"$WORKDIR/ssh.bg.out" || return 1
+  fi
   for tok in $line; do
     case "$tok" in
       *=*) key=${tok%%=*}; val=${tok#*=} ;;
@@ -1495,10 +1494,26 @@ m_run_c1() {
   settle_host c1 || true
 }
 m_run_c11() {
-  local gpid left
+  local gpid left want ready=0
   clear_snaps; arm_m_load
   ssh_bg "$ONCE_KEY" "run C11 $M_BOUNDARY" || { M_VERDICT=unknown; M_REASON=not-sole; SHAPE_OK=0; return 1; }
   gpid=$SSH_BG_PID
+  # The guest prints this only after its seq=0 write and fsync return, so the
+  # host starts round 1 with the guest already past its readiness IO.
+  want="v=1 op=c11 role=guest ready=1 mode=$M_BOUNDARY"
+  while [[ "$SECONDS" -lt "$M_LOAD_END" ]]; do
+    if grep -F -x -q -- "$want" "$WORKDIR/ssh.bg.out" 2>/dev/null; then ready=1; break; fi
+    note_ssh_bg "$gpid" && break
+    job_running "$gpid" || break
+    sleep 0.05
+  done
+  # ssh may have written the line and exited between the check and the exit test.
+  if [[ "$ready" != 1 ]] && grep -F -x -q -- "$want" "$WORKDIR/ssh.bg.out" 2>/dev/null; then ready=1; fi
+  if [[ "$ready" != 1 ]]; then
+    wait_guest "$gpid"
+    M_VERDICT=unknown; M_REASON=peer-not-ready; ANY_COLLECTION_FAILED=1
+    return 1
+  fi
   left=$(m_left)
   run_bounded "$left" "$WORKDIR/pc.out" "$WORKDIR/pc.err" - -- "$M_PROBE" c11 --dir "$EXPORT_DIR/mailbox" --role host --mode "$M_BOUNDARY" --count 8 --timeout "$left" || true
   snap1

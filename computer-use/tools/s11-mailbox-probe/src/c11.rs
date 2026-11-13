@@ -454,6 +454,14 @@ fn role_guest(root: &Dir, opt: &Opt) -> i32 {
         let (verdict, reason) = class_open(err);
         return report.emit(root, opt, verdict, reason);
     }
+    // pwrite64 has returned, fsync included. Only now tell the host over SSH,
+    // so a slow readiness fsync stays outside every round the host times.
+    {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        let _ = writeln!(out, "v=1 op=c11 role=guest ready=1 mode={}", opt.mode);
+        let _ = out.flush();
+    }
     if io::past(opt.end) {
         return report.fail(root, opt, WaitErr::Deadline { torn: 0 });
     }

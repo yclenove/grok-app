@@ -195,7 +195,7 @@ install_templates() {
     '  if [[ -f "$ROOT/ssh_fail_n" ]]; then n=0; [[ -f "$ROOT/ssh.count" ]] && n=$(cat "$ROOT/ssh.count"); n=$((n+1)); echo "$n" >"$ROOT/ssh.count"; fn=$(cat "$ROOT/ssh_fail_n"); [[ "$n" -le "$fn" ]] && exit 255; fi' \
     '  exit 0; fi' \
     'case " $* " in *s11m.XXXXXX*) cat >"$ROOT/init.body"; printf "init-ok\n"; exit 0 ;; esac' \
-    'c11_guest() { mode=fd; case "$remote" in "run C11 reopen") mode=reopen ;; esac; if [[ -f "$ROOT/c11_guest_missing" ]]; then exit 0; fi; if [[ -f "$ROOT/c11_guest_bad" ]]; then printf "v=1 op=c11 role=guest mode=%s n=8 torn=0 polls=1:1 gap_us=n=0 verdict=ok reason=-\n" "$mode"; exit 0; fi; if [[ -f "$ROOT/c11_guest_rollback" ]]; then printf "v=1 op=c11 role=guest mode=%s n=3 torn=1 polls=1:1,2:1,3:2 gap_us=n=2,min=10,p50=12,max=14 verdict=failed reason=rollback\n" "$mode"; exit 0; fi; if [[ -f "$ROOT/c11_guest_skip" ]]; then printf "v=1 op=c11 role=guest mode=%s n=0 torn=0 polls=- gap_us=n=0 verdict=failed reason=skip\n" "$mode"; exit 0; fi; printf "v=1 op=c11 role=guest mode=%s n=8 torn=0 polls=1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1 gap_us=n=7,min=11,p50=21,max=31 verdict=ok reason=-\n" "$mode"; exit 0; }' \
+    'c11_guest() { mode=fd; case "$remote" in "run C11 reopen") mode=reopen ;; esac; if [[ -f "$ROOT/c11_guest_missing" ]]; then exit 0; fi; if [[ -f "$ROOT/c11_ready_wrong" ]]; then printf "v=1 op=c11 role=guest ready=1 mode=other\n"; exit 0; fi; printf "v=1 op=c11 role=guest ready=1 mode=%s\n" "$mode"; if [[ -f "$ROOT/c11_guest_bad" ]]; then printf "v=1 op=c11 role=guest mode=%s n=8 torn=0 polls=1:1 gap_us=n=0 verdict=ok reason=-\n" "$mode"; exit 0; fi; if [[ -f "$ROOT/c11_guest_rollback" ]]; then printf "v=1 op=c11 role=guest mode=%s n=3 torn=1 polls=1:1,2:1,3:2 gap_us=n=2,min=10,p50=12,max=14 verdict=failed reason=rollback\n" "$mode"; exit 0; fi; if [[ -f "$ROOT/c11_guest_skip" ]]; then printf "v=1 op=c11 role=guest mode=%s n=0 torn=0 polls=- gap_us=n=0 verdict=failed reason=skip\n" "$mode"; exit 0; fi; printf "v=1 op=c11 role=guest mode=%s n=8 torn=0 polls=1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1 gap_us=n=7,min=11,p50=21,max=31 verdict=ok reason=-\n" "$mode"; exit 0; }' \
     'remote=""; for remote in "$@"; do :; done' \
     'case "$remote" in upload|verify\ *|run\ C2|run\ C8) cat >/dev/null; exit 0 ;; "run C11 fd"|"run C11 reopen") c11_guest ;; "run C1"|"run C7") "$ROOT/bin/c7guest" "$remote"; exit $? ;; "run C9") cat >/dev/null; mode=""; mbx=$(awk '"'"'match($0,/--dir s11mbx:/){p=substr($0,RSTART+13)} END{print p}'"'"' "$ROOT/tart.log"); [[ -n "$mbx" && -f "$mbx/fill-mode" ]] && mode=$(tr -d "\r\n" <"$mbx/fill-mode"); if [[ -f "$ROOT/c9_hold_after" && "$mode" == small ]]; then "$ROOT/bin/c9write" & cpid=$!; trap "kill -KILL $cpid 2>/dev/null; exit 0" TERM INT HUP; wait "$cpid"; exit $?; fi; "$ROOT/bin/c9write"; exit $? ;; "run C6 file"|"run C6 dir") kind=file; [[ "$remote" == "run C6 dir" ]] && kind=dir; [[ -f "$ROOT/c6_nohold" ]] && exit 0; printf "v=1 op=c6 role=guest kind=%s held=1\n" "$kind"; pp=$PPID; trap "exit 0" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done ;; esac' \
     '[[ -f "$ROOT/guest_fail" ]] && exit 9' \
@@ -2026,7 +2026,24 @@ test_c11_guest_missing() {
   run_probe 25 --stage M --case C11 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
   need_ec 4
   common_end
-  m_stage 'stage["verdict"] == "unknown" and all(c["verdict"] == "unknown" and c["reason"] == "no-peer-summary" and "rtt_us=n=8,min=10" in c["record"] and "g_verdict=" not in c["record"] for c in cases)'
+  # No readiness line: the host side never starts a round.
+  m_stage 'stage["verdict"] == "unknown" and all(c["verdict"] == "unknown" and c["reason"] == "peer-not-ready" for c in cases)'
+  if grep -F -q 'c11 role=host' "$ROOT/probe.argv" 2>/dev/null; then die "host ran without guest readiness"; fi
+}
+
+test_c11_ready_wrong() {
+  local f
+  for f in c11_ready_wrong; do
+    setup
+    write_pinned
+    write_fake_probe
+    touch "$ROOT/$f"
+    run_probe 25 --stage M --case C11 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+    need_ec 4
+    common_end
+    m_stage 'stage["verdict"] == "unknown" and all(c["verdict"] == "unknown" and c["reason"] == "peer-not-ready" for c in cases)'
+    if grep -F -q 'c11 role=host' "$ROOT/probe.argv" 2>/dev/null; then die "host ran on a wrong readiness line"; fi
+  done
 }
 
 test_c11_guest_bad() {
@@ -2499,6 +2516,7 @@ run_case c1-old-name test_c1_old_name_quarantine
 run_case stage-m-c2 test_stage_m_c2
 run_case stage-m-c11 test_stage_m_c11
 run_case c11-guest-missing test_c11_guest_missing
+run_case c11-ready-wrong test_c11_ready_wrong
 run_case c11-guest-bad test_c11_guest_bad
 run_case c11-guest-rollback test_c11_guest_rollback
 run_case c11-guest-skip test_c11_guest_skip
