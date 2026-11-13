@@ -2306,11 +2306,10 @@ vol_fault() {
   exit 137
 }
 detach_class() {
-  local line
-  line=$(awk 'NR==1 { sub(/\r$/, ""); print; exit }' "$WORKDIR/v.err" 2>/dev/null || true)
-  case "$line" in
-    "") printf none ;;
-    *"Resource busy"*|*"resource busy"*|*"Device busy"*|*"device busy"*) printf busy ;;
+  # By exit status: hdiutil's message is localized (zh_CN Mini: "资源忙").
+  case "$1" in
+    0) printf none ;;
+    16) printf busy ;;
     *) printf other ;;
   esac
 }
@@ -2356,16 +2355,16 @@ c6_detach_held() {
   st=$?
   C6_NRC=$RB_STATUS
   C6_NSEC=$((SECONDS - t0))
-  C6_NCLASS=$(detach_class)
+  C6_NCLASS=$(detach_class "$RB_STATUS")
   if [[ "$st" -eq 2 ]]; then VOL_MAYBE=1; vol_quarantine; return 1; fi
   if [[ "$st" -ne 0 ]]; then
     if vm_proven_stopped && info_holds; then
       t0=$SECONDS
       vol_run 10 "$HDIUTIL" detach -force "$VOL_M"
+      st=$?
       C6_FORCE=1
       C6_FRC=$RB_STATUS
       C6_FSEC=$((SECONDS - t0))
-      st=$?
       if [[ "$st" -eq 2 ]]; then VOL_MAYBE=1; vol_quarantine; return 1; fi
       if [[ "$st" -ne 0 ]]; then vol_quarantine; return 1; fi
     else
@@ -2507,7 +2506,7 @@ m_run_c7() {
   st=$?
   C7_DRC=$RB_STATUS
   C7_DSEC=$((SECONDS - t0))
-  C7_DCLASS=$(detach_class)
+  C7_DCLASS=$(detach_class "$RB_STATUS")
   if [[ "$st" -eq 2 ]]; then VOL_MAYBE=1; vol_quarantine; return 1; fi
   if [[ "$st" -eq 0 ]]; then
     if ! info_absent; then VOL_MAYBE=1; vol_quarantine; return 1; fi
@@ -2577,18 +2576,20 @@ c10_dest_count() {
   local line n=0 saw=0 bad=0 nodest=0
   vol_bin_ok "$TMUTIL" || { printf unknown; return 0; }
   vol_run 5 "$TMUTIL" destinationinfo || { printf unknown; return 0; }
+  # The no-destination line may arrive on either stream.
+  cat "$WORKDIR/v.out" "$WORKDIR/v.err" >"$WORKDIR/tm.all" 2>/dev/null || { printf unknown; return 0; }
   while IFS= read -r line || [[ -n "$line" ]]; do
     line=${line%$'\r'}
     line=${line#"${line%%[![:space:]]*}"}
     [[ -z "$line" ]] && continue
     case "$line" in
       ====*) continue ;;
-      "No destinations configured"*) nodest=1 ;;
+      "No destinations configured"*|"tmutil: No destinations configured"*) nodest=1 ;;
       Name*) n=$((n + 1)); saw=1 ;;
       Kind*|URL*|ID*|Destination*|Mount\ Point*) saw=1 ;;
       *) bad=1 ;;
     esac
-  done <"$WORKDIR/v.out"
+  done <"$WORKDIR/tm.all"
   if [[ "$bad" == 1 || ( "$nodest" == 1 && "$saw" == 1 ) ]]; then printf unknown; return 0; fi
   printf '%s' "$n"
 }

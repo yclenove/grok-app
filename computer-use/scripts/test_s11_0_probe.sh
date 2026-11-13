@@ -371,11 +371,16 @@ case "$cmd" in
       arg=$1
       if [[ -f "$ROOT/fail_detach_once" && ! -f "$ROOT/fail_detach_once.hit" ]]; then
         : >"$ROOT/fail_detach_once.hit"
-        printf '%s\n' 'Resource busy' >&2
-        exit 1
+        printf 'hdiutil: couldn'"'"'t unmount "%s" - 资源忙\n' "$(get disk | sed 's#^/dev/##')" >&2
+        exit 16
       fi
       if [[ -f "$ROOT/fail_detach" ]]; then
-        [[ -f "$ROOT/busy_err" ]] && printf '%s\n' 'Resource busy' >&2
+        # Real Mini (zh_CN): rc 16 and a localized message; the probe must use the rc.
+        if [[ -f "$ROOT/busy_err" ]]; then
+          printf 'hdiutil: couldn'"'"'t unmount "%s" - 资源忙\n' "$(get disk | sed 's#^/dev/##')" >&2
+          exit 16
+        fi
+        printf '%s\n' 'Resource busy' >&2
         exit 1
       fi
       [[ -f "$ROOT/slow_detach" ]] && sleep 6
@@ -544,6 +549,10 @@ if [[ "$1" == startbackup ]]; then
   exit 9
 fi
 if [[ "$1" == destinationinfo && $# -eq 1 ]]; then
+  if [[ -f "$ROOT/tmutil_nodest" ]]; then
+    printf '%s\n' 'tmutil: No destinations configured.'
+    exit 0
+  fi
   if [[ -f "$ROOT/tmutil_dest_fail" ]]; then
     printf '%s\n' 'Operation not permitted' >&2
     exit 1
@@ -3013,6 +3022,24 @@ assert "S11SecretDestName" not in c["record"]
 PY
 }
 
+# Real Mini output when no backup destination exists.
+test_stage_v_c10_nodest() {
+  setup
+  enable_volume
+  export S11_C10_WAIT=0
+  touch "$ROOT/tmutil_nodest"
+  run_probe 12 --stage V --case C10 "${ARGS[@]}"
+  need_ec 4
+  common_end
+  assert_image_gone
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c10 nodest"
+import json, sys
+c = json.load(open(sys.argv[1]))["stages"][0]["cases"][0]
+fields = dict(tok.split("=", 1) for tok in c["record"].split())
+assert fields["dest_count"] == "0", fields["dest_count"]
+PY
+}
+
 test_stage_v_c6_force_and_reap() {
   setup
   enable_volume
@@ -3049,10 +3076,29 @@ for c in cases:
     fields = dict(tok.split("=", 1) for tok in c["record"].split())
     assert fields["guest_held"] == "1", c["record"]
     assert fields["normal_class"] == "busy", c["record"]
-    assert fields["normal_rc"] != "0", c["record"]
+    assert fields["normal_rc"] == "16", c["record"]
     assert fields["force"] == "1" and fields["force_rc"] == "0", c["record"]
     assert fields["holder_reaped"] == "1", c["record"]
 PY
+}
+
+# A failed force must quarantine and keep the image (st must be the force's status).
+test_stage_v_c6_force_fail_quarantine() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  export S11_HOLD_SEC=5
+  touch "$ROOT/fail_detach" "$ROOT/busy_err" "$ROOT/fail_force"
+  run_probe 50 --stage V --case C6 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  local img
+  img=$(image_path)
+  [[ -n "$img" && -f "$img" && ! -L "$img" ]] || die "image not kept"
+  [[ "$(force_lines)" == 1 ]] || die "force count"
+  grep -F -q '"export_state":"quarantine"' "$CASE/out/report.json" || die "c6 force fail state"
 }
 
 test_stage_v_c6_no_force_while_vm_up() {
@@ -3267,6 +3313,8 @@ test_stage_v_new_usage() {
 }
 
 run_case stage-v-c10 test_stage_v_c10_observed
+run_case stage-v-c10-nodest test_stage_v_c10_nodest
+run_case stage-v-c6-force-fail test_stage_v_c6_force_fail_quarantine
 run_case stage-v-c6-force test_stage_v_c6_force_and_reap
 run_case stage-v-c6-noforce test_stage_v_c6_no_force_while_vm_up
 run_case stage-v-c7-ok test_stage_v_c7_m0_empty_ok
