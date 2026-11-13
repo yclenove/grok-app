@@ -1,6 +1,6 @@
 # S11-0c 邮箱测量核心
 
-宿主编排在 `scripts/s11-0-probe.sh`（阶段 M 是普通目录，阶段 V 是限容卷）。这个二进制只测量一个目录。它不 clone，不做 SSH，也不调用 tart、hdiutil。做 C1、C2、C8，以及 C9 的 `fill`。只用标准库。测试另计。
+宿主编排在 `scripts/s11-0-probe.sh`（阶段 M 是普通目录，阶段 V 是限容卷）。这个二进制只测量一个目录。它不 clone，不做 SSH，也不调用 tart、hdiutil。做 C1、C2、C8，C9 的 `fill`，以及 C6 的 `hold`、C7 的 `c7ops`。只用标准库。测试另计。
 
 阶段 M 的导出目录是宿主上的普通私有目录。阶段 V 把同一套槽位放在限容 HFSX 卷的 `mailbox` 上。卷的创建和删除只在 bash 里做。
 
@@ -14,7 +14,11 @@ s11-mailbox-probe reader --dir <绝对目录> --role host|guest --count N --time
 s11-mailbox-probe c2 file-sync|dir-sync|rename --dir <绝对目录> --role host|guest --count N --timeout SEC
 s11-mailbox-probe c8 --dir <绝对目录> --role host|guest --count N --timeout SEC
 s11-mailbox-probe fill --dir <绝对目录> --role guest --mode data|small --timeout SEC
+s11-mailbox-probe hold --dir <绝对目录> --role guest --kind file|dir --secs SEC
+s11-mailbox-probe c7ops --dir <绝对目录> --role guest --ms MILLISEC
 ```
+
+`hold` 和 `c7ops` 只在客机跑，各打一行到标准输出，不写结果文件。`hold` 的 `file` 握住预建的 `c6-held`，`dir` 握住邮箱目录；`--secs` 是 0 到 300，打出 `held=1` 之后才睡。`c7ops` 对预建槽位做 4 次读和 4 次写（staging 后 rename），每次单独线程，主线程按 `--ms`（1 到 5000）超时；挂起后不再做后面的操作。宿主编排不拿这个二进制做卸载。
 
 `fill` 只在客机跑。`data` 最多 80 个 1MiB 文件，`small` 最多 8192 个 1KiB 文件，遇到 ENOSPC（或测试用的更小配额）就停，并在 `result-guest` 报告已写字节和文件数。邮箱里要先有 `payload/` 和 `progress`。
 

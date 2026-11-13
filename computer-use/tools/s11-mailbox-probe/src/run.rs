@@ -47,6 +47,7 @@ struct Opt {
     role: &'static str,
     count: u8,
     end: Instant,
+    wait_ms: u64,
 }
 /// open, write, fsync, rename, dir_sync, read, slice. Unknown and non-numeric fields stay unset.
 struct Clock([Option<u64>; 7]);
@@ -88,6 +89,8 @@ pub fn execute(args: &[String]) -> Result<i32, &'static str> {
         "c8" if opt.role == "guest" => c8_guest(&opt),
         "c8" => c8_host(&opt),
         "fill" => c9_fill(&opt),
+        "hold" => hold_cmd(&opt),
+        "c7ops" => c7ops_cmd(&opt),
         _ => return Err("usage"),
     };
     Ok(code)
@@ -101,6 +104,8 @@ fn parse(args: &[String]) -> Result<Opt, &'static str> {
         "reader" => ("reader", "-", &args[1..]),
         "c8" => ("c8", "-", &args[1..]),
         "fill" => ("fill", "-", &args[1..]),
+        "hold" => ("hold", "-", &args[1..]),
+        "c7ops" => ("c7ops", "-", &args[1..]),
         "c2" => {
             let boundary = match args.get(1).map(String::as_str).unwrap_or("") {
                 "file-sync" => "file-sync",
@@ -116,7 +121,10 @@ fn parse(args: &[String]) -> Result<Opt, &'static str> {
     let mut role = None;
     let mut count = None;
     let mut timeout = None;
-    let mut mode = None;
+    let mut mode_flag = None;
+    let mut kind = None;
+    let mut secs = None;
+    let mut per_ms = None;
     let mut i = 0;
     while i < rest.len() {
         let val = rest.get(i + 1).ok_or("usage")?;
@@ -131,29 +139,72 @@ fn parse(args: &[String]) -> Result<Opt, &'static str> {
             }
             "--count" => count = Some(small(val, 1, 8)?),
             "--mode" => {
-                mode = Some(match val.as_str() {
+                mode_flag = Some(match val.as_str() {
                     "data" => "data",
                     "small" => "small",
                     _ => return Err("usage"),
                 });
             }
             "--timeout" => timeout = Some(small(val, 0, 120)?),
+            "--kind" => {
+                kind = Some(match val.as_str() {
+                    "file" => "file",
+                    "dir" => "dir",
+                    _ => return Err("usage"),
+                });
+            }
+            "--secs" => secs = Some(wide(val, 0, 300)?),
+            "--ms" => per_ms = Some(wide(val, 1, 5000)?),
             _ => return Err("usage"),
         }
         i += 2;
     }
-    let timeout = u64::from(timeout.ok_or("usage")?);
+    let dir = dir.ok_or("usage")?;
     let role = role.ok_or("usage")?;
-    let mode = if cmd == "fill" {
-        if role != "guest" {
-            return Err("usage");
+    let (boundary, mode, count, wait_ms, end_ms) = match cmd {
+        "hold" => {
+            if role != "guest" || count.is_some() || timeout.is_some() || mode_flag.is_some() || per_ms.is_some() {
+                return Err("usage");
+            }
+            let kind = kind.ok_or("usage")?;
+            let secs = secs.ok_or("usage")?;
+            (kind, "-", 1, secs.saturating_mul(1000), secs.saturating_add(5).saturating_mul(1000))
         }
-        mode.ok_or("usage")?
-    } else {
-        "-"
+        "c7ops" => {
+            if role != "guest" || count.is_some() || timeout.is_some() || mode_flag.is_some() || kind.is_some() || secs.is_some() {
+                return Err("usage");
+            }
+            let per = per_ms.ok_or("usage")?;
+            ("-", "-", 1, per, per.saturating_mul(8).saturating_add(5_000))
+        }
+        "fill" => {
+            if kind.is_some() || secs.is_some() || per_ms.is_some() || role != "guest" {
+                return Err("usage");
+            }
+            let mode = mode_flag.ok_or("usage")?;
+            let timeout = u64::from(timeout.ok_or("usage")?);
+            ("-", mode, 1, 0, timeout.saturating_mul(1000))
+        }
+        _ => {
+            if kind.is_some() || secs.is_some() || per_ms.is_some() {
+                return Err("usage");
+            }
+            let timeout = u64::from(timeout.ok_or("usage")?);
+            (boundary, "-", count.ok_or("usage")?, 0, timeout.saturating_mul(1000))
+        }
     };
-    let count = if cmd == "fill" { 1 } else { count.ok_or("usage")? };
-    Ok(Opt { cmd, boundary, mode, dir: dir.ok_or("usage")?, role, count, end: io::now() + Duration::from_secs(timeout) })
+    Ok(Opt { cmd, boundary, mode, dir, role, count, wait_ms, end: io::now() + Duration::from_millis(end_ms) })
+}
+fn wide(val: &str, lo: u64, hi: u64) -> Result<u64, &'static str> {
+    if val.is_empty() || val.len() > 5 || !val.bytes().all(|b| b.is_ascii_digit()) || (val.len() > 1 && val.starts_with('0')) {
+        return Err("usage");
+    }
+    let n: u64 = val.parse().map_err(|_| "usage")?;
+    if n < lo || n > hi {
+        Err("usage")
+    } else {
+        Ok(n)
+    }
 }
 fn small(val: &str, lo: u8, hi: u8) -> Result<u8, &'static str> {
     if val.is_empty() || val.len() > 3 || !val.bytes().all(|b| b.is_ascii_digit()) {
@@ -270,12 +321,135 @@ fn c8_line(role: &str, verdict: &str, reason: &str, n: &str) -> String {
     format!("v=1 op=c8 role={role} verdict={verdict} reason={reason} n={n} ops=0 created=0 elevated=0")
 }
 fn say(line: &str) {
+    #[cfg(test)]
+    SAID.with(|slot| {
+        slot.borrow_mut().push_str(line);
+        slot.borrow_mut().push('\n');
+    });
     println!("{line}");
     let _ = stdio::Write::flush(&mut stdio::stdout());
 }
 #[cfg(test)]
 thread_local! {
     static STORE_FAILS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static SAID: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+#[cfg(test)]
+fn take_said() -> String {
+    SAID.with(|slot| slot.replace(String::new()))
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum C7Class {
+    Enoent,
+    Eio,
+    Other,
+}
+fn class_io(err: &std::io::Error) -> C7Class {
+    if err.kind() == ErrorKind::NotFound || err.raw_os_error() == Some(2) {
+        C7Class::Enoent
+    } else if err.raw_os_error() == Some(5) {
+        C7Class::Eio
+    } else {
+        C7Class::Other
+    }
+}
+fn hold_file(dir: &str) -> Option<std::fs::File> {
+    let path = std::path::Path::new(dir).join("c6-held");
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    std::fs::File::open(&path).ok()
+}
+fn hold_pause(opt: &Opt, kind: &str) {
+    say(&format!("v=1 op=c6 role=guest kind={kind} held=1"));
+    let secs = opt.wait_ms / 1000;
+    if secs > 0 {
+        thread::sleep(Duration::from_secs(secs));
+    }
+}
+fn hold_cmd(opt: &Opt) -> i32 {
+    match opt.boundary {
+        "file" => {
+            let Some(file) = hold_file(&opt.dir) else {
+                return 1;
+            };
+            hold_pause(opt, "file");
+            drop(file);
+            0
+        }
+        "dir" => {
+            let Ok(opened) = Dir::open_path(&opt.dir) else {
+                return 1;
+            };
+            hold_pause(opt, "dir");
+            drop(opened);
+            0
+        }
+        _ => 1,
+    }
+}
+#[cfg(test)]
+fn c7_test_hang(dir: &str, index: u32) {
+    if index != 0 {
+        return;
+    }
+    let path = std::path::Path::new(dir).join("c7-hang");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(ms) = text.trim().parse::<u64>() else {
+        return;
+    };
+    thread::sleep(Duration::from_millis(ms));
+}
+fn c7_read(dir: &str, name: &str) -> Result<(), C7Class> {
+    let path = std::path::Path::new(dir).join(name);
+    std::fs::read(&path).map(|_| ()).map_err(|err| class_io(&err))
+}
+fn c7_write(dir: &str, name: &str) -> Result<(), C7Class> {
+    let path = std::path::Path::new(dir).join(name);
+    let tmp = std::path::Path::new(dir).join(format!("{name}.tmp"));
+    std::fs::write(&tmp, b"v=1 op=c7\n").map_err(|err| class_io(&err))?;
+    std::fs::rename(&tmp, &path).map_err(|err| class_io(&err))?;
+    Ok(())
+}
+fn c7_one(dir: &str, index: u32) -> Result<(), C7Class> {
+    #[cfg(test)]
+    c7_test_hang(dir, index);
+    if index < 4 {
+        c7_read(dir, &format!("c7-r{index}"))
+    } else {
+        c7_write(dir, &format!("c7-w{}", index - 4))
+    }
+}
+fn c7ops_cmd(opt: &Opt) -> i32 {
+    let dir = opt.dir.clone();
+    let ms = opt.wait_ms;
+    let mut ok = 0u32;
+    let mut enoent = 0u32;
+    let mut eio = 0u32;
+    let mut other = 0u32;
+    let mut hang = 0u32;
+    for index in 0..8u32 {
+        let work = dir.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(c7_one(&work, index));
+        });
+        match rx.recv_timeout(Duration::from_millis(ms)) {
+            Ok(Ok(())) => ok += 1,
+            Ok(Err(C7Class::Enoent)) => enoent += 1,
+            Ok(Err(C7Class::Eio)) => eio += 1,
+            Ok(Err(C7Class::Other)) => other += 1,
+            Err(_) => {
+                hang += 1;
+                break;
+            }
+        }
+    }
+    say(&format!("v=1 op=c7 role=guest ops=8 ok={ok} enoent={enoent} eio={eio} other={other} hang={hang}"));
+    0
 }
 #[cfg(test)]
 pub(crate) fn test_fail_stores(n: u32) {
@@ -2409,5 +2583,66 @@ mod tests {
         test_fail_stores(1);
         assert_ne!(run(&dir, &["fill", "--dir", "DIR", "--role", "guest", "--mode", "small", "--timeout", "30"]), 0);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn args_of(dir: &std::path::Path, args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| if *arg == "DIR" { dir.to_str().unwrap().to_string() } else { (*arg).to_string() }).collect()
+    }
+
+    #[test]
+    fn hold_kind_parses_and_prints_without_sleeping() {
+        let dir = scratch("hold");
+        fs::write(dir.join("c6-held"), b"slot").unwrap();
+        let started = Instant::now();
+        let _ = take_said();
+        assert_eq!(execute(&args_of(&dir, &["hold", "--dir", "DIR", "--role", "guest", "--kind", "file", "--secs", "0"])).unwrap(), 0);
+        let file_line = take_said();
+        assert!(file_line.contains("v=1 op=c6 role=guest kind=file held=1\n"), "{file_line}");
+        assert_eq!(execute(&args_of(&dir, &["hold", "--dir", "DIR", "--role", "guest", "--kind", "dir", "--secs", "0"])).unwrap(), 0);
+        let dir_line = take_said();
+        assert!(dir_line.contains("v=1 op=c6 role=guest kind=dir held=1\n"), "{dir_line}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(execute(&args_of(&dir, &["hold", "--dir", "DIR", "--role", "guest", "--kind", "fifo", "--secs", "0"])).unwrap_err(), "usage");
+        assert_eq!(execute(&args_of(&dir, &["hold", "--dir", "DIR", "--role", "host", "--kind", "file", "--secs", "0"])).unwrap_err(), "usage");
+        assert_eq!(execute(&args_of(&dir, &["hold", "--dir", "DIR", "--role", "guest", "--kind", "file", "--secs", "301"])).unwrap_err(), "usage");
+        assert_eq!(execute(&args_of(&dir, &["writer", "--dir", "DIR", "--role", "guest", "--count", "1", "--timeout", "1", "--secs", "0"])).unwrap_err(), "usage");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn c7ops_counts_enoent() {
+        let dir = scratch("c7ok");
+        for name in ["c7-r1", "c7-r2", "c7-r3", "c7-w0", "c7-w1", "c7-w2", "c7-w3"] {
+            fs::write(dir.join(name), b"slot").unwrap();
+        }
+        let _ = take_said();
+        assert_eq!(execute(&args_of(&dir, &["c7ops", "--dir", "DIR", "--role", "guest", "--ms", "200"])).unwrap(), 0);
+        let line = take_said();
+        assert!(line.contains("v=1 op=c7 role=guest ops=8 ok=7 enoent=1 eio=0 other=0 hang=0\n"), "{line}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn c7ops_hang_stops() {
+        let dir = scratch("c7hang");
+        fs::write(dir.join("c7-hang"), b"200").unwrap();
+        for name in ["c7-r0", "c7-r1", "c7-r2", "c7-r3"] {
+            fs::write(dir.join(name), b"slot").unwrap();
+        }
+        let started = Instant::now();
+        let _ = take_said();
+        assert_eq!(execute(&args_of(&dir, &["c7ops", "--dir", "DIR", "--role", "guest", "--ms", "40"])).unwrap(), 0);
+        let line = take_said();
+        assert!(line.contains("v=1 op=c7 role=guest ops=8 ok=0 enoent=0 eio=0 other=0 hang=1\n"), "{line}");
+        assert!(started.elapsed() < Duration::from_secs(1), "elapsed {:?}", started.elapsed());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn class_io_maps_enoent_and_eio() {
+        assert_eq!(class_io(&std::io::Error::from_raw_os_error(2)), C7Class::Enoent);
+        assert_eq!(class_io(&std::io::Error::new(ErrorKind::NotFound, "missing")), C7Class::Enoent);
+        assert_eq!(class_io(&std::io::Error::from_raw_os_error(5)), C7Class::Eio);
+        assert_eq!(class_io(&std::io::Error::other("x")), C7Class::Other);
     }
 }
