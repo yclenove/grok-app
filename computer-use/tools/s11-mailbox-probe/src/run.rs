@@ -42,6 +42,7 @@ const CLOCK_KEYS: [&str; 7] = ["open_us", "write_us", "fsync_us", "rename_us", "
 struct Opt {
     cmd: &'static str,
     boundary: &'static str,
+    mode: &'static str,
     dir: String,
     role: &'static str,
     count: u8,
@@ -86,6 +87,7 @@ pub fn execute(args: &[String]) -> Result<i32, &'static str> {
         "c2" => c2_host(&opt),
         "c8" if opt.role == "guest" => c8_guest(&opt),
         "c8" => c8_host(&opt),
+        "fill" => c9_fill(&opt),
         _ => return Err("usage"),
     };
     Ok(code)
@@ -98,6 +100,7 @@ fn parse(args: &[String]) -> Result<Opt, &'static str> {
         "writer" => ("writer", "-", &args[1..]),
         "reader" => ("reader", "-", &args[1..]),
         "c8" => ("c8", "-", &args[1..]),
+        "fill" => ("fill", "-", &args[1..]),
         "c2" => {
             let boundary = match args.get(1).map(String::as_str).unwrap_or("") {
                 "file-sync" => "file-sync",
@@ -113,6 +116,7 @@ fn parse(args: &[String]) -> Result<Opt, &'static str> {
     let mut role = None;
     let mut count = None;
     let mut timeout = None;
+    let mut mode = None;
     let mut i = 0;
     while i < rest.len() {
         let val = rest.get(i + 1).ok_or("usage")?;
@@ -126,13 +130,30 @@ fn parse(args: &[String]) -> Result<Opt, &'static str> {
                 });
             }
             "--count" => count = Some(small(val, 1, 8)?),
+            "--mode" => {
+                mode = Some(match val.as_str() {
+                    "data" => "data",
+                    "small" => "small",
+                    _ => return Err("usage"),
+                });
+            }
             "--timeout" => timeout = Some(small(val, 0, 120)?),
             _ => return Err("usage"),
         }
         i += 2;
     }
     let timeout = u64::from(timeout.ok_or("usage")?);
-    Ok(Opt { cmd, boundary, dir: dir.ok_or("usage")?, role: role.ok_or("usage")?, count: count.ok_or("usage")?, end: io::now() + Duration::from_secs(timeout) })
+    let role = role.ok_or("usage")?;
+    let mode = if cmd == "fill" {
+        if role != "guest" {
+            return Err("usage");
+        }
+        mode.ok_or("usage")?
+    } else {
+        "-"
+    };
+    let count = if cmd == "fill" { 1 } else { count.ok_or("usage")? };
+    Ok(Opt { cmd, boundary, mode, dir: dir.ok_or("usage")?, role, count, end: io::now() + Duration::from_secs(timeout) })
 }
 fn small(val: &str, lo: u8, hi: u8) -> Result<u8, &'static str> {
     if val.is_empty() || val.len() > 3 || !val.bytes().all(|b| b.is_ascii_digit()) {
@@ -252,7 +273,27 @@ fn say(line: &str) {
     println!("{line}");
     let _ = stdio::Write::flush(&mut stdio::stdout());
 }
+#[cfg(test)]
+thread_local! {
+    static STORE_FAILS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+pub(crate) fn test_fail_stores(n: u32) {
+    STORE_FAILS.with(|slot| slot.set(n));
+}
 fn store(dir: &Dir, stem: &str, line: &str, end: Option<Instant>) -> Result<(), RdErr> {
+    #[cfg(test)]
+    if STORE_FAILS.with(|slot| {
+        let left = slot.get();
+        if left == 0 {
+            false
+        } else {
+            slot.set(left - 1);
+            true
+        }
+    }) {
+        return Err(RdErr::Io);
+    }
     if line.is_empty() || line.contains('\n') || line.len() > 4095 {
         return Err(RdErr::Size);
     }
@@ -303,8 +344,53 @@ fn bare_unknown(opt: &Opt, reason: &str) -> String {
     match opt.cmd {
         "c2" => c2_unknown(opt, reason, &opt.count.to_string(), "-", "-", "-", "absent"),
         "c8" => c8_line(opt.role, "unknown", reason, "0"),
+        "fill" => c9_line(opt, &crate::fill::Report { bytes: 0, files: 0, batches: 0, enospc: false }),
         _ => c1_unknown(opt, reason, 0, 0, "-", &Clock::new()),
     }
+}
+fn c9_line(opt: &Opt, report: &crate::fill::Report) -> String {
+    format!("v=1 op=c9 role=guest mode={} enospc={} bytes={} files={} batches={}", opt.mode, u8::from(report.enospc), report.bytes, report.files, report.batches)
+}
+fn c9_fill(opt: &Opt) -> i32 {
+    let root = match open_root(opt) {
+        Ok(dir) => dir,
+        Err(code) => return code,
+    };
+    let Some(plan) = crate::fill::resolve(opt.mode) else {
+        return unk(opt, &root, "io");
+    };
+    let payload = match root.open_child_dir("payload") {
+        Ok(dir) => dir,
+        Err(_) => {
+            let line = c9_line(opt, &crate::fill::Report { bytes: 0, files: 0, batches: 0, enospc: false });
+            return finish(&root, "result-guest", &line, "unknown", opt.end, &line);
+        }
+    };
+    let mut report = crate::fill::run(&payload, &root, plan, opt.end);
+    let mut line = c9_line(opt, &report);
+    if io::past(opt.end) {
+        let _ = store(&root, "result-guest", &line, None);
+        say(&line);
+        return 1;
+    }
+    if store(&root, "result-guest", &line, Some(opt.end)).is_ok() && !io::past(opt.end) {
+        say(&line);
+        return 0;
+    }
+    if report.enospc && report.files > 0 && !io::past(opt.end) && crate::fill::remove_last(&payload, plan, report.files) && !io::past(opt.end) {
+        report.files -= 1;
+        report.bytes = report.bytes.saturating_sub(plan.chunk);
+        line = c9_line(opt, &report);
+        if !io::past(opt.end) && store(&root, "result-guest", &line, Some(opt.end)).is_ok() && !io::past(opt.end) {
+            say(&line);
+            return 0;
+        }
+    }
+    if io::past(opt.end) {
+        let _ = store(&root, "result-guest", &line, None);
+    }
+    say(&line);
+    1
 }
 fn late_line(opt: &Opt) -> String {
     bare_unknown(opt, "deadline")
@@ -2219,5 +2305,109 @@ mod tests {
         let with_user = format!("{users}tester                   502\n");
         assert_eq!(count_non_admin(&with_user, admins), Ok(1));
         assert_eq!(judge_c8(count_non_admin(users, admins).ok()), ("unknown", "no-non-admin-principal"));
+    }
+
+    #[test]
+    fn fill_quota_reports_enospc_and_stops() {
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                crate::fill::test_clear_plan();
+            }
+        }
+        let _guard = Guard;
+        let dir = scratch("c9");
+        fs::create_dir(dir.join("payload")).unwrap();
+        // batch=2, so the second file publishes once, then the quota stop publishes again.
+        crate::fill::test_set_plan(crate::fill::Plan { files: 5, chunk: 100, batch: 2, quota: 250, tag: 's' });
+        assert_eq!(run(&dir, &["fill", "--dir", "DIR", "--role", "guest", "--mode", "small", "--timeout", "30"]), 0);
+        let line = text(&dir, "result-guest");
+        assert!(line.contains("op=c9") && line.contains("mode=small") && line.contains("enospc=1"), "{line}");
+        assert!(line.contains("files=2") && line.contains("bytes=200") && line.contains("batches=2"), "{line}");
+        assert!(dir.join("payload/s-0000").is_file() && dir.join("payload/s-0001").is_file());
+        assert!(!dir.join("payload/s-0002").exists());
+        let bad: Vec<String> = ["fill", "--dir", dir.to_str().unwrap(), "--role", "host", "--mode", "data", "--timeout", "1"].into_iter().map(str::to_string).collect();
+        assert!(execute(&bad).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn full_volume_fallback_does_not_rewrite_counts_or_claim_delivery() {
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                crate::fill::test_clear_plan();
+                crate::fill::test_fail_unlink(false);
+                test_fail_stores(0);
+            }
+        }
+        let _guard = Guard;
+        let plan = crate::fill::Plan { files: 4, chunk: 100, batch: 10, quota: 250, tag: 's' };
+        let run_fill = |dir: &std::path::Path| {
+            fs::create_dir(dir.join("payload")).unwrap();
+            crate::fill::test_set_plan(plan);
+            run(dir, &["fill", "--dir", "DIR", "--role", "guest", "--mode", "small", "--timeout", "30"])
+        };
+        let dir = scratch("c9un");
+        test_fail_stores(1);
+        crate::fill::test_fail_unlink(true);
+        assert_ne!(run_fill(&dir), 0);
+        assert!(dir.join("payload/s-0001").is_file());
+        if dir.join("result-guest").exists() {
+            let body = fs::read_to_string(dir.join("result-guest")).unwrap();
+            assert!(!body.contains("files=1"), "{body}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+        let dir = scratch("c9st");
+        test_fail_stores(2);
+        crate::fill::test_fail_unlink(false);
+        assert_ne!(run_fill(&dir), 0);
+        assert!(dir.join("payload/s-0000").is_file());
+        assert!(!dir.join("payload/s-0001").exists());
+        assert!(!dir.join("result-guest").exists());
+        let _ = fs::remove_dir_all(&dir);
+        let dir = scratch("c9ok");
+        test_fail_stores(1);
+        crate::fill::test_fail_unlink(false);
+        assert_eq!(run_fill(&dir), 0);
+        let line = text(&dir, "result-guest");
+        assert!(line.contains("files=1") && line.contains("bytes=100") && line.contains("enospc=1"), "{line}");
+        assert!(dir.join("payload/s-0000").is_file());
+        assert!(!dir.join("payload/s-0001").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fallback_retry_past_the_deadline_is_not_success() {
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                crate::fill::test_clear_plan();
+                crate::fill::test_fail_unlink(false);
+                test_fail_stores(0);
+                crate::io::test_clear_hook();
+                crate::io::test_clear_clock();
+            }
+        }
+        let _guard = Guard;
+        let dir = scratch("c9late");
+        fs::create_dir(dir.join("payload")).unwrap();
+        let t0 = crate::io::now();
+        crate::io::test_set_clock(t0);
+        let watched = dir.clone();
+        fn arm(dir: std::path::PathBuf, t0: std::time::Instant) {
+            crate::io::test_set_hook(Box::new(move || {
+                if dir.join("result-guest.tmp").exists() {
+                    crate::io::test_set_clock(t0 + std::time::Duration::from_secs(3600));
+                } else {
+                    arm(dir.clone(), t0);
+                }
+            }));
+        }
+        arm(watched, t0);
+        crate::fill::test_set_plan(crate::fill::Plan { files: 4, chunk: 100, batch: 10, quota: 250, tag: 's' });
+        test_fail_stores(1);
+        assert_ne!(run(&dir, &["fill", "--dir", "DIR", "--role", "guest", "--mode", "small", "--timeout", "30"]), 0);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -1,3 +1,4 @@
+mod fill;
 mod frame;
 mod io;
 mod run;

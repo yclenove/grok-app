@@ -101,7 +101,7 @@ bash computer-use/scripts/s11-0-probe.sh --stage B --endpoint-placeholder --tart
 
 真机跑阶段 M 之前必须先发一句，确认这次是 DEFAULT 网络机械实验、网关会暴露。没有这句话就不要跑。本段不构成运行授权。真实 VM 上的阶段 M 仍是 not_run。
 
-每个子例用 `/usr/bin/ssh-keygen` 在宿主私有目录生成一把一次性 ed25519。现有 eval 密钥只做两步：就绪命令 `/usr/bin/true`，以及一次固定初始化（客机新建 0700 目录、写入固定 dispatcher、客机 `shasum -a 256` 核对宿主算出的摘要、追加带 `restrict,command=` 的一次性公钥）。任何一步失败都停。之后的 upload、verify、run 只用一次性密钥。dispatcher 只按字面接受 `upload`、`verify` 加 64 位十六进制、`run C1`、`run C2`、`run C8`。`--pinned-host-key` 是 golden 的 ssh-ed25519 公钥，clone 继承同一把主机密钥。SSH 使用 `StrictHostKeyChecking=yes`、独立 known_hosts、只认这一把私钥、关闭转发、不用 TTY。每次连接前，本次 clone 必须是唯一正在运行的 VM。
+每个子例用 `/usr/bin/ssh-keygen` 在宿主私有目录生成一把一次性 ed25519。现有 eval 密钥只做两步：就绪命令 `/usr/bin/true`，以及一次固定初始化（客机新建 0700 目录、写入固定 dispatcher、客机 `shasum -a 256` 核对宿主算出的摘要、追加带 `restrict,command=` 的一次性公钥）。任何一步失败都停。之后的 upload、verify、run 只用一次性密钥。dispatcher 只按字面接受 `upload`、`verify` 加 64 位十六进制、`run C1`、`run C2`、`run C8`、`run C9`。`--pinned-host-key` 是 golden 的 ssh-ed25519 公钥，clone 继承同一把主机密钥。SSH 使用 `StrictHostKeyChecking=yes`、独立 known_hosts、只认这一把私钥、关闭转发、不用 TTY。每次连接前，本次 clone 必须是唯一正在运行的 VM。
 
 C2 对 `file-sync`、`dir-sync`、`rename` 各起一台新 clone。每个边界计划发布 3 次。file-sync 完成两次重命名；第三次只把文件 fsync 到 `part` 后退出，不重命名，也不同步被测数据目录。三个子例都是 `not-ack`，并且 VM 清理被证实时，聚合才是 `not-ack`、退出码 0。`unknown` 或没跑到的子例优先于 `not-ack`。C8 若客机只有一个非管理员主体，结果是 `unknown` / `single-principal`。不建账户，不提权。
 
@@ -109,7 +109,45 @@ C2 对 `file-sync`、`dir-sync`、`rename` 各起一台新 clone。每个边界�
 
 阶段 M 在 quarantine（含审计超量、超时、未证明 VM 已退出）时退出码是 5，即使采集结果同时是 unknown；测量原因仍留在该 case 行。A/B/C 仍是采集失败优先于清理失败。
 
-测量二进制是 `tools/s11-mailbox-probe`。它只接收目录、角色和计数/超时，子命令是 `writer`、`reader`、`c2 <boundary>`、`c8`。文件操作走目录 fd。它不负责 VM 或 SSH。
+测量二进制是 `tools/s11-mailbox-probe`。它只接收目录、角色和计数/超时，子命令是 `writer`、`reader`、`c2 <boundary>`、`c8`，以及只在客机上跑的 `fill --mode data|small`。文件操作走目录 fd。它不负责 VM、SSH 或磁盘镜像。
+
+## 阶段 V（限容卷，C4 / C1 / C2 / C9）
+
+阶段 V 在每次子例里新建一个 64MiB 的 HFSX 稀疏镜像，挂到本次尝试目录里的空挂载点，用完后卸载并删除。C4 只做卷的创建、挂载、读回和删除，不起 VM。C1、C2、C9 把阶段 M 的邮箱放到这个卷的 `mailbox` 上（槽位仍在启动前写好），每个子例一台新 clone、一个新卷。C2 的三个边界、C9 的 `data` 和 `small` 各是一次独立尝试。报告里的 `export` 是 `capped HFSX volume`。C4 的 `evidence` 是 `volume-only`；C1、C2、C9 仍是 `DEFAULT-network/mechanics-only`。
+
+真机跑阶段 V 之前必须先发一句：这次会在 Mini 上创建、挂载、卸载并删除一个 64MiB 的专用镜像。没有这句话就不要跑。本段不构成运行授权。真实机器上的阶段 V 仍是 not_run。
+
+创建用 `/usr/bin/hdiutil create -size 64m -fs HFSX -type SPARSE -layout NONE -volname GCU-MAILBOX`。macOS 27 上这条命令退出码是 0，stderr 有弃用警告（`'hdiutil create ...' is deprecated. Please use 'diskutil image create ...'`）。`diskutil image create blank` 不能做 HFSX，也不能做单文件 sparse，所以仍用 hdiutil create。警告记成观测，不当错误。
+
+挂载不用 hdiutil 的旧 attach 参数（macOS 27 报 unknown option）。改用 `/usr/sbin/diskutil image attach --plist --nobrowse --mountPoint <挂载点> --mountOptions nosuid,noexec,nodev,owners <镜像>`。不要用 `diskutil image info`（对这份 sparseimage 返回 Operation not supported）。
+
+设备节点和挂载点只从 `/usr/bin/plutil` 读出。先 `plutil -lint` 确认整份 plist 有效，再用 `plutil -type` 和 `plutil -extract <键> raw -o -` 取得数组的权威长度（`images` 或 `system-entities` 的 raw 输出是元素个数，例如 0 或 2；type 输出 `array`）。长度设有上限，超限就 quarantine。然后对 `0..count-1` 的每个元素抽取全部必需字段；任一抽取失败、类型不对或互相冲突，都 quarantine。不存在的键会报 “Could not extract value…”，这不是空数组。只有完整校验后的清单（含显式的空数组）才能当作没有这份镜像。路径里的 `$` 等字节是数据，不能当成数组结束。
+
+attach 的 plist 顶层是 `system-entities`。元素里的 `dev-entry` 没有 `/dev/` 前缀（例如 `disk4`），还有 `filesystem-name`、`filesystem-type`、`mount-point`、`size`、`volume-name`、`content-hint`。`filesystem-name` 为 `Case-sensitive HFS+` 时记成 `case-sensitive-hfs`。读不到文件系统名、容量或镜像大小时，C4 不能记成完整通过。`hdiutil info -plist` 里的 `dev-entry` 带 `/dev/` 前缀。比较前把两边都规范成 `/dev/diskN`，并核对镜像的设备号和 inode。对不上、读回不完整或超时，脚本不做卸载、不删镜像，把尝试目录留在 `--out` 下，报告 `quarantine`，退出码 5。
+
+创建之前先检查 `--out` 自己和它的每一级祖先：不能是符号链接，属主必须是当前用户或 root，并且没有组写和其他写。同一条路径再用 `/bin/ls -lde` 读 ACL。`deny` 条目留下（Mini 家目录上常见 `0: group:everyone deny delete`）。把 `write`、`append`、`delete`、`delete_child`、`add_file` 或 `add_subdirectory` 授给属主和 root 以外的人，包括新建的尝试目录和挂载目录上继承来的条目，就拒绝。读不到或解析不了也拒绝。然后在 `--out` 下记下本次尝试目录、挂载目录和镜像的 dev/inode，并先写 `--out/volume-receipt`（镜像路径、dev/inode、设备、挂载点、生命周期）。每个阶段更新这份凭据。它在卷外，不在临时目录里。quarantine 时保留它。人工处理以这份凭据为准，不要凭目录名删除。
+
+每次删除文件或空目录之前，重新核对父目录和目标的 dev/inode，并且目标不能是符号链接。对不上就 quarantine，不按路径兜底删除。创建失败和半路失败同样适用。
+
+卷上的写入、建目录和删除（含 `.metadata_never_index`、槽位预建、删除文件和空目录）都放进有界子进程，不在 bash 主进程里直接对卷做文件 IO。卷准备阶段的绝对截止是 40 秒。清理开始时算一个绝对截止，之后每条命令连同 TERM、KILL 和回收都夹在剩余时间里，不把额度重新加满。子进程无法确认退出就 quarantine，并且不再做后续动作。客机里卡住的系统调用仍由本次尝试的 VM 停止时限盖住；客机自己的计时器单独不构成硬上限。
+
+卸载绑定的是只属于本次尝试的挂载点路径。新鲜的 `hdiutil info -plist` 必须同时满足：`image-path` 等于这份镜像且 dev/inode 一致，并且该镜像的挂载点等于本次在 0700 私有目录里创建的挂载点 M。然后执行 `/usr/bin/hdiutil detach <M>`。失败时，在再次确认 VM 已停止并且同一份 info 仍然成立之后，最多执行一次 `/usr/bin/hdiutil detach -force <M>`。然后再做一次 info，确认清单里已经没有这份镜像，才按身份删除镜像和空目录。同一用户的其它进程若同时改这个私有目录，不在这层保护范围内。
+
+开始前宿主所在卷的可用空间必须至少 256MiB，否则不创建镜像，结果是 unknown。这次观测记在 `host_pre`。C9 在放量开始前用同一条 256MiB 再查一次，记在 `host_fill`；不够则 unknown，原因 `host-space`，不发 `run C9`。客机报告 ENOSPC 时，卷上剩余必须不超过 8MiB，否则 unknown，原因 `enospc-origin`，以免把宿主卷写满当成卷满。C9 记录宿主可用空间下降的峰值，以及镜像逻辑大小（st_size）和占用（blocks×512）的峰值。`ok` 要同时满足：客机报告到达 ENOSPC、两个峰值都不超过 80MiB、宿主可用空间下降不超过同一时段镜像占用增量（峰值减去放量基线）再加报告里的 `host_margin`（1048576 字节）。基线时已经占用的块不算进允许下降。没观测到的 C4 大小、宿主下降和 enospc 记 unknown，不记 0。C9 终态记录必须是唯一、完整、以换行结束的一行，字段不重复，并且 v/op/role/mode 与本次边界一致。矛盾、截断，或客机非零、中止、溢出、超时，都记 unknown；留下结果文件也不能记 ok。后台 SSH 的标准输出和标准错误各自最多保留 65536 字节，到顶或收到取消就结束并回收，这两项观察在等待结束后仍然有效。
+
+真实运行拒绝 `S11_HDIUTIL`、`S11_DISKUTIL`、`S11_PLUTIL`、`S11_MOUNT`、`S11_MDUTIL`、`S11_TMUTIL`、`S11_STAT`、`S11_DF`、`S11_VOLIO`、`S11_LS` 这些工具路径覆盖，除非显式设置 `S11_TEST_MODE=1`。该变量只给桩测试用。
+
+`mdutil -s` 只认原文里的 `Indexing disabled.` 或 `Indexing enabled.`。读不到就保持 unknown，不把没观测写成已经关闭。`tmutil isexcluded` 对着镜像路径，认 `[Included]` 或 `[Excluded]`。`tmutil addexclusion` 没测，失败或要权限就记 unknown。
+
+quarantine 之后由人处理，脚本不会补一次删除。打开该次 `--out/volume-receipt`，按其中的镜像路径、dev/inode、设备、挂载点和生命周期核对，不要凭目录名直接删：
+
+- `hdiutil info -plist`，看 `image-path` 是不是凭据里的镜像，挂载点是不是凭据里的 M。`dev-entry` 先规范成 `/dev/diskN`
+- `stat` 凭据里的镜像，设备号和 inode 要和凭据一致
+- `mount`，看该挂载点上有没有 nosuid、noexec、nodev、nobrowse。出现 noowners 时 owners 记 unknown，不因此跳过卸载
+
+只有这些都指向同一次尝试，才可以手工 `/usr/bin/hdiutil detach` 凭据里的挂载点路径，再确认 info 里已经没有这份镜像，然后删除镜像和空目录。对不上就停，留给下一次人工判断。不要用 `sudo`。不要 `detach -force`，除非已经证明没有 VM 还拿着这个卷，并且仍然只对凭据里的挂载点路径执行一次。
+
+C9 让客机通过固定的 `run C9` 写满卷（`data` 最多 80 个 1MiB，`small` 最多 8192 个 1KiB，遇到空间不足就停）。判定用上面的峰值和 `host_margin`。客机没有报告空间不足是 `unknown`；镜像或宿主可用空间下降越界是 `failed`。判定之后仍然按上面的身份规则卸载和删除。
 
 ## 桩测试
 

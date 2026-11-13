@@ -507,6 +507,37 @@ impl Dir {
         }
         Ok(Times { open_us, write_us, fsync_us, rename_us: 0, dir_sync_us: None, slice_us: us(slice.elapsed()) })
     }
+    /// New regular file via `openat` (`O_EXCL|O_NOFOLLOW`). ENOSPC stays an `io::Error`.
+    pub fn create_exclusive(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        if !name_ok(name) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "name"));
+        }
+        let c = CString::new(name).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name"))?;
+        let fd = open_at(self.file.as_raw_fd(), c.as_ptr(), WRONLY | CREAT | EXCL | NOFOLLOW | CLOEXEC, 0o600);
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        if let Err(err) = file.write_all(bytes) {
+            let _ = unlink_name(self.file.as_raw_fd(), &c);
+            return Err(err);
+        }
+        if unsafe { fsync(file.as_raw_fd()) } != 0 {
+            let err = io::Error::last_os_error();
+            let _ = unlink_name(self.file.as_raw_fd(), &c);
+            return Err(err);
+        }
+        let meta = file.metadata()?;
+        if meta.dev() != self.dev || !meta.is_file() {
+            let _ = unlink_name(self.file.as_raw_fd(), &c);
+            return Err(io::Error::other("dev"));
+        }
+        Ok(())
+    }
+    pub fn unlink_file(&self, name: &str) -> io::Result<()> {
+        let c = c_name(name).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name"))?;
+        unlink_name(self.file.as_raw_fd(), &c)
+    }
 }
 #[cfg(test)]
 mod tests {
