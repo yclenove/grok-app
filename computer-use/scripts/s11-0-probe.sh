@@ -2670,20 +2670,25 @@ c10_field_value() {
   return 1
 }
 c10_dest_count() {
-  local line n=0 bad=0 nodest=0 in_rec=0 rec_bad=0 have_name=0 have_kind=0 have_url=0 have_id=0
+  local line n=0 bad=0 nodest=0 in_rec=0 rec_bad=0 have_name=0 have_kind=0 have_url=0 have_id=0 have_mp=0 kind=
   vol_bin_ok "$TMUTIL" || { printf unknown; return 0; }
   vol_run 5 "$TMUTIL" destinationinfo || { printf unknown; return 0; }
   # The no-destination line may arrive on either stream.
   cat "$WORKDIR/v.out" "$WORKDIR/v.err" >"$WORKDIR/tm.all" 2>/dev/null || { printf unknown; return 0; }
   c10_dest_flush() {
     [[ "$in_rec" == 1 ]] || return 0
-    # URL only exists for network destinations; a Local disk has Mount Point instead.
+    # Required fields depend on Kind: Local has a Mount Point, Network a URL.
+    case "$kind" in
+      Local) [[ "$have_mp" == 1 ]] || rec_bad=1 ;;
+      Network) [[ "$have_url" == 1 ]] || rec_bad=1 ;;
+      *) rec_bad=1 ;;
+    esac
     if [[ "$rec_bad" == 0 && "$have_name" == 1 && "$have_kind" == 1 && "$have_id" == 1 ]]; then
       n=$((n + 1))
     else
       bad=1
     fi
-    in_rec=0; rec_bad=0; have_name=0; have_kind=0; have_url=0; have_id=0
+    in_rec=0; rec_bad=0; have_name=0; have_kind=0; have_url=0; have_id=0; have_mp=0; kind=
   }
   while IFS= read -r line || [[ -n "$line" ]]; do
     line=${line%$'\r'}
@@ -2699,7 +2704,7 @@ c10_dest_count() {
         ;;
       Kind*)
         [[ "$in_rec" == 1 ]] || bad=1
-        if c10_field_value "$line"; then have_kind=1; else rec_bad=1; fi
+        if c10_field_value "$line"; then have_kind=1; kind=$C10F; else rec_bad=1; fi
         ;;
       URL*)
         [[ "$in_rec" == 1 ]] || bad=1
@@ -2709,7 +2714,11 @@ c10_dest_count() {
         [[ "$in_rec" == 1 ]] || bad=1
         if c10_field_value "$line"; then have_id=1; else rec_bad=1; fi
         ;;
-      Destination*|Mount\ Point*)
+      Mount\ Point*)
+        [[ "$in_rec" == 1 ]] || bad=1
+        if c10_field_value "$line"; then have_mp=1; else rec_bad=1; fi
+        ;;
+      Destination*)
         [[ "$in_rec" == 1 ]] || bad=1
         ;;
       *) bad=1 ;;

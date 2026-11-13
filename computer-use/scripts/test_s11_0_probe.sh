@@ -194,7 +194,7 @@ install_templates() {
     '  exit 0; fi' \
     'case " $* " in *s11m.XXXXXX*) cat >"$ROOT/init.body"; printf "init-ok\n"; exit 0 ;; esac' \
     'remote=""; for remote in "$@"; do :; done' \
-    'case "$remote" in upload|verify\ *|run\ C2|run\ C8) cat >/dev/null; exit 0 ;; "run C1"|"run C7") "$ROOT/bin/c7guest" "$remote"; exit $? ;; "run C9") cat >/dev/null; mode=""; mbx=$(awk '"'"'match($0,/--dir s11mbx:/){p=substr($0,RSTART+13)} END{print p}'"'"' "$ROOT/tart.log"); [[ -n "$mbx" && -f "$mbx/fill-mode" ]] && mode=$(tr -d "\r\n" <"$mbx/fill-mode"); if [[ -f "$ROOT/c9_hold_after" && "$mode" == small ]]; then "$ROOT/bin/c9write" & cpid=$!; trap "exit 0" TERM INT HUP; wait "$cpid"; exit $?; fi; "$ROOT/bin/c9write"; exit $? ;; "run C6 file"|"run C6 dir") kind=file; [[ "$remote" == "run C6 dir" ]] && kind=dir; [[ -f "$ROOT/c6_nohold" ]] && exit 0; printf "v=1 op=c6 role=guest kind=%s held=1\n" "$kind"; pp=$PPID; trap "exit 0" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done ;; esac' \
+    'case "$remote" in upload|verify\ *|run\ C2|run\ C8) cat >/dev/null; exit 0 ;; "run C1"|"run C7") "$ROOT/bin/c7guest" "$remote"; exit $? ;; "run C9") cat >/dev/null; mode=""; mbx=$(awk '"'"'match($0,/--dir s11mbx:/){p=substr($0,RSTART+13)} END{print p}'"'"' "$ROOT/tart.log"); [[ -n "$mbx" && -f "$mbx/fill-mode" ]] && mode=$(tr -d "\r\n" <"$mbx/fill-mode"); if [[ -f "$ROOT/c9_hold_after" && "$mode" == small ]]; then "$ROOT/bin/c9write" & cpid=$!; trap "kill -KILL $cpid 2>/dev/null; exit 0" TERM INT HUP; wait "$cpid"; exit $?; fi; "$ROOT/bin/c9write"; exit $? ;; "run C6 file"|"run C6 dir") kind=file; [[ "$remote" == "run C6 dir" ]] && kind=dir; [[ -f "$ROOT/c6_nohold" ]] && exit 0; printf "v=1 op=c6 role=guest kind=%s held=1\n" "$kind"; pp=$PPID; trap "exit 0" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done ;; esac' \
     '[[ -f "$ROOT/guest_fail" ]] && exit 9' \
     'if [[ -f "$ROOT/guest_hang" ]]; then pp=$PPID; trap "exit 143" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done; exit 143; fi' \
     'last=""' \
@@ -588,6 +588,26 @@ if [[ "$1" == destinationinfo && $# -eq 1 ]]; then
   fi
   if [[ -f "$ROOT/tmutil_nodest" ]]; then
     printf '%s\n' 'tmutil: No destinations configured.'
+    exit 0
+  fi
+  if [[ -f "$ROOT/tmutil_network" ]]; then
+    printf '%s\n' 'Name          : S11SecretDestName' \
+      'Kind          : Network' \
+      'URL           : smb://secret.invalid/share' \
+      'ID            : ABC'
+    exit 0
+  fi
+  if [[ -f "$ROOT/tmutil_network_nourl" ]]; then
+    printf '%s\n' 'Name          : S11SecretDestName' \
+      'Kind          : Network' \
+      'ID            : ABC'
+    exit 0
+  fi
+  if [[ -f "$ROOT/tmutil_oddkind" ]]; then
+    printf '%s\n' 'Name          : S11SecretDestName' \
+      'Kind          : Cloud' \
+      'URL           : smb://secret.invalid/share' \
+      'ID            : ABC'
     exit 0
   fi
   if [[ -f "$ROOT/tmutil_localonly" ]]; then
@@ -3141,14 +3161,18 @@ PY
 # Real Mini output when no backup destination exists.
 test_stage_v_c10_nodest() {
   local flag want
-  for flag in tmutil_nodest tmutil_localonly; do
+  for flag in tmutil_nodest tmutil_localonly tmutil_network tmutil_network_nourl tmutil_oddkind; do
     rm -rf "$CASE/out"
     setup
     enable_volume
     export S11_C10_WAIT=0
-    rm -f "$ROOT/tmutil_nodest" "$ROOT/tmutil_localonly"
+    rm -f "$ROOT/tmutil_nodest" "$ROOT/tmutil_localonly" "$ROOT/tmutil_network" "$ROOT/tmutil_network_nourl" "$ROOT/tmutil_oddkind"
     touch "$ROOT/$flag"
-    want=0; [[ "$flag" == tmutil_localonly ]] && want=1
+    case "$flag" in
+      tmutil_nodest) want=0 ;;
+      tmutil_localonly|tmutil_network) want=1 ;;
+      *) want=unknown ;;
+    esac
     run_probe 12 --stage V --case C10 "${ARGS[@]}"
     need_ec 4
     common_end
