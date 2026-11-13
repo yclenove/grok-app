@@ -80,8 +80,6 @@ struct Watch {
     retry_absent: u64,
     retry_replaced: u64,
     stuck: bool,
-    /// Bytes of the call that stuck this slot. Later sticky reads report them.
-    bytes: usize,
 }
 
 impl Watch {
@@ -90,7 +88,6 @@ impl Watch {
             retry_absent: 0,
             retry_replaced: 0,
             stuck: false,
-            bytes: 0,
         }
     }
 }
@@ -364,16 +361,12 @@ pub fn read_slot_until<C: HostClock>(
         let (inner, watches) = parts(layout);
         let watch = &mut watches[index];
         if watch.stuck {
-            return Err(failed(MailboxError::Sticky, watch, watch.bytes));
+            // No IO on this call, so it charges nothing.
+            return Err(failed(MailboxError::Sticky, watch, 0));
         }
         match read_body(root, inner, slot, watch, clock, end) {
             Ok((body, bytes)) => Ok(finished(body, watch, bytes)),
-            Err((error, bytes)) => {
-                if watch.stuck {
-                    watch.bytes = bytes;
-                }
-                Err(failed(error, watch, bytes))
-            }
+            Err((error, bytes)) => Err(failed(error, watch, bytes)),
         }
     }
 }
@@ -426,7 +419,6 @@ pub fn read_checked(
             Err(error) => {
                 let watch = &mut layout.watches[slot_index(slot)];
                 watch.stuck = true;
-                watch.bytes = read.bytes;
                 Err(failed(error, watch, read.bytes))
             }
         },
@@ -485,7 +477,6 @@ pub fn poll_guest_until<C: HostClock>(
             Err(error) => {
                 let watch = &mut layout.watches[slot_index(SlotRef::Guest(op))];
                 watch.stuck = true;
-                watch.bytes = bytes;
                 Err(failed(error, watch, bytes))
             }
         },
@@ -766,10 +757,15 @@ fn read_body<C: HostClock>(
             return Err((MailboxError::PollBudget, charged));
         }
         let read_cap = remaining.min(FRAME_MAX.saturating_add(1));
-        let mut bytes = with_bytes(
-            sys::read_capped(sys::raw_fd(&fd), read_cap).map_err(map_sys),
-            charged,
-        )?;
+        if clock.now() >= end {
+            return Err((MailboxError::Deadline, charged));
+        }
+        let mut bytes = match sys::read_capped(sys::raw_fd(&fd), read_cap) {
+            Ok(bytes) => bytes,
+            Err((err, partial)) => {
+                return Err((map_sys(err), charged.saturating_add(partial.min(read_cap))));
+            }
+        };
         if bytes.len() > read_cap {
             bytes.truncate(read_cap);
         }
@@ -782,6 +778,11 @@ fn read_body<C: HostClock>(
             with_bytes(replaced(watch), total)?;
             charged = total;
             continue;
+        }
+        // The stable try can itself run past the shared end; do not hand back
+        // a late frame. Not sticky: a later call with a fresh end can read it.
+        if clock.now() >= end {
+            return Err((MailboxError::Deadline, total));
         }
         let got = with_bytes(
             u64::try_from(bytes.len()).map_err(|_| MailboxError::Io),

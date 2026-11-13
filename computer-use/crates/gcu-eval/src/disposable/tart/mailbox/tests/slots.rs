@@ -328,9 +328,100 @@ fn exact_budget_leaves_the_next_frame_unread() {
         Ok(bytes) if bytes == legal => {}
         other => panic!("legal frame: {other:?}"),
     }
+    // A sticky call does no IO: it charges nothing and reads nothing.
     match read_slot(root.raw(), &mut layout, SlotRef::Guest(Op::Probe)) {
-        Err(err) if err.error == MailboxError::Sticky && err.bytes == POLL_BYTE_BUDGET => {}
+        Err(err)
+            if err.error == MailboxError::Sticky && err.bytes == 0 && err.retry_replaced == 32 => {}
         other => panic!("sticky boundary: {other:?}"),
+    }
+    if n.get() != 32 {
+        panic!("sticky call read again: {}", n.get());
+    }
+}
+
+/// The stable try runs past the shared end: the late frame is not handed
+/// back, the bytes are charged, and a later call with a fresh end reads it.
+#[test]
+fn stable_try_past_the_end_is_deadline_not_frame() {
+    let root = scratch();
+    let mut layout = need(prepare_slots(root.raw()));
+    let dest = root.message(GUEST_WRITE_DIR, Op::Probe.file_name());
+    let frame = vec![b's'; 120];
+    write_bytes(&dest, &frame);
+    let clock = FakeClock::new();
+    let end = MonoInstant::from_nanos(1_000_000);
+    let clock_hook = clock.clone();
+    let once = Cell::new(true);
+    let guard = arm(IoPoint::AfterRead, move || {
+        if once.replace(false) && clock_hook.advance(Duration::from_millis(1)).is_err() {
+            panic!("advance");
+        }
+    });
+    match read_slot_until(
+        root.raw(),
+        &mut layout,
+        SlotRef::Guest(Op::Probe),
+        &clock,
+        end,
+    ) {
+        Err(err) if err.error == MailboxError::Deadline && err.bytes == frame.len() => {}
+        other => panic!("late stable frame: {other:?}"),
+    }
+    drop(guard);
+    let later = MonoInstant::from_nanos(10_000_000);
+    match read_slot_until(
+        root.raw(),
+        &mut layout,
+        SlotRef::Guest(Op::Probe),
+        &clock,
+        later,
+    ) {
+        Ok(read) if read.body == SlotBody::Frame(frame.clone()) && read.bytes == frame.len() => {}
+        other => panic!("fresh end: {other:?}"),
+    }
+}
+
+/// A short read followed by an IO error still charges the bytes it read.
+#[test]
+fn partial_read_then_error_charges_its_bytes() {
+    let root = scratch();
+    let mut layout = need(prepare_slots(root.raw()));
+    let dest = root.message(GUEST_WRITE_DIR, Op::Probe.file_name());
+    write_bytes(&dest, &vec![b'p'; 4_096]);
+    let fail = sys::force_read_fail(1_024);
+    match read_slot(root.raw(), &mut layout, SlotRef::Guest(Op::Probe)) {
+        Err(err) if err.bytes == 1_024 => {}
+        other => panic!("partial then error: {other:?}"),
+    }
+    drop(fail);
+}
+
+/// Same, after an earlier replaced frame: both reads are charged.
+#[test]
+fn replaced_then_partial_error_charges_both() {
+    let root = scratch();
+    let mut layout = need(prepare_slots(root.raw()));
+    let dest = root.message(GUEST_WRITE_DIR, Op::Probe.file_name());
+    let first = vec![b'f'; 300];
+    write_bytes(&dest, &first);
+    let hook_dest = dest.clone();
+    let dir = root.path().to_path_buf();
+    let once = Cell::new(true);
+    let _guard = arm(IoPoint::AfterRead, move || {
+        if !once.replace(false) {
+            return;
+        }
+        let spare = dir.join("partial-spare");
+        write_bytes(&spare, &vec![b'g'; 4_000]);
+        if let Err(err) = fs::rename(&spare, &hook_dest) {
+            panic!("rename: {err}");
+        }
+        // Armed for the next read; the guard would clear it on drop.
+        std::mem::forget(sys::force_read_fail(500));
+    });
+    match read_slot(root.raw(), &mut layout, SlotRef::Guest(Op::Probe)) {
+        Err(err) if err.bytes == first.len() + 500 && err.retry_replaced == 1 => {}
+        other => panic!("replaced then partial error: {other:?}"),
     }
 }
 

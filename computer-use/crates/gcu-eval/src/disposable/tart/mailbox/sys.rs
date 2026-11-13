@@ -139,7 +139,14 @@ pub(super) fn mkdir_excl(dir: i32, name: &CStr) -> Result<(), SysErr> {
 }
 
 /// Read at most `cap` bytes. A short read at EOF stops.
-pub(super) fn read_capped(fd: i32, cap: usize) -> Result<Vec<u8>, SysErr> {
+///
+/// On error the second value is how many bytes were already read, so the
+/// caller can still charge them.
+pub(super) fn read_capped(fd: i32, cap: usize) -> Result<Vec<u8>, (SysErr, usize)> {
+    #[cfg(test)]
+    if let Some(partial) = take_forced_fail() {
+        return Err((SysErr::Io, partial.min(cap)));
+    }
     #[cfg(test)]
     if let Some(forced) = take_forced_read() {
         return Ok(forced);
@@ -147,14 +154,15 @@ pub(super) fn read_capped(fd: i32, cap: usize) -> Result<Vec<u8>, SysErr> {
     let mut out = vec![0u8; cap];
     let mut filled = 0usize;
     while filled < cap {
-        let rest = out.get_mut(filled..).ok_or(SysErr::Io)?;
+        let rest = out.get_mut(filled..).ok_or((SysErr::Io, filled))?;
         // Safety: `rest` is initialized storage of `rest.len()` bytes.
-        let n = retry_isize(|| unsafe { libc::read(fd, rest.as_mut_ptr().cast(), rest.len()) })?;
+        let n = retry_isize(|| unsafe { libc::read(fd, rest.as_mut_ptr().cast(), rest.len()) })
+            .map_err(|err| (err, filled))?;
         if n == 0 {
             break;
         }
-        let step = usize::try_from(n).map_err(|_| SysErr::Io)?;
-        filled = filled.checked_add(step).ok_or(SysErr::Io)?;
+        let step = usize::try_from(n).map_err(|_| (SysErr::Io, filled))?;
+        filled = filled.checked_add(step).ok_or((SysErr::Io, filled))?;
     }
     out.truncate(filled);
     Ok(out)
@@ -276,6 +284,35 @@ thread_local! {
 #[cfg(test)]
 fn take_forced_read() -> Option<Vec<u8>> {
     READ_FORCED.with(|cell| cell.borrow_mut().take())
+}
+
+/// One-shot failure of the next [`read_capped`] after `partial` bytes.
+#[cfg(test)]
+pub(super) fn force_read_fail(partial: usize) -> ReadFail {
+    READ_FAIL.with(|cell| *cell.borrow_mut() = Some(partial));
+    ReadFail
+}
+
+/// Clears a [`force_read_fail`] override on drop.
+#[cfg(test)]
+#[derive(Debug)]
+pub(super) struct ReadFail;
+
+#[cfg(test)]
+impl Drop for ReadFail {
+    fn drop(&mut self) {
+        READ_FAIL.with(|cell| *cell.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static READ_FAIL: RefCell<Option<usize>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn take_forced_fail() -> Option<usize> {
+    READ_FAIL.with(|cell| cell.borrow_mut().take())
 }
 
 /// Create a FIFO. Tests use it to prove a slot read does not block.
