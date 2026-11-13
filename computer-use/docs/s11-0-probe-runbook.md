@@ -131,7 +131,13 @@ attach 的 plist 顶层是 `system-entities`。元素里的 `dev-entry` 没有 `
 
 卷上的写入、建目录和删除（含 `.metadata_never_index`、槽位预建、删除文件和空目录）都放进有界子进程，不在 bash 主进程里直接对卷做文件 IO。卷准备阶段的绝对截止是 40 秒。清理开始时算一个绝对截止，之后每条命令连同 TERM、KILL 和回收都夹在剩余时间里，不把额度重新加满。子进程无法确认退出就 quarantine，并且不再做后续动作。客机里卡住的系统调用仍由本次尝试的 VM 停止时限盖住；客机自己的计时器单独不构成硬上限。
 
-卸载绑定的是只属于本次尝试的挂载点路径。新鲜的 `hdiutil info -plist` 必须同时满足：`image-path` 等于这份镜像且 dev/inode 一致，并且该镜像的挂载点等于本次在 0700 私有目录里创建的挂载点 M。然后执行 `/usr/bin/hdiutil detach <M>`。失败时，在再次确认 VM 已停止并且同一份 info 仍然成立之后，最多执行一次 `/usr/bin/hdiutil detach -force <M>`。然后再做一次 info，确认清单里已经没有这份镜像，才按身份删除镜像和空目录。同一用户的其它进程若同时改这个私有目录，不在这层保护范围内。
+卸载绑定的是只属于本次尝试的挂载点路径。新鲜的 `hdiutil info -plist` 必须同时满足：`image-path` 等于这份镜像且 dev/inode 一致，并且该镜像的挂载点等于本次在 0700 私有目录里创建的挂载点 M，且该镜像只有这一条挂载或 attachment。然后执行 `/usr/bin/hdiutil detach <M>`。失败时，在再次确认 VM 已停止并且同一份 info 仍然成立之后，最多执行一次 `/usr/bin/hdiutil detach -force <M>`。force 跨调用也至多一次：发出之前先把 `force=intent` 追加进凭据，写不进去就不 force；任何调用读到已有的 force 意图就不再 force，卷仍挂着则 quarantine。然后再做一次 info，确认清单里已经没有这份镜像。用过 VM 的 case 还要有 VM 已停止的证明。未知或仍有 attachment 就 quarantine，不删镜像。删除镜像之前，M₀ 的 dev/inode 必须仍与凭据一致且目录为空，尝试目录里只能有 `mailbox.sparseimage` 和挂载点目录。否则留下镜像并 quarantine。同一用户的其它进程若同时改这个私有目录，不在这层保护范围内。同一 UID 有意改写凭据（包括改写到目录里仅剩的那个 `s11v.*` 上）同样不在防护范围内。
+
+本实验探针依赖所有者保留的排他窗口：运行期间不对这些私有目录做手工或自动的磁盘操作。这是 ADR 0019 §2 规则 1 允许的形式，不是生产实现。报告字段 `exclusive_window` 为 `assumed`。按路径删除沿用现有的先核对身份再删除，不把父目录 fd 绑到这次删除上。
+
+凭据本身必须是当前用户拥有的普通文件、不是符号链接、模式 0600。凭据所在目录及其祖先和 `--out` 的祖先用同一套规则：不跟随符号链接，属主是当前用户或 root，没有组写或其他写，没有写类 ACL。尝试目录基名是 `s11v.*`，镜像基名必须是 `mailbox.sparseimage`，挂载点基名是 `mnt.*`，并且凭据目录里恰好有一个 `s11v.*`。阶段 R 每次 normal detach 和 force 之前都重做上面的完整映射核验。F3 凭据没有设备时，从这份新鲜清单里唯一的匹配项取出设备。映射变了或多出条目就 quarantine，不再 force。
+
+C6 在 VM 停止之后的宿主部分（持有进程、核验、detach/force、回收、unlink）共用一个 60 秒绝对截止。阶段 R 整段共用一个 90 秒绝对截止。剩余时间不够下一步自己的上限（含回收余量）就不启动这条命令，改为 quarantine，不把命令改短。normal detach 仍是 20 秒上限。读凭据走有界子进程 `/usr/bin/head -c 8193`，超过 8192 字节即拒绝；控制器不直接读原文件。
 
 开始前宿主所在卷的可用空间必须至少 256MiB，否则不创建镜像，结果是 unknown。这次观测记在 `host_pre`。C9 在放量开始前用同一条 256MiB 再查一次，记在 `host_fill`；不够则 unknown，原因 `host-space`，不发 `run C9`。客机报告 ENOSPC 时，卷上剩余必须不超过 8MiB，否则 unknown，原因 `enospc-origin`，以免把宿主卷写满当成卷满。C9 记录宿主可用空间下降的峰值，以及镜像逻辑大小（st_size）和占用（blocks×512）的峰值。`ok` 要同时满足：客机报告到达 ENOSPC、两个峰值都不超过 80MiB、宿主可用空间下降不超过同一时段镜像占用增量（峰值减去放量基线）再加报告里的 `host_margin`（1048576 字节）。基线时已经占用的块不算进允许下降。没观测到的 C4 大小、宿主下降和 enospc 记 unknown，不记 0。C9 终态记录必须是唯一、完整、以换行结束的一行，字段不重复，并且 v/op/role/mode 与本次边界一致。矛盾、截断，或客机非零、中止、溢出、超时，都记 unknown；留下结果文件也不能记 ok。后台 SSH 的标准输出和标准错误各自最多保留 65536 字节，到顶或收到取消就结束并回收，这两项观察在等待结束后仍然有效。
 
@@ -153,15 +159,15 @@ C9 让客机通过固定的 `run C9` 写满卷（`data` 最多 80 个 1MiB，`sm
 
 跑这些 case 之前必须先发一句：C5 的 F2 预期会留下镜像，需要人工按 volume-receipt 核对后再处理；C7 会在 VM 仍在运行时卸载本专用卷；C10 只读观察索引和备份状态，不改设置。没有这句话就不要跑。本段不构成运行授权。真实机器上这些 case 仍是 not_run。
 
-C10 不起 VM，并且和 C4 一样拒绝 `--probe` 与 `--pinned-host-key`。它在卷根写下 16 个含本次随机 token 的 1KiB 文件，等一段观察时间，然后只读 `mdfind -onlyin`、`mdutil -s`、卷根 `.fseventsd` 的 stat（不读内容）、`tmutil destinationinfo`（只记已配置目的地个数，不记名字、URL 或挂载点）和两次 `tmutil isexcluded`。不调用 `addexclusion`、`startbackup`，也不改备份设置。判定一律是 `unknown`，原因 `observed`：看不到系统服务读取，不能证明没有读取或备份。命令不可用或超时只把对应字段记成 unknown，清理照旧。
+C10 不起 VM，并且和 C4 一样拒绝 `--probe` 与 `--pinned-host-key`。它在卷根写下 16 个含本次随机 token 的 1KiB 文件，等一段观察时间，然后只读 `mdfind -onlyin`（只数标准输出；stderr 上的语言环境日志不计入）、`mdutil -s`、卷根 `.fseventsd` 的 stat（不读内容；存在时记下 uid 和模式）、`tmutil destinationinfo` 和两次 `tmutil isexcluded`。目的地个数只有在看到明确的 no-destination 行、并且没有目的地记录时才是 0。正数要求每条记录完整（Name、Kind、URL、ID 都有值），按 Name 计数。空输出、只有分隔线、只有 Kind、截断的 Name，或 no-destination 与记录混在一起，都记 unknown，不记 0。名字、URL 和挂载点不进报告。不调用 `addexclusion`、`startbackup`，也不改备份设置。判定一律是 `unknown`，原因 `observed`：看不到系统服务读取，不能证明没有读取或备份。命令不可用或超时只把对应字段记成 unknown，清理照旧。
 
-C6 起 VM，必须带 `--probe` 和 `--pinned-host-key`。子例 `file` 和 `dir` 各是一次独立尝试（新卷、新 clone）。客机经固定命令 `run C6 file` 或 `run C6 dir` 握住预建槽位或邮箱目录。宿主看到 `held=1` 后先停止并删除 VM、证明缺席，再在宿主上起唯一一个受限持有进程，然后 normal detach 一次。normal 失败且 VM 已证实停止时，才允许 force 一次。持有进程回收不了就 quarantine，不删除镜像。VM 还没证实停止时绝不 force。清理完成则判定 `ok`（这是机械测量）；清理异常则 quarantine。
+C6 起 VM，必须带 `--probe` 和 `--pinned-host-key`。子例 `file` 和 `dir` 各是一次独立尝试（新卷、新 clone）。客机经固定命令 `run C6 file` 或 `run C6 dir` 握住预建槽位或邮箱目录。宿主看到 `held=1` 后先停止并删除 VM、证明缺席，再在宿主上起唯一一个受限持有进程（最长 30 秒），记下它的绝对到期时刻和 pid，然后 normal detach 一次。detach 之前持有进程必须仍在，并且剩余寿命至少覆盖这次 detach 的上限；不够则 `unknown` / `incomplete`，不开始 detach，镜像保持挂载。detach 之后再确认持有进程仍在。中途退出则 `unknown` / `holder-expired`，随后仍按清理规则卸载并删除。normal 失败且 VM 已证实停止、映射仍成立、凭据里还没有 force 意图时，才允许 force 一次。持有进程回收不了就 quarantine，不删除镜像。VM 还没证实停止时绝不 force。清理完成则判定 `ok`（这是机械测量）；清理异常则 quarantine。
 
-C7 起 VM。邮箱就绪后、VM 仍在运行时，对本卷做一次 normal detach，绝不 force。detach 成功则让客机跑固定命令 `run C7`（对预建槽位做 4 次读、4 次写，每次独立线程、主线程有超时），并核对 VM 仍在运行、底层挂载目录为空且 dev/inode 与凭据一致。底层目录出现条目则判定 `failed`（落写到底层目录），留下镜像和该目录。detach 失败只记录，不 force，仍跑一次 `run C7`。之后按正常流程停止 VM；若卷仍挂着，这时才允许按卷清理规则 force 一次。
+C7 起 VM。先复用 C1 的就绪槽位：客机 `run C1` 把 `guest-write/hg-ready` 写成唯一一行 `v=1 op=ready dir=hg`，宿主看到这一行才继续。没握手成功是 `unknown` / `not-ready`，不提前 detach。握手成功后、VM 仍在运行时，对本卷做一次 normal detach，绝不 force。detach 成功则让客机跑固定命令 `run C7`（对预建槽位做 4 次读、4 次写，每次独立线程、主线程有超时）。`run C7` 必须有界执行成功，并且恰好一行客机记录：各计数是数字，`ok+enoent+eio+other+hang` 等于 `ops`，`ops` 不超过 8。同时 `tart_alive=yes`，并且之后 VM 清理与缺席确认成功，才是 `ok` / `measured`。SSH 失败或超时是 `unknown` / `guest-failed`；记录畸形是 `unknown` / `guest-malformed`；Tart 已不在运行是 `unknown` / `tart-dead`。`run C7` 返回后、VM 仍在运行时再核对一次 M₀ 的身份和内容；VM 停止后、任何 unlink 之前再核对一次。出现条目则 `failed` / `m0-write`，留下镜像和 M₀。detach 失败只记录，不 force，仍跑一次 `run C7`。之后按正常流程停止 VM；若卷仍挂着，这时才允许按卷清理规则 force 一次。
 
 C5 不起 VM。`--case C5 --fault F1|F2|F3|F4|F5` 在凭据写到一半时用 `kill -KILL` 模拟崩溃，不跑退出陷阱，因此这次可能没有报告。F1 在 create 之前，F2 在 create 成功但还没记下镜像 dev/inode，F3 在 attach 成功但还没记 mounted，F4 在 detach 成功但还没记 detached，F5 在 unlink 成功但还没记 gone。`--fault` 只对 C5 有效。
 
-阶段 R 是 `--stage R --receipt <volume-receipt>`。它严格解析凭据（只允许已知键、每键一次、路径必须是凭据所在目录下的直接子项），先追加 `recovery=noted`，再按破坏性清单处理：新鲜 info 里若还有这份镜像，身份和挂载点都对得上才 detach；对不上就 quarantine。镜像还在但凭据没有镜像 inode（F2）就 quarantine 并保留镜像，不 unlink。证明没有 attachment 之后，inode 一致才 unlink；镜像已不在则跳过。挂载目录身份一致且为空才 rmdir。尝试目录只作为证据保留。判定 `ok` 或 `quarantine`，quarantine 的退出码是 5。F1、F3、F4、F5 预期恢复成功且没有镜像或挂载目录残留；F2 预期 quarantine 且镜像还在，要人工按凭据处理。
+阶段 R 是 `--stage R --receipt <volume-receipt>`。它只接受 `case=C5` 的凭据。C5 不起 VM，构造上没有 VM。其它 case 在任何破坏性动作之前拒绝，原因 `recovery-unsupported`，退出码 2，不写 `recovery=noted`。通过解析和上面的信任链之后，才追加 `recovery=noted`，再按破坏性清单处理：新鲜 info 里若还有这份镜像，身份、设备和挂载点都对得上、且没有额外挂载或 attachment，才 detach；对不上就 quarantine，并且不 force。镜像还在但凭据没有镜像 inode（F2）就 quarantine 并保留镜像，不 unlink。证明没有 attachment、M₀ 为空且身份一致、尝试目录只有允许的名字之后，inode 一致才 unlink；镜像已不在则跳过 unlink，但尝试目录里若有意外名字仍 quarantine。挂载目录身份一致且为空才 rmdir。尝试目录只作为证据保留，阶段 R 不删除它。判定 `ok` 或 `quarantine`，quarantine 的退出码是 5。F1、F3、F4、F5 预期恢复成功且没有镜像或挂载目录残留；F2 预期 quarantine 且镜像还在，要人工按凭据处理。
 
 阶段 R 拒绝 `--dry-run`、`--case`、`--fault`、`--probe` 和 `--pinned-host-key`。凭据解析失败则拒绝，不做任何卸载或删除。
 
