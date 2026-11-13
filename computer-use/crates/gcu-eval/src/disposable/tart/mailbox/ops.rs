@@ -485,14 +485,6 @@ impl Envelope {
                     MsgStatus::Request | MsgStatus::Accepted,
                     Payload::Empty,
                 )
-                | (
-                    Op::Bootstrap,
-                    MsgStatus::Terminal,
-                    Payload::BootstrapTerminal(_)
-                )
-                | (Op::Login, MsgStatus::Terminal, Payload::LoginTerminal(_))
-                | (Op::Run, MsgStatus::Terminal, Payload::RunTerminal(_))
-                | (Op::Revoke, MsgStatus::Terminal, Payload::RevokeTerminal(_))
                 | (Op::Lease, MsgStatus::Request, Payload::LeaseRequest(_))
                 | (Op::Lease, MsgStatus::Terminal, Payload::LeaseTerminal(_))
         );
@@ -501,13 +493,13 @@ impl Envelope {
         }
         match &self.payload {
             Payload::InventoryTerminal(snapshot) => snapshot.validate(),
-            Payload::BootstrapTerminal(value) => value.validate(),
-            Payload::LoginTerminal(value) => value.validate(),
-            Payload::RunTerminal(value) => value.validate(),
             Payload::InventoryRequest(_)
             | Payload::ProbeRequest(_)
             | Payload::ProbeTerminal(_)
             | Payload::Empty
+            | Payload::BootstrapTerminal(_)
+            | Payload::LoginTerminal(_)
+            | Payload::RunTerminal(_)
             | Payload::LeaseRequest(_)
             | Payload::LeaseTerminal(_)
             | Payload::RevokeTerminal(_) => Ok(()),

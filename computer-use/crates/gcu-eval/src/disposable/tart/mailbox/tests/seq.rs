@@ -1,14 +1,16 @@
 //! Sequence, boot, and lease rules. No filesystem.
 
+use super::super::codec::encode_frame;
 use super::super::ops::{
-    MsgStatus, Op, Outcome, Payload, ReplyResult, ReplyState, ValueOutcome, LEASE_WINDOW_MS,
-    MAX_POLLS,
+    LoginState, MsgStatus, Op, Outcome, Payload, ReplyResult, ReplyState, RunScore, SideOp,
+    SnapStatus, ValueOutcome, LEASE_WINDOW_MS, MAX_POLLS,
 };
 use super::super::seq::{succ, Observe, SeqTracker};
-use super::super::{MailboxError, SeqFault};
+use super::super::{CodecFault, MailboxError, SeqFault};
 use super::support::{
-    bind, binding, encoded, envelope, lease_request, lease_terminal, need, probe_request,
-    probe_terminal, until_ms,
+    activity, bind, binding, boot_ok, encoded, envelope, inv_request, inv_with, json_of,
+    lease_request, lease_terminal, need, probe_request, probe_terminal, revoke_ok, revoke_row,
+    until_ms,
 };
 use crate::disposable::Check;
 
@@ -84,27 +86,50 @@ fn reply_echoes_request_and_binding() {
 }
 
 #[test]
-fn accepted_then_terminal_is_completion() {
-    let mut tracker = SeqTracker::new(binding());
-    bind(&mut tracker);
-    need(tracker.note_request(&bootstrap_request(1)));
-    let accepted = observe_reply(&mut tracker, Op::Bootstrap, &bootstrap_accepted(1));
-    if accepted.state != ReplyState::Accepted || accepted.result != ReplyResult::Empty {
-        panic!("accepted: {accepted:?}");
+fn side_slot_terminal_is_not_completion() {
+    for op in [Op::Bootstrap, Op::Login, Op::Run, Op::Revoke] {
+        match encode_frame(&envelope(
+            op,
+            1,
+            Some("boot1"),
+            MsgStatus::Terminal,
+            side_payload(op),
+        )) {
+            Err(MailboxError::Malformed(CodecFault::Shape)) => {}
+            other => panic!("encode {op:?} terminal: {other:?}"),
+        }
+        let mut open = SeqTracker::new(binding());
+        bind(&mut open);
+        need(open.note_request(&side_request(op, 1)));
+        expect_shape(open.observe(op, &raw_terminal(op)));
+        expect_shape(open.observe(op, &raw_terminal(op)));
+        let accepted = observe_reply(&mut open, op, &side_accepted(op, 1));
+        if accepted.state != ReplyState::Accepted || accepted.result != ReplyResult::Empty {
+            panic!("accepted after a rejected terminal: {accepted:?}");
+        }
+
+        let mut tracker = SeqTracker::new(binding());
+        bind(&mut tracker);
+        need(tracker.note_request(&side_request(op, 1)));
+        let bytes = side_accepted(op, 1);
+        let accepted = observe_reply(&mut tracker, op, &bytes);
+        if accepted.state != ReplyState::Accepted {
+            panic!("accepted: {accepted:?}");
+        }
+        expect_shape(tracker.observe(op, &raw_terminal(op)));
+        expect_shape(tracker.observe(op, &raw_terminal(op)));
+        expect_fault(tracker.observe(op, &widen(&bytes)), SeqFault::Changed);
+        match need(tracker.observe(op, &bytes)) {
+            Observe::Pending {
+                op: pending,
+                request_seq,
+            } if pending == op && request_seq == 1 => {}
+            other => panic!("exact accepted should stay pending, got {other:?}"),
+        }
+        if op == Op::Bootstrap {
+            inventory_row_does_not_complete_bootstrap(&mut tracker, &bytes);
+        }
     }
-    let done = bootstrap_terminal(1, Outcome::Ok, Some(4));
-    let terminal = observe_reply(&mut tracker, Op::Bootstrap, &done);
-    if terminal.state != ReplyState::Terminal || terminal.request_seq != 1 {
-        panic!("terminal: {terminal:?}");
-    }
-    match need(tracker.observe(Op::Bootstrap, &done)) {
-        Observe::Pending { op, request_seq } if op == Op::Bootstrap && request_seq == 1 => {}
-        other => panic!("repeat terminal should stay pending, got {other:?}"),
-    }
-    expect_fault(
-        tracker.observe(Op::Bootstrap, &bootstrap_terminal(1, Outcome::Failed, None)),
-        SeqFault::Changed,
-    );
 }
 
 #[test]
@@ -153,8 +178,8 @@ fn identical_bytes_stay_pending() {
     }
     need(tracker.note_request(&probe_request(2)));
     match need(tracker.observe(Op::Probe, &bytes)) {
-        Observe::Pending { op, request_seq } if op == Op::Probe && request_seq == 1 => {}
-        other => panic!("stale exact bytes should stay pending, got {other:?}"),
+        Observe::Pending { op, request_seq } if op == Op::Probe && request_seq == 2 => {}
+        other => panic!("stale exact bytes should name the current request, got {other:?}"),
     }
     if tracker.outstanding(Op::Probe) != 2 || tracker.lease_deadline_ms().is_some() {
         panic!("pending replay moved the attempt");
@@ -309,9 +334,119 @@ fn inventory_and_lease_stop_at_2048() {
     }
 }
 
-fn bootstrap_request(seq: u64) -> Vec<u8> {
+#[test]
+fn stale_exact_reply_names_the_current_request() {
+    let mut tracker = SeqTracker::new(binding());
+    bind(&mut tracker);
+    need(tracker.note_request(&probe_request(1)));
+    let bytes = probe_terminal(1, Check::Passed);
+    observe_reply(&mut tracker, Op::Probe, &bytes);
+    need(tracker.note_request(&probe_request(2)));
+    match need(tracker.observe(Op::Probe, &bytes)) {
+        Observe::Pending { op, request_seq } if op == Op::Probe && request_seq == 2 => {}
+        other => panic!("stale reply: {other:?}"),
+    }
+    if tracker.outstanding(Op::Probe) != 2 {
+        panic!("stale reply changed the outstanding probe");
+    }
+}
+
+#[test]
+fn stale_lease_ack_rejects_reencoded_bytes() {
+    let mut current = SeqTracker::new(binding());
+    bind(&mut current);
+    need(current.note_request(&lease_request(1, 100)));
+    let first = lease_terminal(1, 100, until_ms(100));
+    let reply = observe_reply(&mut current, Op::Lease, &first);
+    if reply.state != ReplyState::Terminal || reply.request_seq != 1 {
+        panic!("current lease 1: {reply:?}");
+    }
+    need(current.note_request(&lease_request(2, 500)));
+    let deadline = until_ms(500);
+    if current.lease_deadline_ms() != Some(deadline) {
+        panic!(
+            "deadline before stale ack: {:?}",
+            current.lease_deadline_ms()
+        );
+    }
+    expect_fault(
+        current.observe(Op::Lease, &widen(&first)),
+        SeqFault::Changed,
+    );
+    expect_fault(
+        current.observe(Op::Lease, &escape_boot(&first)),
+        SeqFault::Changed,
+    );
+    match need(current.observe(Op::Lease, &first)) {
+        Observe::DiscardedLease { seq: 1 } => {}
+        other => panic!("original stale ack: {other:?}"),
+    }
+    if current.lease_deadline_ms() != Some(deadline) {
+        panic!("changed stale ack moved the deadline");
+    }
+
+    let mut stale = SeqTracker::new(binding());
+    bind(&mut stale);
+    need(stale.note_request(&lease_request(1, 100)));
+    need(stale.note_request(&lease_request(2, 500)));
+    match need(stale.observe(Op::Lease, &first)) {
+        Observe::DiscardedLease { seq: 1 } => {}
+        other => panic!("first stale ack: {other:?}"),
+    }
+    expect_fault(stale.observe(Op::Lease, &widen(&first)), SeqFault::Changed);
+    expect_fault(
+        stale.observe(Op::Lease, &escape_boot(&first)),
+        SeqFault::Changed,
+    );
+    match need(stale.observe(Op::Lease, &first)) {
+        Observe::DiscardedLease { seq: 1 } => {}
+        other => panic!("repeat original stale ack: {other:?}"),
+    }
+    if stale.lease_deadline_ms() != Some(deadline) {
+        panic!("first-seen stale ack moved the deadline");
+    }
+    let second = lease_terminal(2, 500, deadline);
+    let current_reply = observe_reply(&mut stale, Op::Lease, &second);
+    if current_reply.state != ReplyState::Terminal || current_reply.request_seq != 2 {
+        panic!("lease 2 after stale acks: {current_reply:?}");
+    }
+    if stale.lease_deadline_ms() != Some(deadline) {
+        panic!("current ack moved the deadline");
+    }
+}
+
+fn inventory_row_does_not_complete_bootstrap(tracker: &mut SeqTracker, accepted: &[u8]) {
+    // M4 consumes this inventory row. M3 only keeps the side slot at accepted.
+    need(tracker.note_request(&inv_request(2, Some("boot1"))));
+    let frame = inv_with(
+        2,
+        Some("boot1"),
+        activity(
+            SnapStatus::Terminal,
+            Some(SideOp::Bootstrap),
+            1,
+            Some(boot_ok(4)),
+        ),
+        revoke_row(SnapStatus::None, 0, None),
+    );
+    let reply = observe_reply(tracker, Op::Inventory, &frame);
+    match reply.result {
+        ReplyResult::Inventory(snap)
+            if snap.active.status == SnapStatus::Terminal
+                && snap.active.op == Some(SideOp::Bootstrap)
+                && snap.active.request_seq == 1
+                && snap.active.result == Some(boot_ok(4)) => {}
+        other => panic!("inventory completion row: {other:?}"),
+    }
+    match need(tracker.observe(Op::Bootstrap, accepted)) {
+        Observe::Pending { op, request_seq } if op == Op::Bootstrap && request_seq == 1 => {}
+        other => panic!("bootstrap slot moved off accepted: {other:?}"),
+    }
+}
+
+fn side_request(op: Op, seq: u64) -> Vec<u8> {
     encoded(&envelope(
-        Op::Bootstrap,
+        op,
         seq,
         Some("boot1"),
         MsgStatus::Request,
@@ -319,9 +454,9 @@ fn bootstrap_request(seq: u64) -> Vec<u8> {
     ))
 }
 
-fn bootstrap_accepted(seq: u64) -> Vec<u8> {
+fn side_accepted(op: Op, seq: u64) -> Vec<u8> {
     encoded(&envelope(
-        Op::Bootstrap,
+        op,
         seq,
         Some("boot1"),
         MsgStatus::Accepted,
@@ -329,14 +464,81 @@ fn bootstrap_accepted(seq: u64) -> Vec<u8> {
     ))
 }
 
-fn bootstrap_terminal(seq: u64, outcome: Outcome, value: Option<u64>) -> Vec<u8> {
-    encoded(&envelope(
-        Op::Bootstrap,
-        seq,
-        Some("boot1"),
-        MsgStatus::Terminal,
-        Payload::BootstrapTerminal(need(ValueOutcome::new(outcome, value))),
-    ))
+fn side_payload(op: Op) -> Payload {
+    match op {
+        Op::Bootstrap => Payload::BootstrapTerminal(need(ValueOutcome::new(Outcome::Ok, Some(4)))),
+        Op::Login => Payload::LoginTerminal(need(ValueOutcome::new(
+            Outcome::Ok,
+            Some(LoginState::Ready),
+        ))),
+        Op::Run => Payload::RunTerminal(need(ValueOutcome::new(Outcome::Ok, Some(RunScore::Pass)))),
+        Op::Revoke => Payload::RevokeTerminal(revoke_ok()),
+        _ => panic!("not a side op"),
+    }
+}
+
+fn raw_terminal(op: Op) -> Vec<u8> {
+    let accepted = side_accepted(op, 1);
+    let json = json_of(&accepted);
+    let payload = match op {
+        Op::Bootstrap => r#"{"outcome":"ok","native_ack_generation":4}"#,
+        Op::Login => r#"{"outcome":"ok","login":"ready"}"#,
+        Op::Run => r#"{"outcome":"ok","score":"pass"}"#,
+        Op::Revoke => {
+            r#"{"outcome":"ok","scope_revoked":true,"input_released":true,"tree_exited":true}"#
+        }
+        _ => panic!("not a side op"),
+    };
+    let replaced = json.replacen(
+        "\"status\":\"accepted\",\"payload\":{}",
+        &format!("\"status\":\"terminal\",\"payload\":{payload}"),
+        1,
+    );
+    if replaced == json {
+        panic!("accepted frame had no status marker: {json}");
+    }
+    reprefix(&replaced)
+}
+
+fn widen(frame: &[u8]) -> Vec<u8> {
+    let json = json_of(frame);
+    let mut widened = String::new();
+    let mut done = false;
+    for ch in json.chars() {
+        widened.push(ch);
+        if !done && ch == ':' {
+            widened.push(' ');
+            done = true;
+        }
+    }
+    reprefix(&widened)
+}
+
+fn escape_boot(frame: &[u8]) -> Vec<u8> {
+    let json = json_of(frame);
+    let replaced = json.replacen("\"boot1\"", "\"\\u0062oot1\"", 1);
+    if replaced == json {
+        panic!("frame has no boot1");
+    }
+    reprefix(&replaced)
+}
+
+fn reprefix(json: &str) -> Vec<u8> {
+    let len = match u32::try_from(json.len()) {
+        Ok(len) => len,
+        Err(_) => panic!("frame too long"),
+    };
+    let mut out = Vec::with_capacity(json.len().saturating_add(4));
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(json.as_bytes());
+    out
+}
+
+fn expect_shape<T: std::fmt::Debug>(result: Result<T, MailboxError>) {
+    match result {
+        Err(MailboxError::Malformed(CodecFault::Shape)) => {}
+        other => panic!("expected shape, got {other:?}"),
+    }
 }
 
 fn probe_at(seq: u64, request_seq: u64) -> Vec<u8> {

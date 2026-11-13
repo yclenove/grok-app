@@ -3,6 +3,8 @@
 //! `f_fsid` is compared as eight raw bytes. Linux and macOS spell that field
 //! differently, and both keep it private.
 
+#[cfg(test)]
+use std::cell::RefCell;
 use std::ffi::CStr;
 use std::io::Error;
 use std::mem::MaybeUninit;
@@ -138,6 +140,10 @@ pub(super) fn mkdir_excl(dir: i32, name: &CStr) -> Result<(), SysErr> {
 
 /// Read at most `cap` bytes. A short read at EOF stops.
 pub(super) fn read_capped(fd: i32, cap: usize) -> Result<Vec<u8>, SysErr> {
+    #[cfg(test)]
+    if let Some(forced) = take_forced_read() {
+        return Ok(forced);
+    }
     let mut out = vec![0u8; cap];
     let mut filled = 0usize;
     while filled < cap {
@@ -175,6 +181,48 @@ pub(super) fn fsync_fd(fd: i32) -> Result<(), SysErr> {
     Ok(())
 }
 
+/// Names other than `.` and `..`, in directory order, stopping at `limit`.
+///
+/// The caller passes the whitelist length plus one. This does not sort, recurse,
+/// or read again to see a stable picture.
+pub(super) fn list_limited(dir: i32, limit: usize) -> Result<Vec<Vec<u8>>, SysErr> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let duped = dup_cloexec(dir)?;
+    let handle = match adopt_dir(duped) {
+        Ok(handle) => handle,
+        Err(err) => {
+            // `fdopendir` leaves the descriptor open when it fails.
+            let _ = unsafe { libc::close(duped) };
+            return Err(err);
+        }
+    };
+    let mut names = Vec::new();
+    loop {
+        clear_errno();
+        // Safety: `handle` is a live `DIR`. The returned entry stays valid
+        // until the next `readdir` or `closedir` on this pointer.
+        let ent = unsafe { libc::readdir(handle.0) };
+        if ent.is_null() {
+            match Error::last_os_error().raw_os_error() {
+                None | Some(0) => break,
+                Some(libc::EINTR) => continue,
+                _ => return Err(map_last()),
+            }
+        }
+        let name = entry_name(ent)?;
+        if name == b"." || name == b".." {
+            continue;
+        }
+        names.push(name);
+        if names.len() == limit {
+            break;
+        }
+    }
+    Ok(names)
+}
+
 /// `renameat` from one parent to another. Replaces the destination name.
 pub(super) fn rename_at(from_dir: i32, from: &CStr, to_dir: i32, to: &CStr) -> Result<(), SysErr> {
     // Safety: both names are single segments. The call does not follow `to`.
@@ -201,12 +249,93 @@ pub(super) fn open_root(path: &CStr) -> Result<OwnedFd, SysErr> {
     Ok(unsafe { OwnedFd::from_raw_fd(rc) })
 }
 
+/// One-shot stand-in for the next [`read_capped`]. Metadata calls stay real.
+#[cfg(test)]
+pub(super) fn force_read(bytes: Vec<u8>) -> ReadForce {
+    READ_FORCED.with(|cell| *cell.borrow_mut() = Some(bytes));
+    ReadForce
+}
+
+/// Clears a [`force_read`] override on drop.
+#[cfg(test)]
+#[derive(Debug)]
+pub(super) struct ReadForce;
+
+#[cfg(test)]
+impl Drop for ReadForce {
+    fn drop(&mut self) {
+        READ_FORCED.with(|cell| *cell.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static READ_FORCED: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn take_forced_read() -> Option<Vec<u8>> {
+    READ_FORCED.with(|cell| cell.borrow_mut().take())
+}
+
 /// Create a FIFO. Tests use it to prove a slot read does not block.
 #[cfg(test)]
 pub(super) fn make_fifo(path: &CStr) -> Result<(), SysErr> {
     // Safety: `path` is NUL-terminated. `mkfifo` creates the node and does not follow it.
     retry_int(|| unsafe { libc::mkfifo(path.as_ptr(), mode_of(0o600)) })?;
     Ok(())
+}
+
+struct DirHandle(*mut libc::DIR);
+
+impl Drop for DirHandle {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // Safety: `fdopendir` returned this pointer and it has not been closed.
+            let _ = unsafe { libc::closedir(self.0) };
+            self.0 = ptr::null_mut();
+        }
+    }
+}
+
+fn dup_cloexec(fd: i32) -> Result<i32, SysErr> {
+    // Safety: `fd` is a live descriptor. The new one is closed by the caller.
+    retry_int(|| unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) })
+}
+
+fn adopt_dir(fd: i32) -> Result<DirHandle, SysErr> {
+    // Safety: `fd` is a directory descriptor we own. On success `DIR` closes it.
+    let dir = unsafe { libc::fdopendir(fd) };
+    if dir.is_null() {
+        return Err(map_last());
+    }
+    Ok(DirHandle(dir))
+}
+
+fn entry_name(ent: *mut libc::dirent) -> Result<Vec<u8>, SysErr> {
+    // Safety: `readdir` returned `ent`, and `d_name` is NUL-terminated.
+    let name = unsafe { CStr::from_ptr((*ent).d_name.as_ptr()) };
+    Ok(name.to_bytes().to_vec())
+}
+
+fn clear_errno() {
+    // Safety: the pointer is the thread's errno cell.
+    unsafe {
+        *errno_location() = 0;
+    }
+}
+
+fn errno_location() -> *mut libc::c_int {
+    #[cfg(target_os = "macos")]
+    // Safety: `__error` returns this thread's errno cell.
+    unsafe {
+        libc::__error()
+    }
+    #[cfg(not(target_os = "macos"))]
+    // Safety: `__errno_location` returns this thread's errno cell.
+    unsafe {
+        libc::__errno_location()
+    }
 }
 
 fn open_at(

@@ -116,6 +116,10 @@ fn run_checks() -> i32 {
             sources_have_no_process_launch_or_open_ended_wait,
         ),
         (
+            "mailbox_scan_exemptions_are_exact",
+            mailbox_scan_exemptions_are_exact,
+        ),
+        (
             "clone_at_absolute_deadline_expires_without_the_script",
             review_fixes::clone_at_absolute_deadline_expires_without_the_script,
         ),
@@ -906,19 +910,31 @@ fn sources_have_no_process_launch_or_open_ended_wait() -> Result<(), String> {
         "Duration::MAX",
         "tart-disposable",
     ];
+    let mod_rs =
+        std::fs::read_to_string(root.join("mailbox/mod.rs")).map_err(|err| err.to_string())?;
+    if !tests_module_is_cfg_gated(&mod_rs) {
+        return Err("mailbox tests module is not #[cfg(test)]".into());
+    }
     let mut permit_literals = 0;
     for path in &files {
         let text = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
-        // S11-M3 keeps libc in `mailbox/sys.rs`. Its tests use a private temp
-        // directory. Process launch and open-ended waits stay forbidden there.
-        let mailbox_sys = path.ends_with("mailbox/sys.rs");
-        let mailbox_test = path.components().any(|part| part.as_os_str() == "mailbox")
-            && path.components().any(|part| part.as_os_str() == "tests");
+        let rel = rel_under(&root, path)?;
+        // Unsafe stays in mailbox/sys.rs. Filesystem and env access stay in the
+        // known cfg(test) mailbox sources. Process launch and waits stay forbidden.
+        if production_path_reuses_exempt(&rel, &text) {
+            return Err(format!(
+                "{} imports an exempt mailbox test source",
+                path.display()
+            ));
+        }
+        let exempt = scan_exempt(&rel);
         for needle in forbidden {
-            if mailbox_sys && needle == "unsafe" {
+            if exempt == ScanExempt::Unsafe && needle == "unsafe" {
                 continue;
             }
-            if mailbox_test && matches!(needle, "std::fs" | "std::env" | "OpenOptions") {
+            if exempt == ScanExempt::FsEnv
+                && matches!(needle, "std::fs" | "std::env" | "OpenOptions")
+            {
                 continue;
             }
             if text.contains(needle) {
@@ -945,6 +961,217 @@ fn sources_have_no_process_launch_or_open_ended_wait() -> Result<(), String> {
         return Err(format!("permit constructions: {permit_literals}"));
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ScanExempt {
+    None,
+    Unsafe,
+    FsEnv,
+}
+
+const MAILBOX_TEST_SOURCES: &[&str] = &[
+    "mailbox/tests/codec.rs",
+    "mailbox/tests/mod.rs",
+    "mailbox/tests/seq.rs",
+    "mailbox/tests/slots.rs",
+    "mailbox/tests/support.rs",
+];
+
+fn mailbox_scan_exemptions_are_exact() -> Result<(), String> {
+    let scan_root = Path::new("/work/src/disposable/tart");
+    let cases = [
+        ("mailbox/sys.rs", ScanExempt::Unsafe),
+        ("mailbox/tests/codec.rs", ScanExempt::FsEnv),
+        ("mailbox/tests/mod.rs", ScanExempt::FsEnv),
+        ("mailbox/tests/seq.rs", ScanExempt::FsEnv),
+        ("mailbox/tests/slots.rs", ScanExempt::FsEnv),
+        ("mailbox/tests/support.rs", ScanExempt::FsEnv),
+        ("mailbox/ops.rs", ScanExempt::None),
+        ("mailbox/slots.rs", ScanExempt::None),
+        ("machine/mailbox/sys.rs", ScanExempt::None),
+        ("machine/tests/mailbox/live.rs", ScanExempt::None),
+        ("tests/mailbox/ops.rs", ScanExempt::None),
+    ];
+    for (rel, expect) in cases {
+        if scan_exempt(rel) != expect {
+            return Err(format!(
+                "{rel} classified as {:?}, want {expect:?}",
+                scan_exempt(rel)
+            ));
+        }
+        let abs = scan_root.join(rel);
+        if classify(scan_root, &abs) != expect {
+            return Err(format!(
+                "absolute {rel} was not classified after stripping the scan root"
+            ));
+        }
+    }
+    let ancestor = Path::new("/tests/checkout/src/disposable/tart");
+    if classify(ancestor, &ancestor.join("mailbox/ops.rs")) != ScanExempt::None {
+        return Err("a tests ancestor exempted mailbox/ops.rs".into());
+    }
+    if classify(ancestor, &ancestor.join("mailbox/sys.rs")) != ScanExempt::Unsafe {
+        return Err("stripping a tests ancestor dropped the sys.rs exemption".into());
+    }
+    if !production_path_reuses_exempt(
+        "mailbox/ops.rs",
+        "#[path = \"tests/slots.rs\"]\nmod slots;\n",
+    ) {
+        return Err("production path import of slots.rs was allowed".into());
+    }
+    if !production_path_reuses_exempt(
+        "machine/live.rs",
+        "#[path = \"../mailbox/tests/codec.rs\"]\nmod codec;\n",
+    ) {
+        return Err("production path import of codec.rs was allowed".into());
+    }
+    if production_path_reuses_exempt(
+        "mailbox/mod.rs",
+        "#[cfg(unix)]\n#[path = \"sys.rs\"]\nmod sys;\n",
+    ) {
+        return Err("mailbox/sys.rs module path was treated as a test import".into());
+    }
+    if production_path_reuses_exempt(
+        "mailbox/tests/mod.rs",
+        "#[path = \"slots.rs\"]\nmod slots;\n",
+    ) {
+        return Err("the test module was treated as a production importer".into());
+    }
+    if !tests_module_is_cfg_gated("#[cfg(test)]\nmod tests;\n") {
+        return Err("cfg(test) mod tests was rejected".into());
+    }
+    if tests_module_is_cfg_gated("mod tests;\n") {
+        return Err("ungated mod tests was accepted".into());
+    }
+    if tests_module_is_cfg_gated("#[cfg(test)]\nmod other;\n") {
+        return Err("a file without mod tests was accepted".into());
+    }
+    let real_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/disposable/tart");
+    let real =
+        std::fs::read_to_string(real_root.join("mailbox/mod.rs")).map_err(|err| err.to_string())?;
+    if !tests_module_is_cfg_gated(&real) {
+        return Err("live mailbox/mod.rs does not keep tests behind #[cfg(test)]".into());
+    }
+    Ok(())
+}
+
+fn classify(root: &Path, path: &Path) -> ScanExempt {
+    match path.strip_prefix(root) {
+        Ok(rel) => scan_exempt(&normalize_rel(&rel.to_string_lossy())),
+        Err(_) => ScanExempt::None,
+    }
+}
+
+fn rel_under(root: &Path, path: &Path) -> Result<String, String> {
+    let rel = path
+        .strip_prefix(root)
+        .map_err(|_| format!("{} is outside {}", path.display(), root.display()))?;
+    Ok(normalize_rel(&rel.to_string_lossy()))
+}
+
+fn scan_exempt(rel: &str) -> ScanExempt {
+    let rel = normalize_rel(rel);
+    if rel == "mailbox/sys.rs" {
+        ScanExempt::Unsafe
+    } else if MAILBOX_TEST_SOURCES.contains(&rel.as_str()) {
+        ScanExempt::FsEnv
+    } else {
+        ScanExempt::None
+    }
+}
+
+fn normalize_rel(path: &str) -> String {
+    let mut parts = Vec::new();
+    for part in path.split(['/', '\\']) {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            parts.pop();
+            continue;
+        }
+        parts.push(part);
+    }
+    parts.join("/")
+}
+
+fn tests_module_is_cfg_gated(text: &str) -> bool {
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let mut saw = false;
+    for (index, line) in lines.iter().enumerate() {
+        if line.contains("mod tests") && *line != "mod tests;" {
+            return false;
+        }
+        if *line == "mod tests;" {
+            let prev = lines[..index].iter().rev().find(|line| !line.is_empty());
+            if prev != Some(&"#[cfg(test)]") {
+                return false;
+            }
+            saw = true;
+        }
+    }
+    saw
+}
+
+fn production_path_reuses_exempt(rel: &str, text: &str) -> bool {
+    if scan_exempt(rel) == ScanExempt::FsEnv {
+        return false;
+    }
+    let base = parent_rel(rel);
+    path_attributes(text)
+        .iter()
+        .any(|attr| scan_exempt(&join_rel(base, attr)) == ScanExempt::FsEnv)
+}
+
+fn parent_rel(rel: &str) -> &str {
+    match rel.rsplit_once('/') {
+        Some((parent, _)) => parent,
+        None => "",
+    }
+}
+
+fn join_rel(base: &str, attr: &str) -> String {
+    let mut parts: Vec<String> = if base.is_empty() {
+        Vec::new()
+    } else {
+        base.split('/')
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    for part in attr.split(['/', '\\']) {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            parts.pop();
+            continue;
+        }
+        parts.push(part.to_string());
+    }
+    parts.join("/")
+}
+
+fn path_attributes(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(pos) = rest.find("#[path") {
+        let after = &rest[pos + 6..];
+        let Some(eq) = after.find('=') else {
+            break;
+        };
+        let after_eq = after[eq + 1..].trim_start();
+        let Some(stripped) = after_eq.strip_prefix('"') else {
+            break;
+        };
+        let Some(end) = stripped.find('"') else {
+            break;
+        };
+        found.push(stripped[..end].to_string());
+        rest = &stripped[end + 1..];
+    }
+    found
 }
 
 fn permit_constructions(text: &str) -> usize {

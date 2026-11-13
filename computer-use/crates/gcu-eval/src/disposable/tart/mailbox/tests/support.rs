@@ -7,7 +7,7 @@ use super::super::codec::encode_frame;
 use super::super::ids::{AsciiId, AttemptNonce};
 use super::super::ops::{
     Activity, Envelope, InventoryConsume, InventorySnapshot, LeaseRequest, LeaseTerminal,
-    MailboxReply, MsgStatus, Op, Outcome, Payload, ReplyState, RevokeOutcome, RevokeSlot,
+    MailboxReply, MsgStatus, Op, Outcome, Payload, ReplyState, RevokeOutcome, RevokeSlot, SideOp,
     SideResult, SnapStatus, ValueOutcome, LEASE_WINDOW_MS,
 };
 use super::super::seq::{AttemptBinding, Observe, SeqTracker};
@@ -165,4 +165,47 @@ pub(super) fn revoke_ok() -> RevokeOutcome {
 
 pub(super) fn pending_reply(op: Op, request_seq: u64) -> MailboxReply {
     MailboxReply::pending(op, request_seq)
+}
+
+pub(super) fn activity(
+    status: SnapStatus,
+    op: Option<SideOp>,
+    request_seq: u64,
+    result: Option<SideResult>,
+) -> Activity {
+    need(Activity::new(status, op, request_seq, result))
+}
+
+pub(super) fn revoke_row(
+    status: SnapStatus,
+    request_seq: u64,
+    result: Option<RevokeOutcome>,
+) -> RevokeSlot {
+    need(RevokeSlot::new(status, request_seq, result))
+}
+
+pub(super) fn snapshot(active: Activity, revoke: RevokeSlot) -> InventorySnapshot {
+    InventorySnapshot {
+        uid: 501,
+        desktop: id("desk1"),
+        config: id("cfg1"),
+        sample_ms: 10,
+        active,
+        revoke,
+    }
+}
+
+pub(super) fn inv_with(
+    seq: u64,
+    boot: Option<&str>,
+    active: Activity,
+    revoke: RevokeSlot,
+) -> Vec<u8> {
+    encoded(&envelope(
+        Op::Inventory,
+        seq,
+        boot,
+        MsgStatus::Terminal,
+        Payload::InventoryTerminal(snapshot(active, revoke)),
+    ))
 }

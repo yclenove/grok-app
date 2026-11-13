@@ -1,8 +1,12 @@
 //! Pre-created mailbox slots. Publish renames onto a placeholder.
 //!
+//! The volume root holds `mailbox/{host-write,guest-write}` and a sibling
+//! `host-stage`. Only `mailbox` is exported. Guest `.msg.tmp` names are
+//! allowed and are left for the publisher to create.
+//!
 //! A zero-length file is an empty slot ([`SlotBody::Pending`]), not an error.
 //! `ENOENT` and an identity change during the read are transient and counted.
-//! Malformed bytes and an over-cap object stick; the caller stops.
+//! Malformed bytes, a torn size, and an over-cap object stick on that slot.
 
 #[cfg(test)]
 use std::cell::RefCell;
@@ -15,14 +19,17 @@ use super::{Breach, FailedRead, MailboxError};
 #[cfg(unix)]
 use super::sys::{self, FileId, Kind, SysErr};
 #[cfg(unix)]
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
 
-/// Exported host directory. Created by [`prepare_slots`].
+/// Export directory under the volume root. The only guest-visible tree.
+pub const MAILBOX_DIR: &str = "mailbox";
+
+/// Host message directory inside [`MAILBOX_DIR`].
 pub const HOST_WRITE_DIR: &str = "host-write";
 
-/// Exported guest directory. Created by [`prepare_slots`].
+/// Guest message directory inside [`MAILBOX_DIR`].
 pub const GUEST_WRITE_DIR: &str = "guest-write";
 
 /// Host staging directory. Not part of the exported guest tree.
@@ -47,25 +54,56 @@ pub enum SlotRef {
     Guest(Op),
 }
 
-/// Recorded directory and placeholder inodes. Holds no descriptors.
-#[derive(Debug, Clone)]
+/// Recorded directory and host-file identities. Holds no descriptors.
+///
+/// Counters and a sticky failure are kept here, one row per [`SlotRef`].
+/// [`prepare_slots`] starts them at zero. Nothing else replaces or clears them.
+#[derive(Debug)]
 pub struct Layout {
     #[cfg(unix)]
     inner: Inner,
-    #[cfg(not(unix))]
-    #[allow(dead_code)]
-    _unsupported: (),
+    watches: [Watch; SLOT_COUNT],
 }
 
-/// Counters for one slot. A sticky failure stays set.
-#[derive(Debug, Clone, Default)]
-pub struct SlotWatch {
-    /// Transient `ENOENT` results so far.
-    pub retry_absent: u64,
-    /// Reads discarded because the object changed.
-    pub retry_replaced: u64,
-    #[cfg_attr(not(unix), allow(dead_code))]
+const SLOT_COUNT: usize = 15;
+
+#[derive(Debug, Clone, Copy)]
+struct Watch {
+    retry_absent: u64,
+    retry_replaced: u64,
     stuck: bool,
+}
+
+impl Watch {
+    const fn fresh() -> Self {
+        Self {
+            retry_absent: 0,
+            retry_replaced: 0,
+            stuck: false,
+        }
+    }
+}
+
+impl Layout {
+    /// Absent retries for `slot` since this attempt was prepared.
+    #[must_use]
+    pub fn retry_absent(&self, slot: SlotRef) -> u64 {
+        self.watches[slot_index(slot)].retry_absent
+    }
+
+    /// Replaced retries for `slot` since this attempt was prepared.
+    #[must_use]
+    pub fn retry_replaced(&self, slot: SlotRef) -> u64 {
+        self.watches[slot_index(slot)].retry_replaced
+    }
+}
+
+fn slot_index(slot: SlotRef) -> usize {
+    match slot {
+        SlotRef::Host(HostSlot::Binding) => 0,
+        SlotRef::Host(HostSlot::Op(op)) => 1 + op.index(),
+        SlotRef::Guest(op) => 8 + op.index(),
+    }
 }
 
 /// Bytes after the structural checks, or an empty slot.
@@ -82,9 +120,9 @@ pub enum SlotBody {
 pub struct SlotRead {
     /// Pending or a frame.
     pub body: SlotBody,
-    /// [`SlotWatch::retry_absent`] after this call.
+    /// Absent retries for this slot after the call.
     pub retry_absent: u64,
-    /// [`SlotWatch::retry_replaced`] after this call.
+    /// Replaced retries for this slot after the call.
     pub retry_replaced: u64,
 }
 
@@ -158,11 +196,15 @@ struct Inner {
     root_dev: u64,
     root_ino: u64,
     fsid: [u8; 8],
+    mailbox: DirId,
     host_write: DirId,
     guest_write: DirId,
     host_stage: DirId,
-    placeholder: [u64; 8],
-    published: [Option<u64>; 8],
+    /// Placeholder, then the file last published over it.
+    ///
+    /// The inode number alone is not enough: Linux can reuse it for the next
+    /// create in this directory. Size and timestamps catch that substitution.
+    host_file: [FileId; 8],
     binding_published: bool,
 }
 
@@ -227,9 +269,10 @@ fn hit(point: IoPoint) {
     }
 }
 
-/// Create the three directories and every zero-length placeholder.
+/// Create `mailbox`, both message directories, `host-stage`, and the read slots.
 ///
-/// `root` is an already-checked directory descriptor. It is not closed.
+/// `root` is an already-checked volume-root descriptor. It is not closed.
+/// Guest `.msg.tmp` names are not created.
 pub fn prepare_slots(root: i32) -> Result<Layout, MailboxError> {
     #[cfg(not(unix))]
     {
@@ -261,37 +304,41 @@ pub fn publish(
 }
 
 /// Read one pre-created slot. Pending is `Ok`. A breach is [`FailedRead`].
-pub fn read_slot(
-    root: i32,
-    layout: &Layout,
-    slot: SlotRef,
-    watch: &mut SlotWatch,
-) -> Result<SlotRead, FailedRead> {
+///
+/// A sticky failure stays on `layout` for this `slot`.
+pub fn read_slot(root: i32, layout: &mut Layout, slot: SlotRef) -> Result<SlotRead, FailedRead> {
     #[cfg(not(unix))]
     {
         let _ = (root, layout, slot);
-        return Err(failed(MailboxError::Unsupported, watch));
+        return Err(failed(MailboxError::Unsupported, &Watch::fresh()));
     }
     #[cfg(unix)]
     {
+        let index = slot_index(slot);
+        let (inner, watches) = parts(layout);
+        let watch = &mut watches[index];
         if watch.stuck {
             return Err(failed(MailboxError::Sticky, watch));
         }
-        match read_body(root, &layout.inner, slot, watch) {
+        match read_body(root, inner, slot, watch) {
             Ok(body) => Ok(finished(body, watch)),
             Err(error) => Err(failed(error, watch)),
         }
     }
 }
 
+#[cfg(unix)]
+fn parts(layout: &mut Layout) -> (&Inner, &mut [Watch; SLOT_COUNT]) {
+    (&layout.inner, &mut layout.watches)
+}
+
 /// [`read_slot`] plus a decode. A codec failure sticks.
 pub fn read_checked(
     root: i32,
-    layout: &Layout,
+    layout: &mut Layout,
     slot: SlotRef,
-    watch: &mut SlotWatch,
 ) -> Result<CheckedRead, FailedRead> {
-    let read = read_slot(root, layout, slot, watch)?;
+    let read = read_slot(root, layout, slot)?;
     match read.body {
         SlotBody::Pending => Ok(CheckedRead::Pending {
             retry_absent: read.retry_absent,
@@ -311,6 +358,7 @@ pub fn read_checked(
                 retry_replaced: read.retry_replaced,
             }),
             Err(error) => {
+                let watch = &mut layout.watches[slot_index(slot)];
                 watch.stuck = true;
                 Err(failed(error, watch))
             }
@@ -321,12 +369,11 @@ pub fn read_checked(
 /// Read a guest slot and apply [`SeqTracker::observe`]. Codec and sequence errors stick.
 pub fn poll_guest(
     root: i32,
-    layout: &Layout,
+    layout: &mut Layout,
     op: Op,
-    watch: &mut SlotWatch,
     tracker: &mut SeqTracker,
 ) -> Result<GuestPoll, FailedRead> {
-    let read = read_slot(root, layout, SlotRef::Guest(op), watch)?;
+    let read = read_slot(root, layout, SlotRef::Guest(op))?;
     match read.body {
         SlotBody::Pending => Ok(GuestPoll::Pending {
             op,
@@ -352,6 +399,7 @@ pub fn poll_guest(
                 retry_replaced: read.retry_replaced,
             }),
             Err(error) => {
+                let watch = &mut layout.watches[slot_index(SlotRef::Guest(op))];
                 watch.stuck = true;
                 Err(failed(error, watch))
             }
@@ -359,7 +407,7 @@ pub fn poll_guest(
     }
 }
 
-fn finished(body: SlotBody, watch: &SlotWatch) -> SlotRead {
+fn finished(body: SlotBody, watch: &Watch) -> SlotRead {
     SlotRead {
         body,
         retry_absent: watch.retry_absent,
@@ -367,7 +415,7 @@ fn finished(body: SlotBody, watch: &SlotWatch) -> SlotRead {
     }
 }
 
-fn failed(error: MailboxError, watch: &SlotWatch) -> FailedRead {
+fn failed(error: MailboxError, watch: &Watch) -> FailedRead {
     FailedRead {
         error,
         retry_absent: watch.retry_absent,
@@ -376,40 +424,59 @@ fn failed(error: MailboxError, watch: &SlotWatch) -> FailedRead {
 }
 
 #[cfg(unix)]
+const EMPTY_FILE: FileId = FileId {
+    dev: 0,
+    ino: 0,
+    nlink: 0,
+    size: 0,
+    mtime_sec: 0,
+    mtime_nsec: 0,
+    ctime_sec: 0,
+    ctime_nsec: 0,
+    kind: Kind::Other,
+};
+
+#[cfg(unix)]
 fn prepare_unix(root: i32) -> Result<Layout, MailboxError> {
     let root_id = sys::fstat(root).map_err(map_sys)?;
     if root_id.kind != Kind::Dir {
         return Err(Breach::NotDirectory.into());
     }
     let fsid = sys::fsid(root).map_err(map_sys)?;
-    let (host_write, host_fd) = make_dir(root, c"host-write", root_id.dev, fsid)?;
-    let (guest_write, guest_fd) = make_dir(root, c"guest-write", root_id.dev, fsid)?;
+    let (mailbox, mailbox_fd) = make_dir(root, c"mailbox", root_id.dev, fsid)?;
+    let (host_write, host_fd) =
+        make_dir(sys::raw_fd(&mailbox_fd), c"host-write", root_id.dev, fsid)?;
+    let (guest_write, guest_fd) =
+        make_dir(sys::raw_fd(&mailbox_fd), c"guest-write", root_id.dev, fsid)?;
     let (host_stage, stage_fd) = make_dir(root, c"host-stage", root_id.dev, fsid)?;
-    let mut placeholder = [0u64; 8];
+    let mut host_file = [EMPTY_FILE; 8];
     for (index, name) in host_names().iter().enumerate() {
-        let ino = make_file(sys::raw_fd(&host_fd), name, root_id.dev, fsid)?;
-        *placeholder
+        let id = make_file(sys::raw_fd(&host_fd), name, root_id.dev, fsid)?;
+        *host_file
             .get_mut(index)
-            .ok_or(MailboxError::Breach(Breach::Identity))? = ino;
+            .ok_or(MailboxError::Breach(Breach::Identity))? = id;
     }
-    for name in guest_names() {
-        let _ino = make_file(sys::raw_fd(&guest_fd), name, root_id.dev, fsid)?;
+    for name in guest_msgs() {
+        let _id = make_file(sys::raw_fd(&guest_fd), name, root_id.dev, fsid)?;
     }
     sys::fsync_fd(sys::raw_fd(&host_fd)).map_err(map_sys)?;
     sys::fsync_fd(sys::raw_fd(&guest_fd)).map_err(map_sys)?;
+    sys::fsync_fd(sys::raw_fd(&mailbox_fd)).map_err(map_sys)?;
     sys::fsync_fd(sys::raw_fd(&stage_fd)).map_err(map_sys)?;
+    sys::fsync_fd(root).map_err(map_sys)?;
     Ok(Layout {
         inner: Inner {
             root_dev: root_id.dev,
             root_ino: root_id.ino,
             fsid,
+            mailbox,
             host_write,
             guest_write,
             host_stage,
-            placeholder,
-            published: [None; 8],
+            host_file,
             binding_published: false,
         },
+        watches: [Watch::fresh(); SLOT_COUNT],
     })
 }
 
@@ -432,8 +499,20 @@ fn publish_unix(
         return Err(Breach::BindingFrozen.into());
     }
     check_root(root, layout)?;
-    let stage = open_recorded(root, c"host-stage", layout.host_stage, layout.fsid)?;
-    let dest = open_recorded(root, c"host-write", layout.host_write, layout.fsid)?;
+    let mailbox = open_recorded(root, c"mailbox", layout.mailbox, layout)?;
+    let stage = open_recorded(root, c"host-stage", layout.host_stage, layout)?;
+    let dest = open_recorded(
+        sys::raw_fd(&mailbox),
+        c"host-write",
+        layout.host_write,
+        layout,
+    )?;
+    let dirs = PublishDirs {
+        root,
+        mailbox: &mailbox,
+        stage: &stage,
+        dest: &dest,
+    };
     let file_name = host_names()
         .get(index)
         .copied()
@@ -449,22 +528,28 @@ fn publish_unix(
     sys::write_all(sys::raw_fd(&tmp), frame).map_err(map_sys)?;
     sys::fsync_fd(sys::raw_fd(&tmp)).map_err(map_sys)?;
     hit(IoPoint::AfterFsync);
-    if !source_intact(&stage, &tmp, tmp_name, &born, len, layout)? {
+    if !source_intact(&dirs, &tmp, tmp_name, &born, len, layout)? {
         return Err(Breach::Identity.into());
     }
+    // The write and fsync window is closed only by this check, immediately
+    // before the rename. An absent or substituted target is still a breach.
+    confirm_publish(&dirs, layout)?;
+    let again = stat_name(sys::raw_fd(&dest), file_name)?;
+    accept_target(&again, layout, index)?;
     sys::rename_at(sys::raw_fd(&stage), tmp_name, sys::raw_fd(&dest), file_name)
         .map_err(map_sys)?;
     sys::fsync_fd(sys::raw_fd(&dest)).map_err(map_sys)?;
     sys::fsync_fd(sys::raw_fd(&stage)).map_err(map_sys)?;
-    if !published_intact(&stage, &dest, &tmp, file_name, &born, len, layout)? {
+    confirm_publish(&dirs, layout)?;
+    if !published_intact(&dirs, &tmp, file_name, &born, len, layout)? {
         return Err(Breach::Identity.into());
     }
-    let ino = sys::fstat(sys::raw_fd(&tmp)).map_err(map_sys)?.ino;
-    let published = layout
-        .published
+    let published = sys::fstat(sys::raw_fd(&tmp)).map_err(map_sys)?;
+    let recorded = layout
+        .host_file
         .get_mut(index)
         .ok_or(MailboxError::Breach(Breach::Identity))?;
-    *published = Some(ino);
+    *recorded = published;
     if matches!(slot, HostSlot::Binding) {
         layout.binding_published = true;
     }
@@ -476,14 +561,27 @@ fn read_body(
     root: i32,
     layout: &Inner,
     slot: SlotRef,
-    watch: &mut SlotWatch,
+    watch: &mut Watch,
 ) -> Result<SlotBody, MailboxError> {
     check_root(root, layout)?;
+    let mailbox = open_recorded(root, c"mailbox", layout.mailbox, layout)?;
+    preflight(sys::raw_fd(&mailbox), &mailbox_allow(), Kind::Dir)?;
     let (dir_name, expect, file_name) = locate(slot, layout)?;
-    let dir = open_recorded(root, dir_name, expect, layout.fsid)?;
+    let dir = open_recorded(sys::raw_fd(&mailbox), dir_name, expect, layout)?;
+    match slot {
+        SlotRef::Host(_) => preflight(sys::raw_fd(&dir), &host_names(), Kind::File)?,
+        SlotRef::Guest(_) => preflight(sys::raw_fd(&dir), &guest_allow(), Kind::File)?,
+    }
+    let chain = ReadChain {
+        root,
+        mailbox: &mailbox,
+        dir: &dir,
+        dir_name,
+        dir_id: expect,
+    };
     let pre = match sys::fstat_at(sys::raw_fd(&dir), file_name) {
         Ok(id) => id,
-        Err(SysErr::NoEnt) => return absent(&dir, expect, layout, watch),
+        Err(SysErr::NoEnt) => return absent(&chain, layout, watch),
         Err(SysErr::Loop) => return Err(Breach::Link.into()),
         Err(err) => return Err(map_sys(err)),
     };
@@ -492,14 +590,14 @@ fn read_body(
     }
     let fd = match sys::open_read(sys::raw_fd(&dir), file_name) {
         Ok(fd) => fd,
-        Err(SysErr::NoEnt) => return absent(&dir, expect, layout, watch),
+        Err(SysErr::NoEnt) => return absent(&chain, layout, watch),
         Err(SysErr::Loop) => return Err(Breach::Link.into()),
         Err(SysErr::Special) => return Err(Breach::NotRegular.into()),
         Err(err) => return Err(map_sys(err)),
     };
     let opened = checked_file(&fd, layout)?;
     if opened.size == 0 {
-        return if stable(&dir, &fd, file_name, &opened, expect, layout)? {
+        return if stable(&chain, &fd, file_name, &opened, layout)? {
             Ok(SlotBody::Pending)
         } else {
             replaced(watch)
@@ -507,6 +605,9 @@ fn read_body(
     }
     let cap = u64::try_from(FRAME_MAX).map_err(|_| MailboxError::Breach(Breach::FrameSize))?;
     if opened.size > cap {
+        if !stable(&chain, &fd, file_name, &opened, layout)? {
+            return replaced(watch);
+        }
         watch.stuck = true;
         return Err(Breach::Size.into());
     }
@@ -514,11 +615,13 @@ fn read_body(
     if !bytes.is_empty() {
         hit(IoPoint::AfterRead);
     }
-    if !stable(&dir, &fd, file_name, &opened, expect, layout)? {
+    if !stable(&chain, &fd, file_name, &opened, layout)? {
         return replaced(watch);
     }
-    if u64::try_from(bytes.len()).ok() != Some(opened.size) {
-        return replaced(watch);
+    let got = u64::try_from(bytes.len()).map_err(|_| MailboxError::Io)?;
+    if got != opened.size {
+        watch.stuck = true;
+        return Err(Breach::Torn.into());
     }
     Ok(SlotBody::Frame(bytes))
 }
@@ -551,7 +654,7 @@ fn make_dir(
 }
 
 #[cfg(unix)]
-fn make_file(dir: i32, name: &CStr, dev: u64, fsid: [u8; 8]) -> Result<u64, MailboxError> {
+fn make_file(dir: i32, name: &CStr, dev: u64, fsid: [u8; 8]) -> Result<FileId, MailboxError> {
     let fd = match sys::open_create(dir, name) {
         Ok(fd) => fd,
         Err(SysErr::Exist) => return Err(Breach::Exists.into()),
@@ -562,7 +665,7 @@ fn make_file(dir: i32, name: &CStr, dev: u64, fsid: [u8; 8]) -> Result<u64, Mail
         return Err(Breach::Identity.into());
     }
     same_fs(sys::raw_fd(&fd), fsid)?;
-    Ok(id.ino)
+    Ok(id)
 }
 
 #[cfg(unix)]
@@ -576,28 +679,108 @@ fn check_root(root: i32, layout: &Inner) -> Result<(), MailboxError> {
 
 #[cfg(unix)]
 fn open_recorded(
-    root: i32,
+    parent: i32,
     name: &CStr,
     expect: DirId,
-    fsid: [u8; 8],
+    layout: &Inner,
 ) -> Result<OwnedFd, MailboxError> {
-    let fd = match sys::open_dir(root, name) {
+    let fd = match sys::open_dir(parent, name) {
         Ok(fd) => fd,
         Err(SysErr::Loop) => return Err(Breach::Link.into()),
         Err(SysErr::NotDir) => return Err(Breach::NotDirectory.into()),
         Err(err) => return Err(map_sys(err)),
     };
-    dir_ok(&fd, expect, fsid)?;
+    confirm_named(parent, name, &fd, expect, layout)?;
     Ok(fd)
 }
 
 #[cfg(unix)]
-fn dir_ok(fd: &OwnedFd, expect: DirId, fsid: [u8; 8]) -> Result<(), MailboxError> {
-    let id = sys::fstat(sys::raw_fd(fd)).map_err(map_sys)?;
-    if id.kind != Kind::Dir || id.dev != expect.dev || id.ino != expect.ino {
+struct PublishDirs<'a> {
+    root: i32,
+    mailbox: &'a OwnedFd,
+    stage: &'a OwnedFd,
+    dest: &'a OwnedFd,
+}
+
+#[cfg(unix)]
+struct ReadChain<'a> {
+    root: i32,
+    mailbox: &'a OwnedFd,
+    dir: &'a OwnedFd,
+    dir_name: &'static CStr,
+    dir_id: DirId,
+}
+
+/// The name in `parent` must still be the recorded directory and this FD.
+#[cfg(unix)]
+fn confirm_named(
+    parent: i32,
+    name: &CStr,
+    fd: &OwnedFd,
+    expect: DirId,
+    layout: &Inner,
+) -> Result<(), MailboxError> {
+    let named = match sys::fstat_at(parent, name) {
+        Ok(id) => id,
+        Err(SysErr::NoEnt) => return Err(Breach::Identity.into()),
+        Err(SysErr::Loop) => return Err(Breach::Link.into()),
+        Err(err) => return Err(map_sys(err)),
+    };
+    if named.kind == Kind::Link {
+        return Err(Breach::Link.into());
+    }
+    if named.kind != Kind::Dir {
+        return Err(Breach::NotDirectory.into());
+    }
+    let opened = sys::fstat(sys::raw_fd(fd)).map_err(map_sys)?;
+    if opened.kind != Kind::Dir
+        || opened.dev != expect.dev
+        || opened.ino != expect.ino
+        || named.dev != opened.dev
+        || named.ino != opened.ino
+    {
         return Err(Breach::Identity.into());
     }
-    same_fs(sys::raw_fd(fd), fsid)
+    same_fs(sys::raw_fd(fd), layout.fsid)
+}
+
+#[cfg(unix)]
+fn confirm_publish(dirs: &PublishDirs<'_>, layout: &Inner) -> Result<(), MailboxError> {
+    check_root(dirs.root, layout)?;
+    confirm_named(dirs.root, c"mailbox", dirs.mailbox, layout.mailbox, layout)?;
+    confirm_named(
+        dirs.root,
+        c"host-stage",
+        dirs.stage,
+        layout.host_stage,
+        layout,
+    )?;
+    confirm_named(
+        sys::raw_fd(dirs.mailbox),
+        c"host-write",
+        dirs.dest,
+        layout.host_write,
+        layout,
+    )
+}
+
+#[cfg(unix)]
+fn confirm_read(chain: &ReadChain<'_>, layout: &Inner) -> Result<(), MailboxError> {
+    check_root(chain.root, layout)?;
+    confirm_named(
+        chain.root,
+        c"mailbox",
+        chain.mailbox,
+        layout.mailbox,
+        layout,
+    )?;
+    confirm_named(
+        sys::raw_fd(chain.mailbox),
+        chain.dir_name,
+        chain.dir,
+        chain.dir_id,
+        layout,
+    )
 }
 
 #[cfg(unix)]
@@ -634,18 +817,12 @@ fn accept_target(id: &FileId, layout: &Inner, index: usize) -> Result<(), Mailbo
     if id.dev != layout.root_dev {
         return Err(Breach::Dev.into());
     }
-    let place = layout
-        .placeholder
+    let expect = layout
+        .host_file
         .get(index)
         .copied()
         .ok_or(MailboxError::Breach(Breach::Identity))?;
-    let expect = layout
-        .published
-        .get(index)
-        .copied()
-        .ok_or(MailboxError::Breach(Breach::Identity))?
-        .unwrap_or(place);
-    if id.ino == expect {
+    if same_file(id, &expect) {
         Ok(())
     } else {
         Err(Breach::Identity.into())
@@ -674,16 +851,16 @@ fn require_fresh(fd: &OwnedFd, layout: &Inner) -> Result<FileId, MailboxError> {
 
 #[cfg(unix)]
 fn source_intact(
-    stage: &OwnedFd,
+    dirs: &PublishDirs<'_>,
     tmp: &OwnedFd,
     name: &CStr,
     born: &FileId,
     len: u64,
     layout: &Inner,
 ) -> Result<bool, MailboxError> {
-    dir_ok(stage, layout.host_stage, layout.fsid)?;
+    confirm_publish(dirs, layout)?;
     let after = sys::fstat(sys::raw_fd(tmp)).map_err(map_sys)?;
-    let named = match sys::fstat_at(sys::raw_fd(stage), name) {
+    let named = match sys::fstat_at(sys::raw_fd(dirs.stage), name) {
         Ok(id) => id,
         Err(_) => return Ok(false),
     };
@@ -697,17 +874,15 @@ fn source_intact(
 
 #[cfg(unix)]
 fn published_intact(
-    stage: &OwnedFd,
-    dest: &OwnedFd,
+    dirs: &PublishDirs<'_>,
     tmp: &OwnedFd,
     name: &CStr,
     born: &FileId,
     len: u64,
     layout: &Inner,
 ) -> Result<bool, MailboxError> {
-    dir_ok(stage, layout.host_stage, layout.fsid)?;
-    dir_ok(dest, layout.host_write, layout.fsid)?;
-    let named = match sys::fstat_at(sys::raw_fd(dest), name) {
+    confirm_publish(dirs, layout)?;
+    let named = match sys::fstat_at(sys::raw_fd(dirs.dest), name) {
         Ok(id) => id,
         Err(_) => return Ok(false),
     };
@@ -739,16 +914,15 @@ fn checked_file(fd: &OwnedFd, layout: &Inner) -> Result<FileId, MailboxError> {
 
 #[cfg(unix)]
 fn stable(
-    dir: &OwnedFd,
+    chain: &ReadChain<'_>,
     fd: &OwnedFd,
     name: &CStr,
     before: &FileId,
-    expect: DirId,
     layout: &Inner,
 ) -> Result<bool, MailboxError> {
-    dir_ok(dir, expect, layout.fsid)?;
+    confirm_read(chain, layout)?;
     let after = sys::fstat(sys::raw_fd(fd)).map_err(map_sys)?;
-    let named = match sys::fstat_at(sys::raw_fd(dir), name) {
+    let named = match sys::fstat_at(sys::raw_fd(chain.dir), name) {
         Ok(id) => id,
         Err(SysErr::NoEnt) => return Ok(false),
         Err(err) => return Err(map_sys(err)),
@@ -758,18 +932,17 @@ fn stable(
 
 #[cfg(unix)]
 fn absent(
-    dir: &OwnedFd,
-    expect: DirId,
+    chain: &ReadChain<'_>,
     layout: &Inner,
-    watch: &mut SlotWatch,
+    watch: &mut Watch,
 ) -> Result<SlotBody, MailboxError> {
-    dir_ok(dir, expect, layout.fsid)?;
+    confirm_read(chain, layout)?;
     bump(&mut watch.retry_absent)?;
     Ok(SlotBody::Pending)
 }
 
 #[cfg(unix)]
-fn replaced(watch: &mut SlotWatch) -> Result<SlotBody, MailboxError> {
+fn replaced(watch: &mut Watch) -> Result<SlotBody, MailboxError> {
     bump(&mut watch.retry_replaced)?;
     Ok(SlotBody::Pending)
 }
@@ -884,8 +1057,45 @@ fn guest_msgs() -> [&'static CStr; 7] {
 }
 
 #[cfg(unix)]
-fn guest_names() -> impl Iterator<Item = &'static CStr> {
-    guest_msgs().into_iter().chain(guest_tmps())
+fn mailbox_allow() -> [&'static CStr; 2] {
+    [c"host-write", c"guest-write"]
+}
+
+#[cfg(unix)]
+fn guest_allow() -> [&'static CStr; 14] {
+    let msg = guest_msgs();
+    let tmp = guest_tmps();
+    [
+        msg[0], msg[1], msg[2], msg[3], msg[4], msg[5], msg[6], tmp[0], tmp[1], tmp[2], tmp[3],
+        tmp[4], tmp[5], tmp[6],
+    ]
+}
+
+#[cfg(unix)]
+fn preflight(dir: i32, allow: &[&CStr], expect_kind: Kind) -> Result<(), MailboxError> {
+    let limit = allow.len().saturating_add(1);
+    let names = sys::list_limited(dir, limit).map_err(map_sys)?;
+    if names.len() > allow.len() {
+        return Err(Breach::Identity.into());
+    }
+    for name in names {
+        if !allow.iter().any(|cand| cand.to_bytes() == name.as_slice()) {
+            return Err(Breach::Identity.into());
+        }
+        let owned = CString::new(name).map_err(|_| MailboxError::Io)?;
+        let id = stat_name(dir, &owned)?;
+        if id.kind == Kind::Link {
+            return Err(Breach::Link.into());
+        }
+        if id.kind != expect_kind {
+            return Err(if expect_kind == Kind::Dir {
+                Breach::NotDirectory.into()
+            } else {
+                Breach::NotRegular.into()
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

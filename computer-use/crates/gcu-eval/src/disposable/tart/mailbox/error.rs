@@ -50,13 +50,16 @@ pub enum Breach {
     /// The file is larger than the 4096-byte frame cap.
     #[error("mailbox object exceeds 4096 bytes")]
     Size,
+    /// Metadata stayed put, but the byte count did not match that size.
+    #[error("mailbox object byte count does not match its stable size")]
+    Torn,
     /// The object is not on the prepared device.
     #[error("mailbox object is on an unexpected device")]
     Dev,
     /// `f_fsid` does not match the prepared directory.
     #[error("mailbox object is on an unexpected filesystem")]
     Fsid,
-    /// The name does not refer to the placeholder or the last published inode.
+    /// The name does not refer to the recorded placeholder or last published file.
     #[error("mailbox object identity does not match")]
     Identity,
     /// `binding.msg` was already published.

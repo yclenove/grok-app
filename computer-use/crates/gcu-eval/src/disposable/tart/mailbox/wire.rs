@@ -1,5 +1,6 @@
 //! Closed JSON objects. Field order is the struct order. No extra keys.
 
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -182,10 +183,14 @@ fn payload_to(env: &Envelope) -> Result<OutPayload<'_>, CodecFault> {
 
 fn snapshot_from(value: Value) -> Result<InventorySnapshot, CodecFault> {
     let wire: SnapIn = take(value)?;
-    let result = match (wire.active_op, wire.active_result) {
+    // A pending row is an op with an explicit null result. `Activity::new`
+    // still rejects a missing result on terminal, and a result with no op.
+    let active_result = wire.active_result;
+    let result = match (wire.active_op, active_result) {
         (None, None) => None,
+        (None, Some(_)) => return Err(CodecFault::Shape),
+        (Some(_), None) => None,
         (Some(op), Some(body)) => Some(side_from(op, body)?),
-        _ => return Err(CodecFault::Shape),
     };
     let revoke_result = match wire.revoke_result {
         None => None,
@@ -357,6 +362,16 @@ fn take<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, CodecFault> {
     serde_json::from_value(value).map_err(map_serde)
 }
 
+/// JSON null is accepted. A missing key is not: serde would otherwise turn
+/// `Option` into `None` for both, and the schema requires an explicit null.
+fn required_null<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawEnv {
@@ -364,6 +379,7 @@ struct RawEnv {
     run_id: String,
     attempt_nonce: String,
     vm_config_digest: String,
+    #[serde(deserialize_with = "required_null")]
     boot_id: Option<String>,
     op: Op,
     seq: u64,
@@ -405,6 +421,7 @@ enum OutPayload<'a> {
 #[derive(Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InvReq {
+    #[serde(deserialize_with = "required_null")]
     consume_op: Option<SideOp>,
     consume_request_seq: u64,
     consume_revoke_seq: u64,
@@ -430,6 +447,7 @@ struct Empty {}
 #[serde(deny_unknown_fields)]
 struct BootWire {
     outcome: Outcome,
+    #[serde(deserialize_with = "required_null")]
     native_ack_generation: Option<u64>,
 }
 
@@ -437,6 +455,7 @@ struct BootWire {
 #[serde(deny_unknown_fields)]
 struct LoginWire {
     outcome: Outcome,
+    #[serde(deserialize_with = "required_null")]
     login: Option<LoginState>,
 }
 
@@ -444,6 +463,7 @@ struct LoginWire {
 #[serde(deny_unknown_fields)]
 struct RunWire {
     outcome: Outcome,
+    #[serde(deserialize_with = "required_null")]
     score: Option<RunScore>,
 }
 
@@ -466,8 +486,11 @@ struct LeaseTerm {
 #[serde(deny_unknown_fields)]
 struct RevokeWire {
     outcome: Outcome,
+    #[serde(deserialize_with = "required_null")]
     scope_revoked: Option<bool>,
+    #[serde(deserialize_with = "required_null")]
     input_released: Option<bool>,
+    #[serde(deserialize_with = "required_null")]
     tree_exited: Option<bool>,
 }
 
@@ -478,12 +501,15 @@ struct SnapIn {
     desktop: String,
     config: String,
     sample_ms: u64,
+    #[serde(deserialize_with = "required_null")]
     active_op: Option<SideOp>,
     active_request_seq: u64,
     active_status: SnapStatus,
+    #[serde(deserialize_with = "required_null")]
     active_result: Option<Value>,
     revoke_request_seq: u64,
     revoke_status: SnapStatus,
+    #[serde(deserialize_with = "required_null")]
     revoke_result: Option<RevokeWire>,
 }
 

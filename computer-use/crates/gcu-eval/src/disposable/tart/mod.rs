@@ -52,9 +52,9 @@ pub use mailbox::{
     CodecFault, Envelope, FailedRead, GuestPoll, HostSlot, InventoryConsume, InventorySnapshot,
     Layout, LeaseRequest, LeaseTerminal, LoginState, MailboxError, MailboxReply, MsgStatus,
     Observe, Op, Outcome, Payload, ReplyResult, ReplyState, RevokeOutcome, RevokeSlot, RunScore,
-    SeqFault, SeqTracker, SideOp, SideResult, SlotBody, SlotRead, SlotRef, SlotWatch, SnapStatus,
-    ValueOutcome, FRAME_MAX, GUEST_WRITE_DIR, HOST_WRITE_DIR, LEASE_WINDOW_MS, MAX_JSON_ARRAY,
-    MAX_JSON_DEPTH, MAX_POLLS,
+    SeqFault, SeqTracker, SideOp, SideResult, SlotBody, SlotRead, SlotRef, SnapStatus,
+    ValueOutcome, FRAME_MAX, GUEST_WRITE_DIR, HOST_WRITE_DIR, LEASE_WINDOW_MS, MAILBOX_DIR,
+    MAX_JSON_ARRAY, MAX_JSON_DEPTH, MAX_POLLS,
 };
 pub use manifest::{Digest, InstallManifest, ManifestError, DIGEST_LEN};
 pub use output::{

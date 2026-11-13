@@ -71,12 +71,14 @@ struct Seen {
     bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SentLease {
     seq: u64,
     inventory_request_seq: u64,
     sample_ms: u64,
     until_ms: u64,
+    /// First accepted ACK bytes for this grant, including a stale first sighting.
+    ack: Option<Vec<u8>>,
 }
 
 impl SeqTracker {
@@ -105,7 +107,7 @@ impl SeqTracker {
         let advanced = succ(env.seq).map_err(MailboxError::Sequence)?;
         let grant = lease_grant(&env)?;
         {
-            // Previous reply bytes stay so an exact stale frame remains pending.
+            // Previous reply bytes stay so an exact stale frame is recognized.
             let slot = &mut self.ops[env.op.index()];
             slot.expected = advanced;
             slot.sent = env.seq;
@@ -232,8 +234,15 @@ impl SeqTracker {
         bytes: &[u8],
         introduced: Option<AsciiId>,
     ) -> Result<Observe, MailboxError> {
+        // These four finish in an inventory row. M4 consumes that row. The
+        // slot itself stays at accepted and never completes from its own file.
+        if matches!(env.op, Op::Bootstrap | Op::Login | Op::Run | Op::Revoke)
+            && env.status == MsgStatus::Terminal
+        {
+            return Err(MailboxError::Sequence(SeqFault::Status));
+        }
         if self.replay(env.op, env.seq, bytes) {
-            return Ok(pending(env));
+            return Ok(self.pending_now(env.op));
         }
         let next = {
             let slot = &self.ops[env.op.index()];
@@ -244,9 +253,15 @@ impl SeqTracker {
                     MailboxError::Sequence(SeqFault::WrongRequest)
                 });
             }
-            match (slot.phase, env.status) {
-                (Phase::Open, MsgStatus::Accepted) => Phase::Accepted,
-                (Phase::Open | Phase::Accepted, MsgStatus::Terminal) => Phase::Terminal,
+            match (env.op, slot.phase, env.status) {
+                (
+                    Op::Bootstrap | Op::Login | Op::Run | Op::Revoke,
+                    Phase::Open,
+                    MsgStatus::Accepted,
+                ) => Phase::Accepted,
+                (Op::Inventory | Op::Probe, Phase::Open | Phase::Accepted, MsgStatus::Terminal) => {
+                    Phase::Terminal
+                }
                 _ => return Err(MailboxError::Sequence(SeqFault::Changed)),
             }
         };
@@ -270,17 +285,27 @@ impl SeqTracker {
         let Payload::LeaseTerminal(term) = &env.payload else {
             return Err(MailboxError::Malformed(CodecFault::Shape));
         };
-        let Some(grant) = self.leases.iter().find(|row| row.seq == env.seq).copied() else {
+        let Some(index) = self.leases.iter().position(|row| row.seq == env.seq) else {
             return Err(MailboxError::Sequence(SeqFault::LeaseMismatch));
         };
-        if !same_grant(grant, term) {
+        if !same_grant(&self.leases[index], term) {
             return Err(MailboxError::Sequence(SeqFault::LeaseMismatch));
+        }
+        let ack_changed = self.leases[index]
+            .ack
+            .as_ref()
+            .is_some_and(|seen| seen.as_slice() != bytes);
+        if ack_changed {
+            return Err(MailboxError::Sequence(SeqFault::Changed));
+        }
+        if self.leases[index].ack.is_none() {
+            self.leases[index].ack = Some(bytes.to_vec());
         }
         if env.seq != self.ops[Op::Lease.index()].sent {
             return Ok(Observe::DiscardedLease { seq: env.seq });
         }
         if self.replay(Op::Lease, env.seq, bytes) {
-            return Ok(pending(env));
+            return Ok(self.pending_now(Op::Lease));
         }
         if self.ops[Op::Lease.index()].phase == Phase::Terminal {
             return Err(MailboxError::Sequence(SeqFault::Changed));
@@ -300,6 +325,14 @@ impl SeqTracker {
             .seen
             .iter()
             .any(|seen| seen.seq == seq && seen.bytes == bytes)
+    }
+
+    /// Old identical bytes keep waiting for the request that is in flight now.
+    fn pending_now(&self, op: Op) -> Observe {
+        Observe::Pending {
+            op,
+            request_seq: self.outstanding(op),
+        }
     }
 
     fn same_binding(&self, env: &Envelope) -> bool {
@@ -330,20 +363,14 @@ fn lease_grant(env: &Envelope) -> Result<Option<SentLease>, MailboxError> {
         inventory_request_seq: req.inventory_request_seq,
         sample_ms: req.sample_ms,
         until_ms,
+        ack: None,
     }))
 }
 
-fn same_grant(grant: SentLease, term: &LeaseTerminal) -> bool {
+fn same_grant(grant: &SentLease, term: &LeaseTerminal) -> bool {
     grant.inventory_request_seq == term.inventory_request_seq
         && grant.sample_ms == term.sample_ms
         && grant.until_ms == term.until_ms
-}
-
-fn pending(env: &Envelope) -> Observe {
-    Observe::Pending {
-        op: env.op,
-        request_seq: env.request_seq,
-    }
 }
 
 fn into_reply(env: &Envelope) -> Result<MailboxReply, MailboxError> {
