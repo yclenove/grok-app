@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Codec rejects. Each case is one closed failure.
 
 use super::super::codec::{decode_frame, decode_reply, encode_reply};

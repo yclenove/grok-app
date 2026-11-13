@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Sequence, boot, and lease rules. No filesystem.
 
 use super::super::codec::encode_frame;

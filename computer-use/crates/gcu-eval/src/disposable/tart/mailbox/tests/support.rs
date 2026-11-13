@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Shared mailbox fixtures. No filesystem and no clock sleep.
 
 use crate::disposable::tart::manifest::Digest;

@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Host publish and guest read against a private temporary directory.
 //!
 //! Nothing here calls `hdiutil`, Tart, or ssh. The directory is removed on drop.

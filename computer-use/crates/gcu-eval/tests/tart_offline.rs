@@ -921,12 +921,15 @@ fn sources_have_no_process_launch_or_open_ended_wait() -> Result<(), String> {
         let rel = rel_under(&root, path)?;
         // Unsafe stays in mailbox/sys.rs. Filesystem and env access stay in the
         // known cfg(test) mailbox sources. Process launch and waits stay forbidden.
-        // The only module path attribute is mailbox/mod.rs naming sys.rs, so no
-        // production module can re-root itself onto an exempt source.
-        if has_foreign_path_attr(&rel, &text) {
-            return Err(format!("{} has a module path attribute", path.display()));
-        }
         let exempt = scan_exempt(&rel);
+        // Each exempt test source gates itself, so a production module that
+        // reaches it through any `#[path]` form compiles it to nothing.
+        if exempt == ScanExempt::FsEnv && !exempt_source_is_gated(&text) {
+            return Err(format!(
+                "{} does not start with #![cfg(test)]",
+                path.display()
+            ));
+        }
         for needle in forbidden {
             if exempt == ScanExempt::Unsafe && needle == "unsafe" {
                 continue;
@@ -1019,46 +1022,19 @@ fn mailbox_scan_exemptions_are_exact() -> Result<(), String> {
             return Err(format!("backslash name {rel:?} was exempted"));
         }
     }
-    let foreign = [
-        (
-            "mailbox/ops.rs",
-            "#[path = \"tests/slots.rs\"]\nmod slots;\n",
-        ),
-        (
-            "machine/live.rs",
-            "#[path = \"../mailbox/tests/codec.rs\"]\nmod codec;\n",
-        ),
-        (
-            "mailbox/mod.rs",
-            "#[path = \"tests\"]\nmod live {\n    mod support;\n}\n",
-        ),
-        (
-            "mailbox/mod.rs",
-            "#[path = r\"tests/mod.rs\"]\nmod live;\n#[path = \"tests/seq.rs\"]\nmod seq;\n",
-        ),
-        (
-            "mailbox/mod.rs",
-            "#[cfg_attr(test, path = \"tests/slots.rs\")]\nmod slots;\n",
-        ),
-        (
-            "mailbox/mod.rs",
-            "# [ path = \"tests/support.rs\" ]\nmod support;\n",
-        ),
-        (
-            "mailbox/ops.rs",
-            "#[cfg(unix)]\n#[path = \"sys.rs\"]\nmod sys;\n",
-        ),
-    ];
-    for (rel, text) in foreign {
-        if !has_foreign_path_attr(Path::new(rel), text) {
-            return Err(format!("{rel}: path attribute was allowed: {text:?}"));
-        }
+    if !exempt_source_is_gated("#![cfg(test)]\n//! fixtures\n") {
+        return Err("a gated exempt source was rejected".into());
     }
-    if has_foreign_path_attr(
-        Path::new("mailbox/mod.rs"),
-        "#[cfg(unix)]\n#[path = \"sys.rs\"]\nmod sys;\nlet path = 1;\n",
-    ) {
-        return Err("mailbox/mod.rs naming sys.rs was rejected".into());
+    for text in [
+        "//! fixtures\n#![cfg(test)]\n",
+        "/* #![cfg(test)] */\nuse std::fs;\n",
+        " #![cfg(test)]\n",
+        "#![cfg(all())]\n",
+        "",
+    ] {
+        if exempt_source_is_gated(text) {
+            return Err(format!("ungated exempt source accepted: {text:?}"));
+        }
     }
     if !tests_module_is_cfg_gated("#[cfg(test)]\nmod tests;\n") {
         return Err("cfg(test) mod tests was rejected".into());
@@ -1121,27 +1097,9 @@ fn tests_module_is_cfg_gated(text: &str) -> bool {
     saw
 }
 
-// Any attribute that mentions `path=` (plain, raw string, cfg_attr, spaced
-// tokens, inner attribute) except the exact sys.rs declaration in mailbox/mod.rs.
-fn has_foreign_path_attr(rel: &Path, text: &str) -> bool {
-    let flat: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    let allowed = rel == Path::new("mailbox/mod.rs");
-    let mut rest = flat.as_str();
-    while let Some(pos) = rest.find('#') {
-        let after = &rest[pos + 1..];
-        let body = after.strip_prefix('!').unwrap_or(after);
-        if let Some(inner) = body.strip_prefix('[') {
-            let attr = match inner.find(']') {
-                Some(end) => &inner[..end],
-                None => inner,
-            };
-            if attr.contains("path=") && !(allowed && attr == "path=\"sys.rs\"") {
-                return true;
-            }
-        }
-        rest = after;
-    }
-    false
+// Line 1 exactly, so no comment or string can stand in for the attribute.
+fn exempt_source_is_gated(text: &str) -> bool {
+    text.lines().next() == Some("#![cfg(test)]")
 }
 
 fn permit_constructions(text: &str) -> usize {
