@@ -1062,8 +1062,7 @@ static_checks() {
   grep -F -q 'h1_independent_of_ip' "$RUNBOOK" || grep -F -q 'unknown' "$RUNBOOK"
   if grep -F -q 'reachable' "$RUNBOOK"; then die "runbook reachable"; fi
   if grep -F -q 'blocked' "$RUNBOOK"; then die "runbook blocked"; fi
-  # The C8 owner-prep host path is the one allowed /Volumes/ mention. Any other one is still rejected.
-  if grep -F '/Volumes/' "$RUNBOOK" | grep -v -F 'TART_HOME="/Volumes/Mini扩展/VMs/tart"' | grep -q .; then die "runbook volume"; fi
+  if grep -F -q '/Volumes/' "$RUNBOOK"; then die "runbook volume"; fi
   if grep -F -q '2400' "$RUNBOOK"; then die "runbook old budget"; fi
 }
 
