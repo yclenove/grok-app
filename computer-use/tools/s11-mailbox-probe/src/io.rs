@@ -587,6 +587,7 @@ impl Held {
         }
     }
     /// `pwrite` of exactly 64 bytes at offset 0, then `fsync` on this fd.
+    /// The test hook runs after the bytes are written and before `fsync`.
     pub(crate) fn pwrite64(&self, bytes: &[u8; 64]) -> Result<(), RdErr> {
         let mut off = 0usize;
         while off < 64 {
@@ -597,6 +598,7 @@ impl Held {
                 Err(_) => return Err(RdErr::Io),
             }
         }
+        io_hook();
         if unsafe { fsync(self.file.as_raw_fd()) } != 0 {
             return Err(RdErr::Io);
         }

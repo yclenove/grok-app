@@ -9,9 +9,15 @@
 //!
 //! `fd` holds one fd and `pread`s every 5 ms. `reopen` opens, reads, and closes
 //! on each poll. The writer `pwrite`s 64 bytes at offset 0 and then `fsync`s.
-//! The host's round-trip starts when that `fsync` returns and ends when the
-//! matching pong is read, on the host clock. The guest's gap starts when its
-//! pong `fsync` returns and ends when the next ping is read, on the guest clock.
+//! Before sequence 1, the guest writes canonical `seq=0` on the pre-created
+//! `ip-gh` and the host waits for it. That wait is outside the round-trip
+//! samples. The host's round-trip starts immediately before `pwrite` and ends
+//! when the matching pong is read, so the write and `fsync` are inside the
+//! sample, on the host clock. The time from `fsync` returning to that read is
+//! a separate residual. A hit counts only while the original round deadline
+//! and the command deadline are still ahead; neither is renewed. The guest's
+//! gap starts when its pong `fsync` returns and ends when the next ping is
+//! read, on the guest clock, and that pong counts only under the same check.
 use super::c1::samples_text;
 use super::{finish, open_root, slot, Opt};
 use crate::io::{self, Dir, Held, RdErr};
@@ -41,8 +47,8 @@ fn encode(seq: u32) -> [u8; 64] {
 }
 
 /// `Some(seq)` only for a canonical record. Anything else is a tear, including
-/// the all-zero placeholder. `seq=0` parses (it is the stale value before 1)
-/// but the probe never writes it.
+/// the all-zero placeholder. `seq=0` is the guest-ready mark, written only on
+/// `ip-gh`. While a round waits for seq 1 it is the previous value, not a tear.
 fn parse_seq(buf: &[u8; 64]) -> Option<u32> {
     if buf[63] != b'\n' {
         return None;
@@ -100,12 +106,13 @@ enum WaitErr {
     Skip { torn: u64 },
     Io { torn: u64 },
     Nofollow { torn: u64 },
+    PeerNotReady { torn: u64 },
 }
 
 impl WaitErr {
     fn torn(&self) -> u64 {
         match self {
-            WaitErr::Timeout { torn } | WaitErr::Deadline { torn } | WaitErr::Rollback { torn } | WaitErr::Skip { torn } | WaitErr::Io { torn } | WaitErr::Nofollow { torn } => *torn,
+            WaitErr::Timeout { torn } | WaitErr::Deadline { torn } | WaitErr::Rollback { torn } | WaitErr::Skip { torn } | WaitErr::Io { torn } | WaitErr::Nofollow { torn } | WaitErr::PeerNotReady { torn } => *torn,
         }
     }
     fn outcome(&self) -> (&'static str, &'static str) {
@@ -116,6 +123,7 @@ impl WaitErr {
             WaitErr::Skip { .. } => ("failed", "skip"),
             WaitErr::Io { .. } => ("unknown", "io"),
             WaitErr::Nofollow { .. } => ("failed", "nofollow"),
+            WaitErr::PeerNotReady { .. } => ("unknown", "peer-not-ready"),
         }
     }
 }
@@ -200,7 +208,14 @@ where
                 polls += 1;
                 match parse_seq(&buf) {
                     Some(seq) => match judge(seq, want) {
-                        Judge::Hit => return Ok(Seen { polls, torn, at: io::now() }),
+                        Judge::Hit => {
+                            // The read can return after the deadline that was captured
+                            // before it. Do not count that frame, and do not move the end.
+                            if let Some(err) = expired(round_end, command_end, torn) {
+                                return Err(err);
+                            }
+                            return Ok(Seen { polls, torn, at: io::now() });
+                        }
                         Judge::Stale => {
                             if !pause(limit) {
                                 return Err(expired(round_end, command_end, torn).unwrap_or(WaitErr::Timeout { torn }));
@@ -244,6 +259,45 @@ fn wait_seq(watch: &Watch, want: u32, round_end: Instant, command_end: Instant) 
     )
 }
 
+/// Guest ready on pre-created `ip-gh`. All-zero placeholders are not tears.
+/// Any other unparseable record is. `seq=0` while the command is still open is
+/// ready; seeing it after the command end is `deadline`. Any other seq is a skip.
+/// Expiry while the file is still a placeholder or torn is `peer-not-ready`.
+fn wait_ready(watch: &Watch, command_end: Instant) -> Result<u64, WaitErr> {
+    let mut torn = 0u64;
+    loop {
+        if io::past(command_end) {
+            return Err(WaitErr::PeerNotReady { torn });
+        }
+        match watch.poll() {
+            Ok(buf) => match parse_seq(&buf) {
+                Some(0) => {
+                    if io::past(command_end) {
+                        return Err(WaitErr::Deadline { torn });
+                    }
+                    return Ok(torn);
+                }
+                Some(_) => return Err(WaitErr::Skip { torn }),
+                None => {
+                    if buf != [0u8; 64] {
+                        torn += 1;
+                    }
+                    if !pause(command_end) {
+                        return Err(WaitErr::PeerNotReady { torn });
+                    }
+                }
+            },
+            Err(RdErr::Absent) => {
+                if !pause(command_end) {
+                    return Err(WaitErr::PeerNotReady { torn });
+                }
+            }
+            Err(RdErr::Symlink | RdErr::NotFile | RdErr::HardLink) => return Err(WaitErr::Nofollow { torn }),
+            Err(_) => return Err(WaitErr::Io { torn }),
+        }
+    }
+}
+
 /// `fd` opens once and holds the fd. An absent file is retried until the first
 /// round ends. `reopen` opens on every poll.
 fn open_watch<'a>(dir: &'a Dir, name: &'static str, mode: &str, round_end: Instant, command_end: Instant) -> Result<Watch<'a>, WaitErr> {
@@ -275,9 +329,10 @@ fn polls_text(polls: &[(u32, u64)]) -> String {
     polls.iter().map(|(seq, n)| format!("{seq}:{n}")).collect::<Vec<_>>().join(",")
 }
 
-fn host_line(mode: &str, n: u64, torn: u64, rtt: &[u64], verdict: &str, reason: &str) -> String {
+fn host_line(mode: &str, n: u64, torn: u64, rtt: &[u64], resid: &[u64], verdict: &str, reason: &str) -> String {
     let rtt = samples_text(rtt);
-    format!("v=1 op=c11 role=host mode={mode} n={n} torn={torn} rtt_us={rtt} verdict={verdict} reason={reason}")
+    let resid = samples_text(resid);
+    format!("v=1 op=c11 role=host mode={mode} n={n} torn={torn} rtt_us={rtt} resid_us={resid} verdict={verdict} reason={reason}")
 }
 
 fn guest_line(mode: &str, n: u64, torn: u64, polls: &[(u32, u64)], gaps: &[u64], verdict: &str, reason: &str) -> String {
@@ -290,7 +345,7 @@ pub(super) fn unknown_line(opt: &Opt, reason: &str) -> String {
     if opt.role == "guest" {
         guest_line(opt.mode, 0, 0, &[], &[], "unknown", reason)
     } else {
-        host_line(opt.mode, 0, 0, &[], "unknown", reason)
+        host_line(opt.mode, 0, 0, &[], &[], "unknown", reason)
     }
 }
 
@@ -300,22 +355,24 @@ struct Report {
     n: u64,
     torn: u64,
     rtt: Vec<u64>,
+    /// Post-fsync residual of each counted round. Same length as `rtt`.
+    resid: Vec<u64>,
     polls: Vec<(u32, u64)>,
     gaps: Vec<u64>,
 }
 
 impl Report {
     fn host(mode: &'static str) -> Self {
-        Self { guest: false, mode, n: 0, torn: 0, rtt: Vec::new(), polls: Vec::new(), gaps: Vec::new() }
+        Self { guest: false, mode, n: 0, torn: 0, rtt: Vec::new(), resid: Vec::new(), polls: Vec::new(), gaps: Vec::new() }
     }
     fn guest(mode: &'static str) -> Self {
-        Self { guest: true, mode, n: 0, torn: 0, rtt: Vec::new(), polls: Vec::new(), gaps: Vec::new() }
+        Self { guest: true, mode, n: 0, torn: 0, rtt: Vec::new(), resid: Vec::new(), polls: Vec::new(), gaps: Vec::new() }
     }
     fn line(&self, verdict: &str, reason: &str) -> String {
         if self.guest {
             guest_line(self.mode, self.n, self.torn, &self.polls, &self.gaps, verdict, reason)
         } else {
-            host_line(self.mode, self.n, self.torn, &self.rtt, verdict, reason)
+            host_line(self.mode, self.n, self.torn, &self.rtt, &self.resid, verdict, reason)
         }
     }
     fn emit(&self, root: &Dir, opt: &Opt, verdict: &str, reason: &str) -> i32 {
@@ -339,25 +396,38 @@ fn role_host(root: &Dir, opt: &Opt) -> i32 {
             return report.emit(root, opt, verdict, reason);
         }
     };
-    let round1 = io::now() + ROUND;
-    let watch = match open_watch(root, GUEST_WRITES, opt.mode, round1, opt.end) {
+    // The ready wait uses the command deadline, not a 5s round.
+    let watch = match open_watch(root, GUEST_WRITES, opt.mode, opt.end, opt.end) {
         Ok(watch) => watch,
         Err(err) => return report.fail(root, opt, err),
     };
+    match wait_ready(&watch, opt.end) {
+        Ok(torn) => report.torn += torn,
+        Err(err) => return report.fail(root, opt, err),
+    }
     for seq in 1..=u32::from(opt.count) {
-        let round_end = if seq == 1 { round1 } else { io::now() + ROUND };
+        let round_end = io::now() + ROUND;
         if let Some(err) = expired(round_end, opt.end, 0) {
             return report.fail(root, opt, err);
         }
-        if let Err(err) = writer.pwrite64(&encode(seq)) {
+        let bytes = encode(seq);
+        let t0 = io::now();
+        if let Err(err) = writer.pwrite64(&bytes) {
             let (verdict, reason) = class_open(err);
             return report.emit(root, opt, verdict, reason);
         }
-        let t0 = io::now();
+        let t_sync = io::now();
+        if let Some(err) = expired(round_end, opt.end, 0) {
+            return report.fail(root, opt, err);
+        }
         match wait_seq(&watch, seq, round_end, opt.end) {
             Ok(seen) => {
+                if let Some(err) = expired(round_end, opt.end, seen.torn) {
+                    return report.fail(root, opt, err);
+                }
                 report.torn += seen.torn;
                 report.rtt.push(io::us(seen.at.saturating_duration_since(t0)));
+                report.resid.push(io::us(seen.at.saturating_duration_since(t_sync)));
                 report.n += 1;
             }
             Err(err) => return report.fail(root, opt, err),
@@ -375,28 +445,40 @@ fn role_guest(root: &Dir, opt: &Opt) -> i32 {
             return report.emit(root, opt, verdict, reason);
         }
     };
-    let round1 = io::now() + ROUND;
-    let watch = match open_watch(root, HOST_WRITES, opt.mode, round1, opt.end) {
+    let watch = match open_watch(root, HOST_WRITES, opt.mode, opt.end, opt.end) {
         Ok(watch) => watch,
         Err(err) => return report.fail(root, opt, err),
     };
+    // Ready mark before any round clock. seq=0 lives only on ip-gh.
+    if let Err(err) = writer.pwrite64(&encode(0)) {
+        let (verdict, reason) = class_open(err);
+        return report.emit(root, opt, verdict, reason);
+    }
+    if io::past(opt.end) {
+        return report.fail(root, opt, WaitErr::Deadline { torn: 0 });
+    }
     let mut last_pong: Option<Instant> = None;
     for seq in 1..=u32::from(opt.count) {
-        let round_end = if seq == 1 { round1 } else { io::now() + ROUND };
+        let round_end = io::now() + ROUND;
         if let Some(err) = expired(round_end, opt.end, 0) {
             return report.fail(root, opt, err);
         }
         match wait_seq(&watch, seq, round_end, opt.end) {
             Ok(seen) => {
+                if let Err(err) = writer.pwrite64(&encode(seq)) {
+                    report.torn += seen.torn;
+                    let (verdict, reason) = class_open(err);
+                    return report.emit(root, opt, verdict, reason);
+                }
+                let pong_at = io::now();
+                if let Some(err) = expired(round_end, opt.end, seen.torn) {
+                    return report.fail(root, opt, err);
+                }
                 report.torn += seen.torn;
                 if let Some(prev) = last_pong {
                     report.gaps.push(io::us(seen.at.saturating_duration_since(prev)));
                 }
-                if let Err(err) = writer.pwrite64(&encode(seq)) {
-                    let (verdict, reason) = class_open(err);
-                    return report.emit(root, opt, verdict, reason);
-                }
-                last_pong = Some(io::now());
+                last_pong = Some(pong_at);
                 report.polls.push((seq, seen.polls));
                 report.n += 1;
             }
@@ -426,11 +508,12 @@ mod tests {
     use std::fs::{self, OpenOptions};
     use std::os::unix::fs::{FileExt, PermissionsExt};
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
 
-    const HOST_KEYS: &[&str] = &["v", "op", "role", "mode", "n", "torn", "rtt_us", "verdict", "reason"];
+    const HOST_KEYS: &[&str] = &["v", "op", "role", "mode", "n", "torn", "rtt_us", "resid_us", "verdict", "reason"];
     const GUEST_KEYS: &[&str] = &["v", "op", "role", "mode", "n", "torn", "polls", "gap_us", "verdict", "reason"];
 
     struct Guard;
@@ -515,8 +598,10 @@ mod tests {
         assert_eq!(parse_seq(&padded), None);
         let rtt = super::super::c1::samples_text(&[10, 30, 20]);
         assert_eq!(rtt, "n=3,min=10,p50=20,max=30");
-        let host = host_line("fd", 8, 2, &[10, 30, 20], "ok", "-");
-        assert_eq!(host, format!("v=1 op=c11 role=host mode=fd n=8 torn=2 rtt_us={rtt} verdict=ok reason=-"));
+        let resid = super::super::c1::samples_text(&[1, 3, 2]);
+        assert_eq!(resid, "n=3,min=1,p50=2,max=3");
+        let host = host_line("fd", 8, 2, &[10, 30, 20], &[1, 3, 2], "ok", "-");
+        assert_eq!(host, format!("v=1 op=c11 role=host mode=fd n=8 torn=2 rtt_us={rtt} resid_us={resid} verdict=ok reason=-"));
         let guest = guest_line("reopen", 0, 0, &[], &[], "unknown", "timeout");
         assert_eq!(guest, "v=1 op=c11 role=guest mode=reopen n=0 torn=0 polls=- gap_us=n=0 verdict=unknown reason=timeout");
         let polls = guest_line("fd", 2, 1, &[(1, 4), (2, 7)], &[15], "ok", "-");
@@ -600,6 +685,7 @@ mod tests {
         let dir = scratch("rollback");
         let peer_dir = dir.clone();
         let peer = thread::spawn(move || {
+            poke(&peer_dir, "ip-gh", 0);
             let deadline = Instant::now() + Duration::from_secs(3);
             let mut answered = false;
             while Instant::now() < deadline {
@@ -667,6 +753,7 @@ mod tests {
         assert_eq!(field(&host_rec, "verdict"), "ok");
         assert_eq!(field(&host_rec, "reason"), "-");
         assert!(field(&host_rec, "rtt_us").starts_with("n=8,min="), "{}", field(&host_rec, "rtt_us"));
+        assert!(field(&host_rec, "resid_us").starts_with("n=8,min="), "{}", field(&host_rec, "resid_us"));
         assert_eq!(field(&guest_rec, "role"), "guest");
         assert_eq!(field(&guest_rec, "n"), "8");
         assert_eq!(field(&guest_rec, "mode"), mode);
@@ -680,6 +767,195 @@ mod tests {
             let buf: [u8; 64] = bytes.as_slice().try_into().unwrap();
             assert_eq!(parse_seq(&buf), Some(8));
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn arm_slow_fsync() {
+        io::test_set_hook(Box::new(|| {
+            arm_slow_fsync();
+            thread::sleep(Duration::from_millis(120));
+        }));
+    }
+    fn arm_pong_jump(start: Instant, n: Arc<AtomicU32>) {
+        let n2 = Arc::clone(&n);
+        io::test_set_hook(Box::new(move || {
+            let k = n2.fetch_add(1, Ordering::SeqCst);
+            arm_pong_jump(start, Arc::clone(&n2));
+            if k == 1 {
+                io::test_set_clock(start + Duration::from_secs(6));
+            }
+        }));
+    }
+    fn sample_bound(text: &str, key: &str) -> u64 {
+        text.split(',').find_map(|part| part.strip_prefix(key).and_then(|v| v.strip_prefix('=')).and_then(|v| v.parse().ok())).unwrap_or_else(|| panic!("{key} in {text}"))
+    }
+
+    #[test]
+    fn c11_slow_fsync_is_inside_full_rtt() {
+        let _g = guard();
+        let dir = scratch("slow-fsync");
+        let host_dir = dir.clone();
+        let guest_dir = dir.clone();
+        let host = thread::spawn(move || {
+            arm_slow_fsync();
+            exec(&host_dir, "host", "fd", "8", "20")
+        });
+        let guest = thread::spawn(move || exec(&guest_dir, "guest", "fd", "8", "20"));
+        let host_code = host.join().unwrap();
+        let guest_code = guest.join().unwrap();
+        let host_raw = line_of(&dir, "result-host");
+        let guest_raw = line_of(&dir, "result-guest");
+        assert_eq!(host_code, 0, "{host_raw}");
+        assert_eq!(guest_code, 0, "{guest_raw}");
+        let host_rec = decode(host_raw.trim_end_matches('\n'), HOST_KEYS).unwrap_or_else(|| panic!("{host_raw}"));
+        assert_eq!(field(&host_rec, "n"), "8");
+        assert_eq!(field(&host_rec, "verdict"), "ok");
+        let rtt_min = sample_bound(field(&host_rec, "rtt_us"), "min");
+        let resid_max = sample_bound(field(&host_rec, "resid_us"), "max");
+        assert!(rtt_min >= 50_000, "rtt min {rtt_min} dropped the fsync stall: {}", field(&host_rec, "rtt_us"));
+        assert!(rtt_min > resid_max, "rtt min {rtt_min} resid max {resid_max}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn c11_valid_read_past_round_is_not_ok() {
+        let _g = guard();
+        let start = Instant::now();
+        io::test_set_clock(start);
+        let err = wait_got(
+            || {
+                io::test_set_clock(start + Duration::from_secs(6));
+                Got::Bytes(encode(1))
+            },
+            1,
+            start + super::ROUND,
+            start + Duration::from_secs(30),
+        )
+        .unwrap_err();
+        assert!(matches!(err, WaitErr::Timeout { torn: 0 }), "{err:?}");
+    }
+
+    #[test]
+    fn c11_last_round_valid_read_past_deadline_is_not_ok() {
+        let _g = guard();
+        let start = Instant::now();
+        io::test_set_clock(start);
+        let err = wait_got(
+            || {
+                io::test_set_clock(start + Duration::from_secs(6));
+                Got::Bytes(encode(8))
+            },
+            8,
+            start + super::ROUND,
+            start + Duration::from_secs(30),
+        )
+        .unwrap_err();
+        assert!(matches!(err, WaitErr::Timeout { torn: 0 }), "{err:?}");
+    }
+
+    #[test]
+    fn c11_read_past_command_deadline_is_not_ok() {
+        let _g = guard();
+        let start = Instant::now();
+        io::test_set_clock(start);
+        let err = wait_got(
+            || {
+                io::test_set_clock(start + Duration::from_secs(6));
+                Got::Bytes(encode(1))
+            },
+            1,
+            start + Duration::from_secs(30),
+            start + Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(matches!(err, WaitErr::Deadline { torn: 0 }), "{err:?}");
+    }
+
+    #[test]
+    fn c11_guest_pong_past_round_is_not_counted() {
+        let _g = guard();
+        let dir = scratch("pong-late");
+        poke(&dir, "ip-hg", 1);
+        let guest_dir = dir.clone();
+        let code = thread::spawn(move || {
+            let start = Instant::now();
+            io::test_set_clock(start);
+            arm_pong_jump(start, Arc::new(AtomicU32::new(0)));
+            exec(&guest_dir, "guest", "fd", "8", "30")
+        })
+        .join()
+        .unwrap();
+        assert_eq!(code, 1);
+        let raw = line_of(&dir, "result-guest");
+        let rec = decode(raw.trim_end_matches('\n'), GUEST_KEYS).unwrap_or_else(|| panic!("{raw}"));
+        assert_eq!(field(&rec, "n"), "0");
+        assert_eq!(field(&rec, "verdict"), "unknown");
+        assert_eq!(field(&rec, "reason"), "timeout");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn c11_ready_delay_stays_outside_rtt() {
+        let _g = guard();
+        let dir = scratch("ready-delay");
+        let peer_dir = dir.clone();
+        let peer = thread::spawn(move || {
+            thread::sleep(Duration::from_secs(1));
+            poke(&peer_dir, "ip-gh", 0);
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut next = 1u32;
+            while Instant::now() < deadline && next <= 8 {
+                let bytes = fs::read(peer_dir.join("ip-hg")).unwrap_or_default();
+                if bytes.len() == 64 {
+                    let buf: [u8; 64] = bytes.as_slice().try_into().unwrap();
+                    if parse_seq(&buf) == Some(next) {
+                        poke(&peer_dir, "ip-gh", next);
+                        next += 1;
+                    }
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        let code = exec(&dir, "host", "fd", "8", "20");
+        peer.join().unwrap();
+        let raw = line_of(&dir, "result-host");
+        assert_eq!(code, 0, "{raw}");
+        let rec = decode(raw.trim_end_matches('\n'), HOST_KEYS).unwrap_or_else(|| panic!("{raw}"));
+        assert_eq!(field(&rec, "n"), "8");
+        assert!(field(&rec, "rtt_us").starts_with("n=8,"), "{}", field(&rec, "rtt_us"));
+        let rtt_max = sample_bound(field(&rec, "rtt_us"), "max");
+        assert!(rtt_max < 400_000, "startup leaked into rtt max {rtt_max}: {}", field(&rec, "rtt_us"));
+        let torn: u64 = field(&rec, "torn").parse().unwrap();
+        assert!(torn < 8, "ready placeholders counted as torn={torn}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn c11_ready_stays_placeholder_is_peer_not_ready() {
+        let _g = guard();
+        let start = Instant::now();
+        io::test_set_clock(start);
+        io::test_set_wait(Box::new(move || {
+            io::test_set_clock(start + Duration::from_secs(6));
+        }));
+        let dir = scratch("ready-zero");
+        let root = io::Dir::open_path(dir.to_str().unwrap()).unwrap();
+        let watch = super::Watch::Reopen(&root, super::GUEST_WRITES);
+        let err = super::wait_ready(&watch, start + Duration::from_secs(5)).unwrap_err();
+        assert!(matches!(err, WaitErr::PeerNotReady { torn: 0 }), "{err:?}");
+        let mut bad = encode(1);
+        bad[20] ^= 1;
+        fs::write(dir.join("ip-gh"), bad).unwrap();
+        io::test_set_clock(start);
+        io::test_set_wait(Box::new(move || {
+            io::test_set_clock(start + Duration::from_secs(6));
+        }));
+        let err = super::wait_ready(&watch, start + Duration::from_secs(5)).unwrap_err();
+        assert!(matches!(err, WaitErr::PeerNotReady { torn: 1 }), "{err:?}");
+        poke(&dir, "ip-gh", 3);
+        io::test_set_clock(start);
+        let err = super::wait_ready(&watch, start + Duration::from_secs(30)).unwrap_err();
+        assert!(matches!(err, WaitErr::Skip { torn: 0 }), "{err:?}");
         let _ = fs::remove_dir_all(&dir);
     }
 

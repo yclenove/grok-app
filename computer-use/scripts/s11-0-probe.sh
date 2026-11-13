@@ -996,21 +996,52 @@ seed_c1_slots() {
   printf '%s\n' 'v=1 op=empty seq=0' >"$mbx/summary-host" || return 1
   printf '%s\n' 'v=1 op=empty seq=0' >"$mbx/summary-guest" || return 1
 }
-# Fixed 64-byte placeholders, planted before the VM. C11 overwrites them in place.
-seed_c11_files() {
-  local mbx=$1 tmp i
-  tmp=$(mktemp "$WORKDIR/c11.XXXXXX") || return 1
-  : >"$tmp" || { rm -f "$tmp"; return 1; }
-  i=0
-  while [[ "$i" -lt 8 ]]; do
-    printf '\0\0\0\0\0\0\0\0' >>"$tmp" || { rm -f "$tmp"; return 1; }
-    i=$((i + 1))
+# Both 64-byte placeholders are created in the private export itself.
+# O_EXCL|O_NOFOLLOW, no temp file, no cross-filesystem move or copy.
+# 2 means the bounded helper was not proved finished (timeout, overflow, abort, reap-unknown).
+c11_seed_visible() {
+  local mbx=$1 name sz
+  for name in ip-hg ip-gh; do
+    [[ -f "$mbx/$name" && ! -L "$mbx/$name" ]] || return 1
+    sz=$(wc -c <"$mbx/$name" | tr -d ' ')
+    [[ "$sz" == 64 ]] || return 1
   done
-  mv "$tmp" "$mbx/ip-hg" || { rm -f "$tmp"; return 1; }
-  cp "$mbx/ip-hg" "$mbx/ip-gh" || return 1
+}
+seed_c11_files() {
+  local mbx=$1
+  [[ -d "$mbx" && ! -L "$mbx" ]] || return 1
+  [[ -x /usr/bin/python3 ]] || return 1
+  run_bounded 5 "$WORKDIR/c11seed.out" "$WORKDIR/c11seed.err" - -- /usr/bin/python3 -c '
+import os, stat, sys, time
+mbx = sys.argv[1]
+stall = os.environ.get("S11_C11_PREP_STALL", "")
+if os.environ.get("S11_TEST_MODE") == "1" and stall.isdigit() and int(stall) > 0:
+    time.sleep(int(stall))
+if not hasattr(os, "O_NOFOLLOW"):
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+for name in ("ip-hg", "ip-gh"):
+    path = os.path.join(mbx, name)
+    fd = os.open(path, flags, 0o600)
+    try:
+        n = os.write(fd, b"\0" * 64)
+        if n != 64:
+            raise SystemExit(1)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    st = os.lstat(path)
+    if not stat.S_ISREG(st.st_mode) or st.st_size != 64 or st.st_nlink != 1:
+        raise SystemExit(1)
+' "$mbx" || true
+  if [[ "$RB_TIMED_OUT" == 1 || "$RB_OVERFLOW" == 1 || "$RB_ABORTED" == 1 || "$REAP_UNKNOWN" == 1 ]]; then
+    return 2
+  fi
+  [[ "$RB_STATUS" -eq 0 ]] || return 1
+  c11_seed_visible "$mbx"
 }
 prepare_mailbox() {
-  local root=$1
+  local root=$1 st=0
   mkdir -m 0700 "$root/mailbox" || return 1
   case "$M_CASE" in
     C1)
@@ -1041,7 +1072,9 @@ prepare_mailbox() {
       done
       ;;
     C11)
-      seed_c11_files "$root/mailbox" || return 1
+      seed_c11_files "$root/mailbox"
+      st=$?
+      return "$st"
       ;;
   esac
 }
@@ -1058,7 +1091,16 @@ prepare_export() {
   fi
   EXPORT_DIR=$(mktemp -d "$OUT/s11m.XXXXXX") || return 1
   chmod 0700 "$EXPORT_DIR" || return 1
-  prepare_mailbox "$EXPORT_DIR" || return 1
+  prepare_mailbox "$EXPORT_DIR"
+  st=$?
+  if [[ "$st" -eq 2 ]]; then
+    M_QUARANTINE=1
+    EXPORT_STATE=quarantine
+    ANY_CLEANUP_FAILED=1
+    add_reason quarantine
+    return 1
+  fi
+  [[ "$st" -eq 0 ]] || return 1
 }
 arm_m_load() {
   M_LOAD_END=$((SECONDS + 60))
@@ -1148,6 +1190,153 @@ c11_rtt_ok() {
     [[ "$rtt" == "n=${n},min=${min},p50=${p50},max=${max}" ]] || return 1
   fi
 }
+# polls is "-" when n is 0, otherwise seq:count pairs for 1..n in order.
+c11_polls_ok() {
+  local polls=$1 n=$2 rest pair seq count i
+  if [[ "$n" == 0 ]]; then
+    [[ "$polls" == - ]] || return 1
+    return 0
+  fi
+  rest=$polls
+  i=1
+  while [[ "$i" -le "$n" ]]; do
+    pair=${rest%%,*}
+    if [[ "$i" -lt "$n" ]]; then
+      [[ "$rest" == "$pair",* ]] || return 1
+      rest=${rest#*,}
+    else
+      [[ "$rest" == "$pair" ]] || return 1
+    fi
+    seq=${pair%%:*}
+    count=${pair#*:}
+    [[ "$pair" == "$seq:$count" && "$seq" == "$i" ]] || return 1
+    c11_num "$count" || return 1
+    [[ "$count" -ge 1 && "$count" -le 1000000 ]] || return 1
+    i=$((i + 1))
+  done
+}
+# 0 and C11G_* set on a schema match. 2 is missing/empty. 1 is malformed.
+c11_take_guest() {
+  local line bytes n marker tok key val seen=" " nseen=0
+  local v= op= role= mode= gn= torn= polls= gap= verdict= reason=
+  C11G_OK=0
+  C11G_MODE=; C11G_N=; C11G_TORN=; C11G_POLLS=; C11G_GAP=; C11G_VERDICT=; C11G_REASON=
+  [[ -f "$WORKDIR/ssh.bg.out" && ! -L "$WORKDIR/ssh.bg.out" ]] || return 2
+  bytes=$(wc -c <"$WORKDIR/ssh.bg.out" | tr -d ' ')
+  case "$bytes" in ''|*[!0-9]*) return 2 ;; esac
+  [[ "$bytes" -ge 1 ]] || return 2
+  [[ "$bytes" -le 4096 ]] || return 1
+  n=$(wc -l <"$WORKDIR/ssh.bg.out" | tr -d ' ')
+  [[ "$n" == 1 ]] || return 1
+  marker=$(tail -c 1 "$WORKDIR/ssh.bg.out"; printf x)
+  [[ "$marker" == $'\nx' ]] || return 1
+  if grep -q $'\r' "$WORKDIR/ssh.bg.out"; then return 1; fi
+  IFS= read -r line <"$WORKDIR/ssh.bg.out" || return 1
+  for tok in $line; do
+    case "$tok" in
+      *=*) key=${tok%%=*}; val=${tok#*=} ;;
+      *) return 1 ;;
+    esac
+    [[ -n "$key" && -n "$val" ]] || return 1
+    case "$seen" in *" $key "*) return 1 ;; esac
+    seen="$seen$key "
+    nseen=$((nseen + 1))
+    case "$key" in
+      v) v=$val ;;
+      op) op=$val ;;
+      role) role=$val ;;
+      mode) mode=$val ;;
+      n) gn=$val ;;
+      torn) torn=$val ;;
+      polls) polls=$val ;;
+      gap_us) gap=$val ;;
+      verdict) verdict=$val ;;
+      reason) reason=$val ;;
+      *) return 1 ;;
+    esac
+  done
+  [[ "$nseen" -eq 10 ]] || return 1
+  [[ "$v" == 1 && "$op" == c11 && "$role" == guest && "$mode" == "$M_BOUNDARY" ]] || return 1
+  case "$mode" in fd|reopen) ;; *) return 1 ;; esac
+  c11_num "$gn" || return 1
+  [[ "$gn" -le 8 ]] || return 1
+  c11_num "$torn" || return 1
+  [[ "$torn" -le 1000000 ]] || return 1
+  c11_polls_ok "$polls" "$gn" || return 1
+  if [[ "$gn" -le 1 ]]; then
+    [[ "$gap" == n=0 ]] || return 1
+  else
+    c11_rtt_ok "$gap" "$((gn - 1))" || return 1
+  fi
+  case "$verdict" in
+    ok) [[ "$gn" == 8 && "$reason" == - ]] || return 1 ;;
+    failed) case "$reason" in rollback|skip|nofollow) ;; *) return 1 ;; esac ;;
+    unknown) case "$reason" in timeout|deadline|io|peer-not-ready) ;; *) return 1 ;; esac ;;
+    *) return 1 ;;
+  esac
+  C11G_MODE=$mode; C11G_N=$gn; C11G_TORN=$torn; C11G_POLLS=$polls; C11G_GAP=$gap
+  C11G_VERDICT=$verdict; C11G_REASON=$reason; C11G_OK=1
+  return 0
+}
+c11_attach_guest() {
+  [[ "$C11G_OK" == 1 ]] || return 0
+  M_RECORD="${M_RECORD} g_mode=${C11G_MODE} g_n=${C11G_N} g_torn=${C11G_TORN} g_polls=${C11G_POLLS} g_gap_us=${C11G_GAP} g_verdict=${C11G_VERDICT} g_reason=${C11G_REASON}"
+}
+# C11 never uses the shared ok|not-ack settlement. Only verdict ok is success.
+c11_settle() {
+  local gst
+  if [[ "$H1_TO" == 1 || "$G_TO" == 1 || "$H1_RU" == 1 || "$G_RU" == 1 ]]; then
+    M_VERDICT=unknown; M_REASON=deadline; SHAPE_OK=0; return 1
+  fi
+  if [[ "$H1_OV" == 1 || "$G_OV" == 1 || "$H1_AB" == 1 || "$G_AB" == 1 || "$SHAPE_OK" != 1 ]]; then
+    M_VERDICT=unknown; M_REASON=probe-failed; SHAPE_OK=0; return 1
+  fi
+  c11_take_guest
+  gst=$?
+  if [[ "$gst" -ne 0 ]]; then
+    [[ "$M_VERDICT" == failed ]] && return 0
+    if [[ "$gst" -eq 2 ]]; then
+      M_VERDICT=unknown; M_REASON=no-peer-summary
+    else
+      M_VERDICT=unknown; M_REASON=bad-record
+    fi
+    return 1
+  fi
+  if [[ "$C11G_VERDICT" == failed ]]; then
+    case "$C11G_REASON" in
+      rollback|skip|nofollow)
+        if [[ "$M_VERDICT" != failed ]]; then
+          M_VERDICT=failed
+          M_REASON=$C11G_REASON
+        fi
+        c11_attach_guest
+        return 0
+        ;;
+    esac
+  fi
+  if [[ "$M_VERDICT" == failed ]]; then
+    c11_attach_guest
+    return 0
+  fi
+  if [[ "$M_VERDICT" != ok || "$C11G_VERDICT" != ok || "$H1_ST" != 0 || "$G_ST" != 0 ]]; then
+    if [[ "$M_VERDICT" == unknown ]]; then
+      :
+    else
+      M_VERDICT=unknown
+      M_REASON=$C11G_REASON
+      [[ "$C11G_VERDICT" == ok ]] && M_REASON=probe-failed
+    fi
+    c11_attach_guest
+    return 1
+  fi
+  if [[ "$M_OP" == c11 && "$M_ROLE_REC" == host && "$M_N" == 8 && "$M_MODE" == "$M_BOUNDARY" && "$C11G_N" == 8 && "$C11G_MODE" == "$M_BOUNDARY" ]]; then
+    c11_attach_guest
+    return 0
+  fi
+  M_VERDICT=unknown; M_REASON=probe-failed
+  c11_attach_guest
+  return 1
+}
 c1_retry_ok() {
   case "$1" in
     absent:*,replaced:*) ;;
@@ -1165,7 +1354,7 @@ parse_fields() {
   local v= op= role= verdict= reason= n= torn= lost= integrity= latency=
   local vis= rtt= slice= wslice= openus= writeus= fsyncus= renameus= dsync= readus= peer= digest= gate= retry=
   local boundary= planned= attempted= renamed= visible= part= dirsync= ops= created= elevated=
-  local mode=
+  local mode= resid=
   M_RECORD=$line; SHAPE_OK=0; M_MODE=""
   for tok in $line; do
     case "$tok" in
@@ -1186,6 +1375,7 @@ parse_fields() {
       visible) visible=$val ;; part) part=$val ;; dir_synced) dirsync=$val ;;
       ops) ops=$val ;; created) created=$val ;; elevated) elevated=$val ;;
       mode) mode=$val ;;
+      resid_us) resid=$val ;;
       *) return 1 ;;
     esac
   done
@@ -1218,11 +1408,13 @@ parse_fields() {
       case "$n" in ""|*[!0-9]*) return 1 ;; esac
       ;;
     c11)
-      [[ "$nseen" -eq 9 && "$role" == host && -n "$mode" && -n "$n" && -n "$torn" && -n "$rtt" ]] || return 1
+      [[ "$nseen" -eq 10 && "$role" == host && -n "$mode" && -n "$n" && -n "$torn" && -n "$rtt" && -n "$resid" ]] || return 1
       case "$mode" in fd|reopen) ;; *) return 1 ;; esac
-      case "$n" in ''|*[!0-9]*) return 1 ;; esac
-      case "$torn" in ''|*[!0-9]*) return 1 ;; esac
+      case "$verdict" in ok|unknown|failed) ;; *) return 1 ;; esac
+      c11_num "$n" || return 1
+      c11_num "$torn" || return 1
       c11_rtt_ok "$rtt" "$n" || return 1
+      c11_rtt_ok "$resid" "$n" || return 1
       if [[ "$verdict" == ok ]]; then
         [[ "$n" == 8 && "$reason" == - ]] || return 1
       fi
@@ -1263,6 +1455,10 @@ read_slot_verdict() {
 }
 settle_host() {
   local kind=$1
+  if [[ "$kind" == c11 ]]; then
+    c11_settle
+    return $?
+  fi
   if [[ "$M_VERDICT" == failed && "$SHAPE_OK" == 1 ]]; then return 0; fi
   if [[ "$H1_TO" == 1 || "$H2_TO" == 1 || "$G_TO" == 1 || "$H1_RU" == 1 || "$H2_RU" == 1 || "$G_RU" == 1 ]]; then
     M_VERDICT=unknown; M_REASON=deadline; SHAPE_OK=0; return 1
@@ -1276,9 +1472,6 @@ settle_host() {
       [[ "$H2_ST" == 0 && "$M_PEER" == 1 && "$M_LATENCY" == measured && "$M_INTEGRITY" == ok && "$M_N" == 8 && "$M_OP" == c1 && "$M_ROLE_REC" == host ]] || { M_VERDICT=unknown; M_REASON=probe-failed; return 1; }
     fi
     if [[ "$kind" == c2 && ( "$M_OP" != c2 || "$M_ROLE_REC" != host ) ]]; then M_VERDICT=unknown; M_REASON=probe-failed; return 1; fi
-    if [[ "$kind" == c11 ]]; then
-      [[ "$H1_ST" == 0 && "$G_ST" == 0 && "$M_OP" == c11 && "$M_ROLE_REC" == host && "$M_N" == 8 && "$M_MODE" == "$M_BOUNDARY" ]] || { M_VERDICT=unknown; M_REASON=probe-failed; return 1; }
-    fi
     return 0
   fi
   [[ "$M_VERDICT" == unknown ]] && return 0
@@ -1453,6 +1646,14 @@ cleanup_export() {
   if [[ "$STAGE" == V || "$S_STAGE" == V ]]; then EXPORT_DONE=1; return 0; fi
   [[ "$EXPORT_DONE" == 1 ]] && return 0
   [[ -n "$EXPORT_DIR" ]] || return 0
+  # An unproved seed sets this before the VM exists. Leave the directory.
+  if [[ "$M_QUARANTINE" == 1 ]]; then
+    EXPORT_STATE=quarantine
+    ANY_CLEANUP_FAILED=1
+    add_reason quarantine
+    EXPORT_DONE=1
+    return 0
+  fi
   if [[ -L "$EXPORT_DIR" || ! -d "$EXPORT_DIR" ]]; then
     EXPORT_STATE=quarantine; ANY_CLEANUP_FAILED=1; add_reason quarantine; EXPORT_DONE=1
     [[ "$S_STAGE" == M ]] && M_QUARANTINE=1
@@ -1504,7 +1705,12 @@ run_m_one() {
   M_VERDICT=unknown; M_REASON=skipped; EXPORT_STATE=absent; EXPORT_DIR=""
   begin_stage M
   if ! prepare_export; then
-    M_VERDICT=unknown; M_REASON=io; ANY_COLLECTION_FAILED=1
+    if [[ "$M_QUARANTINE" == 1 ]]; then
+      M_VERDICT=unknown; M_REASON=quarantine
+    else
+      M_VERDICT=unknown; M_REASON=io
+    fi
+    ANY_COLLECTION_FAILED=1
     record_m_row
     return
   fi

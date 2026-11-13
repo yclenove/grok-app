@@ -123,6 +123,7 @@ install_templates() {
     'wait_run() { local i=0 p n; [[ -f "$ROOT/run.pending" ]] || return 0; read -r p n <"$ROOT/run.pending" || true; while [[ -f "$ROOT/run.pending" && "$i" -lt 100 ]]; do if [[ -n "$p" ]] && ! kill -0 "$p" 2>/dev/null; then rm -f "$ROOT/run.pending"; return 0; fi; i=$((i+1)); sleep 0.01; done; }' \
     'emit_vm() { local run=false; case "$2" in running|Running|RUNNING) run=true ;; esac; printf "  {\n    \"Size\" : 35,\n    \"Disk\" : 50,\n    \"Source\" : \"local\",\n    \"State\" : \"%s\",\n    \"Name\" : \"%s\",\n    \"Running\" : %s,\n    \"Accessed\" : \"2026-10-31T17:13:29Z\"\n" "$2" "$1" "$run"; }' \
     'show_list() { wait_run; : >"$ROOT/names.rows"; while read -r n st; do [[ -n "$n" ]] || continue; printf "%s %s\n" "$n" "$st" >>"$ROOT/names.rows"; done <"$INV"; [[ -f "$ROOT/list_collide" ]] && printf "%s %s\n" "s11-0-probe-A-${PPID}-deadbeef" stopped >>"$ROOT/names.rows"; count=$(wc -l <"$ROOT/names.rows" | tr -d " "); if [[ "$count" -eq 0 ]]; then printf "[]\n"; return 0; fi; printf "[\n"; i=0; while read -r n st; do i=$((i+1)); emit_vm "$n" "$st"; if [[ "$i" -lt "$count" ]]; then printf "  },\n"; else printf "  }\n"; fi; done <"$ROOT/names.rows"; printf "]\n"; }' \
+    'note_c11_seed() { local a dir="" name sz; for a in "$@"; do case "$a" in s11mbx:*) dir=${a#s11mbx:} ;; esac; done; [[ -n "$dir" ]] || return 0; for name in ip-hg ip-gh; do if [[ -L "$dir/$name" ]]; then printf "%s symlink\n" "$name" >>"$ROOT/c11.at-run"; elif [[ -f "$dir/$name" ]]; then sz=$(wc -c <"$dir/$name" | tr -d " "); if cmp -s -n 64 "$dir/$name" /dev/zero; then printf "%s %s zeros\n" "$name" "$sz" >>"$ROOT/c11.at-run"; else printf "%s %s nonzero\n" "$name" "$sz" >>"$ROOT/c11.at-run"; fi; else printf "%s absent\n" "$name" >>"$ROOT/c11.at-run"; fi; done; }' \
     'cmd=${1:-}; shift || true' \
     'case "$cmd" in' \
     '  --version) [[ -f "$ROOT/bg_hold" ]] && { sleep 30 & echo $! >"$ROOT/bg.pid"; echo "stub-tart 0"; exit 0; }; [[ -f "$ROOT/hang_version" ]] && hang; echo "stub-tart 0"; exit 0 ;;' \
@@ -151,6 +152,7 @@ install_templates() {
     '    has "$dst" && { inv_unlock; exit 1; }' \
     '    printf "%s stopped\n" "$dst" >>"$INV"; inv_unlock; exit 0 ;;' \
     '  run)' \
+    '    note_c11_seed "$@"' \
     '    printf "%s %s\n" "$$" "$1" >"$ROOT/run.pending.$$"; mv "$ROOT/run.pending.$$" "$ROOT/run.pending"' \
     '    trap '"'"'rm -f "$ROOT/run.pending"; inv_unlock'"'"' EXIT' \
     '    inv_lock || exit 1' \
@@ -193,8 +195,9 @@ install_templates() {
     '  if [[ -f "$ROOT/ssh_fail_n" ]]; then n=0; [[ -f "$ROOT/ssh.count" ]] && n=$(cat "$ROOT/ssh.count"); n=$((n+1)); echo "$n" >"$ROOT/ssh.count"; fn=$(cat "$ROOT/ssh_fail_n"); [[ "$n" -le "$fn" ]] && exit 255; fi' \
     '  exit 0; fi' \
     'case " $* " in *s11m.XXXXXX*) cat >"$ROOT/init.body"; printf "init-ok\n"; exit 0 ;; esac' \
+    'c11_guest() { mode=fd; case "$remote" in "run C11 reopen") mode=reopen ;; esac; if [[ -f "$ROOT/c11_guest_missing" ]]; then exit 0; fi; if [[ -f "$ROOT/c11_guest_bad" ]]; then printf "v=1 op=c11 role=guest mode=%s n=8 torn=0 polls=1:1 gap_us=n=0 verdict=ok reason=-\n" "$mode"; exit 0; fi; if [[ -f "$ROOT/c11_guest_rollback" ]]; then printf "v=1 op=c11 role=guest mode=%s n=3 torn=1 polls=1:1,2:1,3:2 gap_us=n=2,min=10,p50=12,max=14 verdict=failed reason=rollback\n" "$mode"; exit 0; fi; if [[ -f "$ROOT/c11_guest_skip" ]]; then printf "v=1 op=c11 role=guest mode=%s n=0 torn=0 polls=- gap_us=n=0 verdict=failed reason=skip\n" "$mode"; exit 0; fi; printf "v=1 op=c11 role=guest mode=%s n=8 torn=0 polls=1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1 gap_us=n=7,min=11,p50=21,max=31 verdict=ok reason=-\n" "$mode"; exit 0; }' \
     'remote=""; for remote in "$@"; do :; done' \
-    'case "$remote" in upload|verify\ *|run\ C2|run\ C8|run\ C11\ fd|run\ C11\ reopen) cat >/dev/null; exit 0 ;; "run C1"|"run C7") "$ROOT/bin/c7guest" "$remote"; exit $? ;; "run C9") cat >/dev/null; mode=""; mbx=$(awk '"'"'match($0,/--dir s11mbx:/){p=substr($0,RSTART+13)} END{print p}'"'"' "$ROOT/tart.log"); [[ -n "$mbx" && -f "$mbx/fill-mode" ]] && mode=$(tr -d "\r\n" <"$mbx/fill-mode"); if [[ -f "$ROOT/c9_hold_after" && "$mode" == small ]]; then "$ROOT/bin/c9write" & cpid=$!; trap "kill -KILL $cpid 2>/dev/null; exit 0" TERM INT HUP; wait "$cpid"; exit $?; fi; "$ROOT/bin/c9write"; exit $? ;; "run C6 file"|"run C6 dir") kind=file; [[ "$remote" == "run C6 dir" ]] && kind=dir; [[ -f "$ROOT/c6_nohold" ]] && exit 0; printf "v=1 op=c6 role=guest kind=%s held=1\n" "$kind"; pp=$PPID; trap "exit 0" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done ;; esac' \
+    'case "$remote" in upload|verify\ *|run\ C2|run\ C8) cat >/dev/null; exit 0 ;; "run C11 fd"|"run C11 reopen") c11_guest ;; "run C1"|"run C7") "$ROOT/bin/c7guest" "$remote"; exit $? ;; "run C9") cat >/dev/null; mode=""; mbx=$(awk '"'"'match($0,/--dir s11mbx:/){p=substr($0,RSTART+13)} END{print p}'"'"' "$ROOT/tart.log"); [[ -n "$mbx" && -f "$mbx/fill-mode" ]] && mode=$(tr -d "\r\n" <"$mbx/fill-mode"); if [[ -f "$ROOT/c9_hold_after" && "$mode" == small ]]; then "$ROOT/bin/c9write" & cpid=$!; trap "kill -KILL $cpid 2>/dev/null; exit 0" TERM INT HUP; wait "$cpid"; exit $?; fi; "$ROOT/bin/c9write"; exit $? ;; "run C6 file"|"run C6 dir") kind=file; [[ "$remote" == "run C6 dir" ]] && kind=dir; [[ -f "$ROOT/c6_nohold" ]] && exit 0; printf "v=1 op=c6 role=guest kind=%s held=1\n" "$kind"; pp=$PPID; trap "exit 0" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done ;; esac' \
     '[[ -f "$ROOT/guest_fail" ]] && exit 9' \
     'if [[ -f "$ROOT/guest_hang" ]]; then pp=$PPID; trap "exit 143" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done; exit 143; fi' \
     'last=""' \
@@ -880,7 +883,7 @@ setup() {
   export TMPDIR=$CASE/tmp
   export S11_START_SEC=0
   unset BASH_ENV S11_XTRACE S11_BOUND_SEC S11_BOUND_POLLS S11_FORCE_NAME S11_PROBE_BUDGET S11_CLEANUP_BUDGET S11_REAP_POLLS S11_FAIL_ROW_N S11_FAIL_STAGE S11_PROBE_MODE
-  unset S11_HDIUTIL S11_DISKUTIL S11_PLUTIL S11_MOUNT S11_MDUTIL S11_TMUTIL S11_MDFIND S11_STAT S11_DF S11_VOLIO S11_LS S11_TEST_MODE S11_C10_WAIT  S11_R_BUDGET S11_RECEIPT_STALL S11_READY_SEC S11_C7_BUDGET
+  unset S11_HDIUTIL S11_DISKUTIL S11_PLUTIL S11_MOUNT S11_MDUTIL S11_TMUTIL S11_MDFIND S11_STAT S11_DF S11_VOLIO S11_LS S11_TEST_MODE S11_C10_WAIT  S11_R_BUDGET S11_RECEIPT_STALL S11_READY_SEC S11_C7_BUDGET S11_C11_PREP_STALL
   export S11_TEST_MODE=1
   ARGS=(--ssh-key "$CASE/id_key" --tart-home "$CASE/thome" --out "$CASE/out")
 }
@@ -1840,7 +1843,11 @@ case "$cmd" in
     line="v=1 op=c8 role=${role} verdict=unknown reason=${c8_reason} n=${c8_n} ops=0 created=0 elevated=0"
     ;;
   c11)
-    line="v=1 op=c11 role=${role} mode=${modeflag} n=8 torn=0 rtt_us=n=8,min=10,p50=20,max=30 verdict=ok reason=-"
+    if [[ "$mode" == c11notack ]]; then
+      line="v=1 op=c11 role=${role} mode=${modeflag} n=8 torn=0 rtt_us=n=8,min=10,p50=20,max=30 verdict=not-ack reason=timeout"
+    else
+      line="v=1 op=c11 role=${role} mode=${modeflag} n=8 torn=0 rtt_us=n=8,min=10,p50=20,max=30 resid_us=n=8,min=1,p50=2,max=3 verdict=ok reason=-"
+    fi
     printf '%s\n' "c11 role=${role} mode=${modeflag}" >>"${S11_STUB_ROOT:?}/probe.argv"
     ;;
 esac
@@ -1991,7 +1998,9 @@ for c in cases:
     assert "op=c11" in rec and "role=host" in rec, rec
     assert "mode=%s" % c["boundary"] in rec, rec
     assert "n=8" in rec and "torn=" in rec, rec
-    assert "rtt_us=n=8,min=" in rec and "verdict=ok" in rec and "reason=-" in rec, rec
+    assert "rtt_us=n=8,min=10" in rec and "resid_us=n=8,min=" in rec, rec
+    assert "g_verdict=ok" in rec and "g_n=8" in rec and "g_gap_us=n=7,min=11" in rec, rec
+    assert "verdict=ok" in rec and "reason=-" in rec, rec
     assert any(x.startswith("s11mbx:") for x in c["argv"]), c["argv"]
 found = []
 for dirpath, _dirs, _names in os.walk(root):
@@ -2004,7 +2013,79 @@ for mbx in found:
         data = open(path, "rb").read()
         assert data == b"\0" * 64, (path, len(data))
 PY
+  n=$(grep -c '64 zeros' "$ROOT/c11.at-run" || true)
+  [[ "$n" == 4 ]] || die "seed at tart run $n"
   cmp -s "$ROOT/inventory" "$ROOT/inventory.orig" || die "inventory"
+}
+
+test_c11_guest_missing() {
+  setup
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/c11_guest_missing"
+  run_probe 25 --stage M --case C11 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  m_stage 'stage["verdict"] == "unknown" and all(c["verdict"] == "unknown" and c["reason"] == "no-peer-summary" and "rtt_us=n=8,min=10" in c["record"] and "g_verdict=" not in c["record"] for c in cases)'
+}
+
+test_c11_guest_bad() {
+  setup
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/c11_guest_bad"
+  run_probe 25 --stage M --case C11 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  m_stage 'stage["verdict"] == "unknown" and all(c["verdict"] == "unknown" and c["reason"] == "bad-record" for c in cases)'
+}
+
+test_c11_guest_rollback() {
+  setup
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/c11_guest_rollback"
+  run_probe 25 --stage M --case C11 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  m_stage 'stage["verdict"] == "failed" and all(c["verdict"] == "failed" and c["reason"] == "rollback" and "rtt_us=n=8,min=10" in c["record"] and " n=8 " in (" " + c["record"] + " ") and "g_n=3" in c["record"] and "g_verdict=failed" in c["record"] and "g_reason=rollback" in c["record"] for c in cases)'
+}
+
+test_c11_guest_skip() {
+  setup
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/c11_guest_skip"
+  run_probe 25 --stage M --case C11 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  m_stage 'stage["verdict"] == "failed" and all(c["verdict"] == "failed" and c["reason"] == "skip" and " n=8 " in (" " + c["record"] + " ") and "g_n=0" in c["record"] and "g_reason=skip" in c["record"] and "rtt_us=n=8,min=10" in c["record"] for c in cases)'
+}
+
+test_c11_not_ack() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_PROBE_MODE=c11notack
+  run_probe 25 --stage M --case C11 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  m_stage 'stage["verdict"] == "unknown" and stage["verdict"] != "not-ack" and all(c["verdict"] == "unknown" and c["reason"] == "probe-failed" and c["verdict"] != "not-ack" for c in cases)'
+}
+
+test_c11_prep_stall() {
+  setup
+  write_pinned
+  write_fake_probe
+  export S11_C11_PREP_STALL=30
+  run_probe 25 --stage M --case C11 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  [[ ! -f "$ROOT/c11.at-run" ]] || die "tart run saw the seed"
+  if [[ -f "$ROOT/tart.log" ]] && grep -E -q '^run ' "$ROOT/tart.log"; then die "vm started"; fi
+  find "$CASE/out" -type d -name mailbox -print | grep -q . || die "export removed"
+  m_stage 'stage["verdict"] == "unknown" and cases[0]["verdict"] == "unknown" and cases[0]["reason"] == "quarantine" and cases[0]["export_state"] == "quarantine" and cases[1]["verdict"] == "not_run" and cases[1]["reason"] == "skipped"'
 }
 
 test_stage_m_c1() {
@@ -2417,6 +2498,12 @@ run_case stage-m-c1 test_stage_m_c1
 run_case c1-old-name test_c1_old_name_quarantine
 run_case stage-m-c2 test_stage_m_c2
 run_case stage-m-c11 test_stage_m_c11
+run_case c11-guest-missing test_c11_guest_missing
+run_case c11-guest-bad test_c11_guest_bad
+run_case c11-guest-rollback test_c11_guest_rollback
+run_case c11-guest-skip test_c11_guest_skip
+run_case c11-not-ack test_c11_not_ack
+run_case c11-prep-stall test_c11_prep_stall
 run_case stage-m-quarantine test_stage_m_quarantine
 run_case stage-m-not-sole test_stage_m_not_sole
 run_case stage-m-report test_stage_m_report_write
