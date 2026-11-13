@@ -116,6 +116,10 @@ fn run_checks() -> i32 {
             sources_have_no_process_launch_or_open_ended_wait,
         ),
         (
+            "mailbox_scan_exemptions_are_exact",
+            mailbox_scan_exemptions_are_exact,
+        ),
+        (
             "clone_at_absolute_deadline_expires_without_the_script",
             review_fixes::clone_at_absolute_deadline_expires_without_the_script,
         ),
@@ -906,10 +910,35 @@ fn sources_have_no_process_launch_or_open_ended_wait() -> Result<(), String> {
         "Duration::MAX",
         "tart-disposable",
     ];
+    let mod_rs =
+        std::fs::read_to_string(root.join("mailbox/mod.rs")).map_err(|err| err.to_string())?;
+    if !tests_module_is_cfg_gated(&mod_rs) {
+        return Err("mailbox tests module is not #[cfg(test)]".into());
+    }
     let mut permit_literals = 0;
     for path in &files {
         let text = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
+        let rel = rel_under(&root, path)?;
+        // Unsafe stays in mailbox/sys.rs. Filesystem and env access stay in the
+        // known cfg(test) mailbox sources. Process launch and waits stay forbidden.
+        let exempt = scan_exempt(&rel);
+        // Each exempt test source gates itself, so a production module that
+        // reaches it through any `#[path]` form compiles it to nothing.
+        if exempt == ScanExempt::FsEnv && !exempt_source_is_gated(&text) {
+            return Err(format!(
+                "{} does not start with #![cfg(test)]",
+                path.display()
+            ));
+        }
         for needle in forbidden {
+            if exempt == ScanExempt::Unsafe && needle == "unsafe" {
+                continue;
+            }
+            if exempt == ScanExempt::FsEnv
+                && matches!(needle, "std::fs" | "std::env" | "OpenOptions")
+            {
+                continue;
+            }
             if text.contains(needle) {
                 return Err(format!("{} contains {needle}", path.display()));
             }
@@ -934,6 +963,143 @@ fn sources_have_no_process_launch_or_open_ended_wait() -> Result<(), String> {
         return Err(format!("permit constructions: {permit_literals}"));
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ScanExempt {
+    None,
+    Unsafe,
+    FsEnv,
+}
+
+const MAILBOX_TEST_SOURCES: &[&str] = &[
+    "mailbox/tests/codec.rs",
+    "mailbox/tests/mod.rs",
+    "mailbox/tests/seq.rs",
+    "mailbox/tests/slots.rs",
+    "mailbox/tests/support.rs",
+];
+
+fn mailbox_scan_exemptions_are_exact() -> Result<(), String> {
+    let scan_root = Path::new("/work/src/disposable/tart");
+    let cases = [
+        ("mailbox/sys.rs", ScanExempt::Unsafe),
+        ("mailbox/tests/codec.rs", ScanExempt::FsEnv),
+        ("mailbox/tests/mod.rs", ScanExempt::FsEnv),
+        ("mailbox/tests/seq.rs", ScanExempt::FsEnv),
+        ("mailbox/tests/slots.rs", ScanExempt::FsEnv),
+        ("mailbox/tests/support.rs", ScanExempt::FsEnv),
+        ("mailbox/ops.rs", ScanExempt::None),
+        ("mailbox/slots.rs", ScanExempt::None),
+        ("machine/mailbox/sys.rs", ScanExempt::None),
+        ("machine/tests/mailbox/live.rs", ScanExempt::None),
+        ("tests/mailbox/ops.rs", ScanExempt::None),
+    ];
+    for (rel, expect) in cases {
+        if scan_exempt(Path::new(rel)) != expect {
+            return Err(format!(
+                "{rel} classified as {:?}, want {expect:?}",
+                scan_exempt(Path::new(rel))
+            ));
+        }
+        let abs = scan_root.join(rel);
+        if classify(scan_root, &abs) != expect {
+            return Err(format!(
+                "absolute {rel} was not classified after stripping the scan root"
+            ));
+        }
+    }
+    let ancestor = Path::new("/tests/checkout/src/disposable/tart");
+    if classify(ancestor, &ancestor.join("mailbox/ops.rs")) != ScanExempt::None {
+        return Err("a tests ancestor exempted mailbox/ops.rs".into());
+    }
+    if classify(ancestor, &ancestor.join("mailbox/sys.rs")) != ScanExempt::Unsafe {
+        return Err("stripping a tests ancestor dropped the sys.rs exemption".into());
+    }
+    #[cfg(unix)]
+    for rel in ["mailbox\\sys.rs", "mailbox/tests\\support.rs"] {
+        if scan_exempt(Path::new(rel)) != ScanExempt::None {
+            return Err(format!("backslash name {rel:?} was exempted"));
+        }
+    }
+    if !exempt_source_is_gated("#![cfg(test)]\n//! fixtures\n") {
+        return Err("a gated exempt source was rejected".into());
+    }
+    for text in [
+        "//! fixtures\n#![cfg(test)]\n",
+        "/* #![cfg(test)] */\nuse std::fs;\n",
+        " #![cfg(test)]\n",
+        "#![cfg(all())]\n",
+        "",
+    ] {
+        if exempt_source_is_gated(text) {
+            return Err(format!("ungated exempt source accepted: {text:?}"));
+        }
+    }
+    if !tests_module_is_cfg_gated("#[cfg(test)]\nmod tests;\n") {
+        return Err("cfg(test) mod tests was rejected".into());
+    }
+    if tests_module_is_cfg_gated("mod tests;\n") {
+        return Err("ungated mod tests was accepted".into());
+    }
+    if tests_module_is_cfg_gated("#[cfg(test)]\nmod other;\n") {
+        return Err("a file without mod tests was accepted".into());
+    }
+    let real_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/disposable/tart");
+    let real =
+        std::fs::read_to_string(real_root.join("mailbox/mod.rs")).map_err(|err| err.to_string())?;
+    if !tests_module_is_cfg_gated(&real) {
+        return Err("live mailbox/mod.rs does not keep tests behind #[cfg(test)]".into());
+    }
+    Ok(())
+}
+
+fn classify(root: &Path, path: &Path) -> ScanExempt {
+    match path.strip_prefix(root) {
+        Ok(rel) => scan_exempt(rel),
+        Err(_) => ScanExempt::None,
+    }
+}
+
+fn rel_under(root: &Path, path: &Path) -> Result<std::path::PathBuf, String> {
+    path.strip_prefix(root)
+        .map(Path::to_path_buf)
+        .map_err(|_| format!("{} is outside {}", path.display(), root.display()))
+}
+
+// Path equality compares platform components. On Unix a backslash is part of
+// a file name, so `mailbox\sys.rs` is one component and is not exempt.
+fn scan_exempt(rel: &Path) -> ScanExempt {
+    if rel == Path::new("mailbox/sys.rs") {
+        ScanExempt::Unsafe
+    } else if MAILBOX_TEST_SOURCES.iter().any(|src| rel == Path::new(src)) {
+        ScanExempt::FsEnv
+    } else {
+        ScanExempt::None
+    }
+}
+
+fn tests_module_is_cfg_gated(text: &str) -> bool {
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let mut saw = false;
+    for (index, line) in lines.iter().enumerate() {
+        if line.contains("mod tests") && *line != "mod tests;" {
+            return false;
+        }
+        if *line == "mod tests;" {
+            let prev = lines[..index].iter().rev().find(|line| !line.is_empty());
+            if prev != Some(&"#[cfg(test)]") {
+                return false;
+            }
+            saw = true;
+        }
+    }
+    saw
+}
+
+// Line 1 exactly, so no comment or string can stand in for the attribute.
+fn exempt_source_is_gated(text: &str) -> bool {
+    text.lines().next() == Some("#![cfg(test)]")
 }
 
 fn permit_constructions(text: &str) -> usize {
