@@ -12,9 +12,14 @@
 use std::cell::RefCell;
 
 use super::codec::decode_frame;
-use super::ops::{Envelope, MailboxReply, Op, FRAME_MAX};
+use super::ops::{Envelope, MailboxReply, Op};
 use super::seq::{Observe, SeqTracker};
-use super::{Breach, FailedRead, MailboxError};
+use super::{FailedRead, MailboxError};
+
+#[cfg(unix)]
+use super::ops::FRAME_MAX;
+#[cfg(unix)]
+use super::Breach;
 
 #[cfg(unix)]
 use super::sys::{self, FileId, Kind, SysErr};
@@ -33,7 +38,7 @@ pub const HOST_WRITE_DIR: &str = "host-write";
 pub const GUEST_WRITE_DIR: &str = "guest-write";
 
 /// Host staging directory. Not part of the exported guest tree.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(any(not(test), not(unix)), allow(dead_code))]
 pub(super) const HOST_STAGE_DIR: &str = "host-stage";
 
 /// One host-write name. `binding.msg` is published at most once.
@@ -217,6 +222,7 @@ struct DirId {
 
 /// Where a test replaces a file. One hook at a time. Not a channel flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(super) enum IoPoint {
     /// After the source `fsync`, before the source identity check.
     AfterFsync,
@@ -239,10 +245,12 @@ thread_local! {
 /// Clears the hook on drop.
 #[cfg(test)]
 #[derive(Debug)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(super) struct Interrupt;
 
 /// Arm `hook` for the next [`IoPoint`]. The hook must not re-enter.
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(super) fn arm(point: IoPoint, hook: impl FnMut() + 'static) -> Interrupt {
     HOOK.with(|cell| *cell.borrow_mut() = Some((point, Box::new(hook))));
     Interrupt
@@ -255,6 +263,7 @@ impl Drop for Interrupt {
     }
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn hit(point: IoPoint) {
     #[cfg(test)]
     HOOK.with(|cell| {
@@ -275,6 +284,7 @@ fn hit(point: IoPoint) {
 ///
 /// `root` is an already-checked volume-root descriptor. It is not closed.
 /// Guest `.msg.tmp` names are not created.
+#[cfg_attr(not(unix), allow(clippy::needless_return))]
 pub fn prepare_slots(root: i32) -> Result<Layout, MailboxError> {
     #[cfg(not(unix))]
     {
@@ -288,6 +298,7 @@ pub fn prepare_slots(root: i32) -> Result<Layout, MailboxError> {
 }
 
 /// Replace one host placeholder with `frame`. The source FD dies with this call.
+#[cfg_attr(not(unix), allow(clippy::needless_return))]
 pub fn publish(
     root: i32,
     layout: &mut Layout,
@@ -308,6 +319,7 @@ pub fn publish(
 /// Read one pre-created slot. Pending is `Ok`. A breach is [`FailedRead`].
 ///
 /// A sticky failure stays on `layout` for this `slot`.
+#[cfg_attr(not(unix), allow(clippy::needless_return))]
 pub fn read_slot(root: i32, layout: &mut Layout, slot: SlotRef) -> Result<SlotRead, FailedRead> {
     #[cfg(not(unix))]
     {
@@ -409,6 +421,7 @@ pub fn poll_guest(
     }
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn finished(body: SlotBody, watch: &Watch) -> SlotRead {
     SlotRead {
         body,
