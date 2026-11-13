@@ -909,7 +909,18 @@ fn sources_have_no_process_launch_or_open_ended_wait() -> Result<(), String> {
     let mut permit_literals = 0;
     for path in &files {
         let text = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
+        // S11-M3 keeps libc in `mailbox/sys.rs`. Its tests use a private temp
+        // directory. Process launch and open-ended waits stay forbidden there.
+        let mailbox_sys = path.ends_with("mailbox/sys.rs");
+        let mailbox_test = path.components().any(|part| part.as_os_str() == "mailbox")
+            && path.components().any(|part| part.as_os_str() == "tests");
         for needle in forbidden {
+            if mailbox_sys && needle == "unsafe" {
+                continue;
+            }
+            if mailbox_test && matches!(needle, "std::fs" | "std::env" | "OpenOptions") {
+                continue;
+            }
             if text.contains(needle) {
                 return Err(format!("{} contains {needle}", path.display()));
             }

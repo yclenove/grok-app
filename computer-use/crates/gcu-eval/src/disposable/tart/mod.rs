@@ -10,6 +10,9 @@
 //! sleep, take a blocking lock, or start a process. A real adapter is not
 //! compiled here, and there is no feature, environment variable, or flag that
 //! turns one on. Dropping an attempt does not stop, delete, or seal.
+//!
+//! [`mailbox`] is the offline S11-M3 codec, slot, and sequence layer. It does
+//! not implement [`GuestChannel`], start a VM, or mount a volume.
 
 mod budgets;
 mod command;
@@ -19,6 +22,7 @@ mod identity;
 mod ledger;
 mod lock;
 mod machine;
+mod mailbox;
 mod manifest;
 mod output;
 mod parse;
@@ -42,6 +46,16 @@ pub use ledger::{
 };
 pub use lock::{CleanupLock, FakeCleanupLock, LockError};
 pub use machine::{Attempt, CleanupDeadlines, ReserveInput, RuntimeLoss, StepError};
+pub use mailbox::{
+    decode_frame, decode_reply, encode_frame, encode_reply, poll_guest, prepare_slots, publish,
+    read_checked, read_slot, Activity, AsciiId, AttemptBinding, AttemptNonce, Breach, CheckedRead,
+    CodecFault, Envelope, FailedRead, GuestPoll, HostSlot, InventoryConsume, InventorySnapshot,
+    Layout, LeaseRequest, LeaseTerminal, LoginState, MailboxError, MailboxReply, MsgStatus,
+    Observe, Op, Outcome, Payload, ReplyResult, ReplyState, RevokeOutcome, RevokeSlot, RunScore,
+    SeqFault, SeqTracker, SideOp, SideResult, SlotBody, SlotRead, SlotRef, SlotWatch, SnapStatus,
+    ValueOutcome, FRAME_MAX, GUEST_WRITE_DIR, HOST_WRITE_DIR, LEASE_WINDOW_MS, MAX_JSON_ARRAY,
+    MAX_JSON_DEPTH, MAX_POLLS,
+};
 pub use manifest::{Digest, InstallManifest, ManifestError, DIGEST_LEN};
 pub use output::{
     BoundedOutput, CallError, OutputError, ScriptOutcome, ScriptedReply, TraceEntry,
