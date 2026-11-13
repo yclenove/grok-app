@@ -114,12 +114,15 @@ install_templates() {
     'INV=$ROOT/inventory' \
     'printf "%s\n" "$*" >>"$ROOT/tart.log"' \
     'echo "LEAK-not-for-report" >&2' \
-    'hang() { trap "exit 143" TERM INT HUP; while true; do sleep 0.2; done; }' \
+    'hang() { trap "exit 143" TERM INT HUP; pp=$PPID; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done; }' \
     'ignore_term() { echo $$ >"$ROOT/target.pid"; trap '"'"'echo TERM >>"$ROOT/term.log"'"'"' TERM; trap "" PIPE; while true; do sleep 0.2; done; }' \
     'overflow_ignore() { echo $$ >"$ROOT/target.pid"; trap '"'"'echo TERM >>"$ROOT/term.log"'"'"' TERM; trap "" XFSZ PIPE; i=0; while [[ $i -lt 1500 ]]; do printf "%s\n" "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; i=$((i+1)); done; while true; do sleep 0.2; done; }' \
     'has() { awk -v s="$1" '"'"'$1==s{f=1} END{exit !f}'"'"' "$INV"; }' \
+    'inv_lock() { local i=0 p; while ! mkdir "$ROOT/inv.lock" 2>/dev/null; do p=""; [[ -f "$ROOT/inv.lock/pid" ]] && p=$(cat "$ROOT/inv.lock/pid" 2>/dev/null || true); if [[ -n "$p" ]] && ! kill -0 "$p" 2>/dev/null; then rm -rf "$ROOT/inv.lock"; continue; fi; i=$((i+1)); [[ "$i" -gt 400 ]] && return 1; sleep 0.01; done; printf "%s\n" "$$" >"$ROOT/inv.lock/pid"; }' \
+    'inv_unlock() { local p; [[ -f "$ROOT/inv.lock/pid" ]] || return 0; p=$(cat "$ROOT/inv.lock/pid" 2>/dev/null || true); [[ "$p" == "$$" ]] || return 0; rm -rf "$ROOT/inv.lock"; }' \
+    'wait_run() { local i=0 p n; [[ -f "$ROOT/run.pending" ]] || return 0; read -r p n <"$ROOT/run.pending" || true; while [[ -f "$ROOT/run.pending" && "$i" -lt 100 ]]; do if [[ -n "$p" ]] && ! kill -0 "$p" 2>/dev/null; then rm -f "$ROOT/run.pending"; return 0; fi; i=$((i+1)); sleep 0.01; done; }' \
     'emit_vm() { local run=false; case "$2" in running|Running|RUNNING) run=true ;; esac; printf "  {\n    \"Size\" : 35,\n    \"Disk\" : 50,\n    \"Source\" : \"local\",\n    \"State\" : \"%s\",\n    \"Name\" : \"%s\",\n    \"Running\" : %s,\n    \"Accessed\" : \"2026-10-31T17:13:29Z\"\n" "$2" "$1" "$run"; }' \
-    'show_list() { : >"$ROOT/names.rows"; while read -r n st; do [[ -n "$n" ]] || continue; printf "%s %s\n" "$n" "$st" >>"$ROOT/names.rows"; done <"$INV"; [[ -f "$ROOT/list_collide" ]] && printf "%s %s\n" "s11-0-probe-A-${PPID}-deadbeef" stopped >>"$ROOT/names.rows"; count=$(wc -l <"$ROOT/names.rows" | tr -d " "); if [[ "$count" -eq 0 ]]; then printf "[]\n"; return 0; fi; printf "[\n"; i=0; while read -r n st; do i=$((i+1)); emit_vm "$n" "$st"; if [[ "$i" -lt "$count" ]]; then printf "  },\n"; else printf "  }\n"; fi; done <"$ROOT/names.rows"; printf "]\n"; }' \
+    'show_list() { wait_run; : >"$ROOT/names.rows"; while read -r n st; do [[ -n "$n" ]] || continue; printf "%s %s\n" "$n" "$st" >>"$ROOT/names.rows"; done <"$INV"; [[ -f "$ROOT/list_collide" ]] && printf "%s %s\n" "s11-0-probe-A-${PPID}-deadbeef" stopped >>"$ROOT/names.rows"; count=$(wc -l <"$ROOT/names.rows" | tr -d " "); if [[ "$count" -eq 0 ]]; then printf "[]\n"; return 0; fi; printf "[\n"; i=0; while read -r n st; do i=$((i+1)); emit_vm "$n" "$st"; if [[ "$i" -lt "$count" ]]; then printf "  },\n"; else printf "  }\n"; fi; done <"$ROOT/names.rows"; printf "]\n"; }' \
     'cmd=${1:-}; shift || true' \
     'case "$cmd" in' \
     '  --version) [[ -f "$ROOT/bg_hold" ]] && { sleep 30 & echo $! >"$ROOT/bg.pid"; echo "stub-tart 0"; exit 0; }; [[ -f "$ROOT/hang_version" ]] && hang; echo "stub-tart 0"; exit 0 ;;' \
@@ -141,30 +144,37 @@ install_templates() {
     '  clone)' \
     '    src=$1; dst=$2' \
     '    [[ -f "$ROOT/fail_clone" ]] && exit 1' \
-    '    if [[ -f "$ROOT/partial_clone" ]]; then printf "%s stopped\n" "$dst" >>"$INV"; exit 1; fi' \
-    '    [[ -f "$ROOT/omit_clone" ]] && exit 0' \
-    '    has "$src" || exit 1' \
-    '    has "$dst" && exit 1' \
-    '    printf "%s stopped\n" "$dst" >>"$INV"; exit 0 ;;' \
+    '    inv_lock || exit 1' \
+    '    if [[ -f "$ROOT/partial_clone" ]]; then printf "%s stopped\n" "$dst" >>"$INV"; inv_unlock; exit 1; fi' \
+    '    if [[ -f "$ROOT/omit_clone" ]]; then inv_unlock; exit 0; fi' \
+    '    has "$src" || { inv_unlock; exit 1; }' \
+    '    has "$dst" && { inv_unlock; exit 1; }' \
+    '    printf "%s stopped\n" "$dst" >>"$INV"; inv_unlock; exit 0 ;;' \
     '  run)' \
+    '    printf "%s %s\n" "$$" "$1" >"$ROOT/run.pending.$$"; mv "$ROOT/run.pending.$$" "$ROOT/run.pending"' \
+    '    trap '"'"'rm -f "$ROOT/run.pending"; inv_unlock'"'"' EXIT' \
+    '    inv_lock || exit 1' \
     '    has "$1" || exit 1' \
     '    [[ -f "$ROOT/fail_run" ]] && exit 1' \
-    '    [[ -f "$ROOT/run_exit" ]] && { echo $$ >"$ROOT/target.pid"; sleep 0.12; exit 0; }' \
-    '    awk -v n="$1" '"'"'$1==n{$2="running"} {print}'"'"' "$INV" >"$INV.tmp" && mv "$INV.tmp" "$INV"' \
-    '    trap "exit 0" TERM INT HUP' \
-    '    while true; do sleep 0.2; done ;;' \
+    '    if [[ -f "$ROOT/run_exit" ]]; then echo $$ >"$ROOT/target.pid"; inv_unlock; rm -f "$ROOT/run.pending"; sleep 0.12; exit 0; fi' \
+    '    awk -v n="$1" '"'"'$1==n{$2="running"} {print}'"'"' "$INV" >"$INV.$$" && mv "$INV.$$" "$INV" || exit 1' \
+    '    inv_unlock; rm -f "$ROOT/run.pending"' \
+    '    pp=$PPID; trap "exit 0" TERM INT HUP' \
+    '    while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done ;;' \
     '  stop)' \
     '    printf "%s\n" "$1" >>"$ROOT/stop.args"' \
     '    touch "$ROOT/stop.entered"' \
     '    [[ -f "$ROOT/slow_stop" ]] && sleep 0.45' \
     '    [[ -f "$ROOT/fail_stop" ]] && exit 1' \
-    '    awk -v n="$1" '"'"'$1==n{$2="stopped"} {print}'"'"' "$INV" >"$INV.tmp" && mv "$INV.tmp" "$INV"' \
-    '    exit 0 ;;' \
+    '    inv_lock || exit 1' \
+    '    awk -v n="$1" '"'"'$1==n{$2="stopped"} {print}'"'"' "$INV" >"$INV.$$" && mv "$INV.$$" "$INV" || { inv_unlock; exit 1; }' \
+    '    inv_unlock; exit 0 ;;' \
     '  delete)' \
     '    printf "%s\n" "$1" >>"$ROOT/delete.args"' \
     '    [[ -f "$ROOT/fail_delete" ]] && exit 1' \
-    '    awk -v n="$1" '"'"'$1!=n{print}'"'"' "$INV" >"$INV.tmp" && mv "$INV.tmp" "$INV"' \
-    '    exit 0 ;;' \
+    '    inv_lock || exit 1' \
+    '    awk -v n="$1" '"'"'$1!=n{print}'"'"' "$INV" >"$INV.$$" && mv "$INV.$$" "$INV" || { inv_unlock; exit 1; }' \
+    '    inv_unlock; exit 0 ;;' \
     '  ip) [[ -f "$ROOT/hang_ip" ]] && hang; has "$1" || exit 1' \
     '    if [[ -f "$ROOT/ip_fail_n" ]]; then n=0; [[ -f "$ROOT/ip.count" ]] && n=$(cat "$ROOT/ip.count"); n=$((n+1)); echo "$n" >"$ROOT/ip.count"; fn=$(cat "$ROOT/ip_fail_n"); [[ "$n" -le "$fn" ]] && { echo "no address" >&2; exit 1; }; fi' \
     '    echo "192.0.2.20"; exit 0 ;;' \
@@ -184,9 +194,9 @@ install_templates() {
     '  exit 0; fi' \
     'case " $* " in *s11m.XXXXXX*) cat >"$ROOT/init.body"; printf "init-ok\n"; exit 0 ;; esac' \
     'remote=""; for remote in "$@"; do :; done' \
-    'case "$remote" in upload|verify\ *|run\ C1|run\ C2|run\ C8) cat >/dev/null; exit 0 ;; "run C9") cat >/dev/null; mode=""; mbx=$(awk '"'"'match($0,/--dir s11mbx:/){p=substr($0,RSTART+13)} END{print p}'"'"' "$ROOT/tart.log"); [[ -n "$mbx" && -f "$mbx/fill-mode" ]] && mode=$(tr -d "\r\n" <"$mbx/fill-mode"); if [[ -f "$ROOT/c9_hold_after" && "$mode" == small ]]; then "$ROOT/bin/c9write" & cpid=$!; trap "exit 0" TERM INT HUP; wait "$cpid"; exit $?; fi; "$ROOT/bin/c9write"; exit $? ;; esac' \
+    'case "$remote" in upload|verify\ *|run\ C2|run\ C8) cat >/dev/null; exit 0 ;; "run C1"|"run C7") "$ROOT/bin/c7guest" "$remote"; exit $? ;; "run C9") cat >/dev/null; mode=""; mbx=$(awk '"'"'match($0,/--dir s11mbx:/){p=substr($0,RSTART+13)} END{print p}'"'"' "$ROOT/tart.log"); [[ -n "$mbx" && -f "$mbx/fill-mode" ]] && mode=$(tr -d "\r\n" <"$mbx/fill-mode"); if [[ -f "$ROOT/c9_hold_after" && "$mode" == small ]]; then "$ROOT/bin/c9write" & cpid=$!; trap "kill -KILL $cpid 2>/dev/null; exit 0" TERM INT HUP; wait "$cpid"; exit $?; fi; "$ROOT/bin/c9write"; exit $? ;; "run C6 file"|"run C6 dir") kind=file; [[ "$remote" == "run C6 dir" ]] && kind=dir; [[ -f "$ROOT/c6_nohold" ]] && exit 0; printf "v=1 op=c6 role=guest kind=%s held=1\n" "$kind"; pp=$PPID; trap "exit 0" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done ;; esac' \
     '[[ -f "$ROOT/guest_fail" ]] && exit 9' \
-    'if [[ -f "$ROOT/guest_hang" ]]; then trap "exit 143" TERM INT HUP; while true; do sleep 0.2; done; fi' \
+    'if [[ -f "$ROOT/guest_hang" ]]; then pp=$PPID; trap "exit 143" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done; exit 143; fi' \
     'last=""' \
     'for last in "$@"; do :; done' \
     'ep=$(printf "%s\n" "$last" | sed -n "s/.*S11_EP=\\([^ ]*\\).*/\\1/p")' \
@@ -365,12 +375,32 @@ case "$cmd" in
       [[ $# -eq 2 ]] || exit 2
       force=1; arg=$2
       printf '%s\n' force >>"$ROOT/force.count"
+      if [[ -f "$ROOT/hang_force" ]]; then
+        trap 'exit 0' TERM INT HUP
+        while true; do sleep 0.2; done
+      fi
       [[ -f "$ROOT/fail_force" ]] && exit 1
     else
       [[ $# -eq 1 ]] || exit 2
       arg=$1
-      [[ -f "$ROOT/fail_detach" ]] && exit 1
+      if [[ -f "$ROOT/fail_detach_once" && ! -f "$ROOT/fail_detach_once.hit" ]]; then
+        : >"$ROOT/fail_detach_once.hit"
+        printf 'hdiutil: couldn'"'"'t unmount "%s" - 资源忙\n' "$(get disk | sed 's#^/dev/##')" >&2
+        exit 16
+      fi
+      if [[ -f "$ROOT/fail_detach" ]]; then
+        # Opt-in: the next image-inode stat disagrees, so a later force must not run.
+        [[ -f "$ROOT/shift_after_detach" ]] && touch "$ROOT/stat_shift"
+        # Real Mini (zh_CN): rc 16 and a localized message; the probe must use the rc.
+        if [[ -f "$ROOT/busy_err" ]]; then
+          printf 'hdiutil: couldn'"'"'t unmount "%s" - 资源忙\n' "$(get disk | sed 's#^/dev/##')" >&2
+          exit 16
+        fi
+        printf '%s\n' 'Resource busy' >&2
+        exit 1
+      fi
       [[ -f "$ROOT/slow_detach" ]] && sleep 6
+      [[ -f "$ROOT/detach_pause" ]] && sleep 3
     fi
     mp=$(get mount)
     [[ "$arg" == "$mp" ]] || exit 1
@@ -426,6 +456,8 @@ set -- "$mp"/*
 case "$mp" in */mnt.*) ;; *) exit 2 ;; esac
 mv "$mp" "$mp.under" || exit 1
 mkdir -m 0700 "$mp" || exit 1
+# Measured shape: Spotlight's directory appears on the live mount, mode 0700, and leaves with the overlay.
+mkdir -m 0700 "$mp/.fseventsd" || exit 1
 put mount "$mp"
 put attached 1
 ent=disk9
@@ -529,6 +561,75 @@ if [[ "$1" == addexclusion ]]; then
   printf '%s\n' 'Operation not permitted' >&2
   exit 1
 fi
+if [[ "$1" == startbackup ]]; then
+  exit 9
+fi
+if [[ "$1" == destinationinfo && $# -eq 1 ]]; then
+  if [[ -f "$ROOT/tmutil_empty" ]]; then exit 0; fi
+  if [[ -f "$ROOT/tmutil_sep" ]]; then
+    printf '%s\n' '===================================================='
+    exit 0
+  fi
+  if [[ -f "$ROOT/tmutil_kind" ]]; then
+    printf '%s\n' 'Kind          : Local'
+    exit 0
+  fi
+  if [[ -f "$ROOT/tmutil_trunc" ]]; then
+    printf '%s\n' 'Name          :'
+    exit 0
+  fi
+  if [[ -f "$ROOT/tmutil_mix" ]]; then
+    printf '%s\n' 'tmutil: No destinations configured.' \
+      'Name          : S11SecretDestName' \
+      'Kind          : Local' \
+      'URL           : file:///var/empty/secret' \
+      'ID            : ABC'
+    exit 0
+  fi
+  if [[ -f "$ROOT/tmutil_nodest" ]]; then
+    printf '%s\n' 'tmutil: No destinations configured.'
+    exit 0
+  fi
+  if [[ -f "$ROOT/tmutil_network" ]]; then
+    printf '%s\n' 'Name          : S11SecretDestName' \
+      'Kind          : Network' \
+      'URL           : smb://secret.invalid/share' \
+      'ID            : ABC'
+    exit 0
+  fi
+  if [[ -f "$ROOT/tmutil_network_nourl" ]]; then
+    printf '%s\n' 'Name          : S11SecretDestName' \
+      'Kind          : Network' \
+      'ID            : ABC'
+    exit 0
+  fi
+  if [[ -f "$ROOT/tmutil_oddkind" ]]; then
+    printf '%s\n' 'Name          : S11SecretDestName' \
+      'Kind          : Cloud' \
+      'URL           : smb://secret.invalid/share' \
+      'ID            : ABC'
+    exit 0
+  fi
+  if [[ -f "$ROOT/tmutil_localonly" ]]; then
+    printf '%s\n' '====================================================' \
+      'Name          : S11SecretDestName' \
+      'Kind          : Local' \
+      'Mount Point   : /var/empty/secret' \
+      'ID            : ABC'
+    exit 0
+  fi
+  if [[ -f "$ROOT/tmutil_dest_fail" ]]; then
+    printf '%s\n' 'Operation not permitted' >&2
+    exit 1
+  fi
+  printf '%s\n' '====================================================' \
+    'Name          : S11SecretDestName' \
+    'Kind          : Local' \
+    'URL           : file:///var/empty/secret' \
+    'Mount Point   : /var/empty/secret' \
+    'ID            : ABC'
+  exit 0
+fi
 [[ "$1" == isexcluded && $# -eq 2 ]] || exit 2
 if [[ -f "$ROOT/tmutil_fail" ]]; then
   printf '%s\n' 'Operation not permitted' >&2
@@ -554,6 +655,12 @@ case "\$fmt" in
     [[ "\$path" == "\$(get image)" ]] || exit 1
     size=\$(get size); blocks=\$(get blocks)
     ids=\$("\$REALSTAT" -c '%d %i' "\$path") || exit 1
+    if [[ -f "\$ROOT/stat_shift" ]]; then
+      sdev=\${ids% *}
+      sino=\${ids##* }
+      sino=\$((sino + 1))
+      ids="\$sdev \$sino"
+    fi
     if [[ -f "\$ROOT/stat_big" ]]; then size=90000000; blocks=200000; fi
     if [[ -f "\$ROOT/stat_big_arm" ]]; then size=90000000; blocks=200000; rm -f "\$ROOT/stat_big_arm"; fi
     if [[ -f "\$ROOT/alloc_arm" ]]; then size=25165824; blocks=49152; rm -f "\$ROOT/alloc_arm"
@@ -564,6 +671,9 @@ case "\$fmt" in
     "\$REALSTAT" -c '%d %i' "\$path" || exit 1
     ;;
   '%u %OLp')
+    case "\$path" in
+      */.fseventsd) printf '%s\\n' '0 0700'; exit 0 ;;
+    esac
     "\$REALSTAT" -c '%u %a' "\$path" || exit 1
     ;;
   *) exit 2 ;;
@@ -648,12 +758,79 @@ fi
 if [[ -f "$ROOT/c9_hold_after" && "$mode" == small ]]; then
   printf '%s\n' x >"$ROOT/c9_published"
   printf '%s\n' "$$" >"$ROOT/target.pid"
-  while true; do sleep 1; done
+  pp=$PPID
+  while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done
+  exit 0
 fi
 [[ -f "$ROOT/c9_ssh_fail" ]] && exit 9
 exit 0
 EOF
-  chmod 700 "$BASE/tpl/hdiutil" "$BASE/tpl/diskutil" "$BASE/tpl/plutil" "$BASE/tpl/mount" "$BASE/tpl/mdutil" "$BASE/tpl/tmutil" "$BASE/tpl/statv" "$BASE/tpl/df" "$BASE/tpl/c9write"
+  cat >"$BASE/tpl/mdfind" <<'EOF'
+#!/bin/bash
+ROOT=${S11_STUB_ROOT:?}
+printf '%s\n' "$*" >>"$ROOT/mdfind.log"
+# Locale noise on stderr. Hit counting reads stdout only.
+printf '%s\n' 'mdfind: locale environment is C' >&2
+[[ "$1" == -onlyin && $# -eq 3 ]] || exit 2
+if [[ -f "$ROOT/mdfind_fail" ]]; then exit 1; fi
+if [[ -f "$ROOT/mdfind_hits" ]]; then
+  n=$(tr -d '[:space:]' <"$ROOT/mdfind_hits")
+  i=0
+  while [[ "$i" -lt "$n" ]]; do
+    printf '%s\n' "hit-$i"
+    i=$((i + 1))
+  done
+fi
+exit 0
+EOF
+  cat >"$BASE/tpl/c7guest" <<'EOF'
+#!/bin/bash
+ROOT=${S11_STUB_ROOT:?}
+remote=${1:-}
+mbx() { awk 'match($0,/--dir s11mbx:/){p=substr($0,RSTART+13)} END{print p}' "$ROOT/tart.log"; }
+if [[ "$remote" == "run C1" ]]; then
+  if [[ ! -f "$ROOT/c7_no_ready" ]]; then
+    box=$(mbx)
+    if [[ -n "$box" && -d "$box/guest-write" && ! -L "$box/guest-write" ]]; then
+      printf '%s\n' 'v=1 op=ready dir=hg' >"$box/guest-write/hg-ready"
+    fi
+  fi
+  exit 0
+fi
+if [[ "$remote" == "run C7" ]]; then
+  STATE=$ROOT/vol.state
+  get() { awk -F= -v k="$1" '$1==k{print substr($0, index($0, "=")+1); exit}' "$STATE"; }
+  if [[ -f "$ROOT/plant_m0" ]]; then
+    mp=$(get mount)
+    printf '%s\n' landed >"$mp/s11-landed" || exit 1
+  fi
+  [[ -f "$ROOT/c7_reattach" ]] && touch "$ROOT/info_retain"
+  if [[ -f "$ROOT/c7_tart_dead" ]]; then
+    awk '$2=="running"{$2="stopped"} {print}' "$ROOT/inventory" >"$ROOT/inventory.tmp" && mv "$ROOT/inventory.tmp" "$ROOT/inventory"
+  fi
+  [[ -f "$ROOT/c7_ssh_fail" ]] && exit 9
+  if [[ -f "$ROOT/c7_hang" ]]; then
+    pp=$PPID
+    trap 'exit 0' TERM INT HUP
+    while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done
+    exit 0
+  fi
+  if [[ -f "$ROOT/c7_bad" ]]; then
+    printf '%s\n' 'not-a-record'
+    exit 0
+  fi
+  line="v=1 op=c7 role=guest ops=8 ok=8 enoent=0 eio=0 other=0 hang=0"
+  [[ -f "$ROOT/c7_enoent" ]] && line="v=1 op=c7 role=guest ops=8 ok=7 enoent=1 eio=0 other=0 hang=0"
+  # Real c7ops shape when the first operation hangs: ops counts attempts.
+  [[ -f "$ROOT/c7_hang1" ]] && line="v=1 op=c7 role=guest ops=1 ok=0 enoent=0 eio=0 other=0 hang=1"
+  [[ -f "$ROOT/c7_zero" ]] && line="v=1 op=c7 role=guest ops=0 ok=0 enoent=0 eio=0 other=0 hang=0"
+  [[ -f "$ROOT/c7_short" ]] && line="v=1 op=c7 role=guest ops=3 ok=3 enoent=0 eio=0 other=0 hang=0"
+  printf '%s\n' "$line"
+  exit 0
+fi
+exit 2
+EOF
+  chmod 700 "$BASE/tpl/hdiutil" "$BASE/tpl/diskutil" "$BASE/tpl/plutil" "$BASE/tpl/mount" "$BASE/tpl/mdutil" "$BASE/tpl/tmutil" "$BASE/tpl/mdfind" "$BASE/tpl/statv" "$BASE/tpl/df" "$BASE/tpl/c9write" "$BASE/tpl/c7guest"
   cat >"$BASE/tpl/lsacl" <<'EOF'
 #!/bin/bash
 ROOT=${S11_STUB_ROOT:?}
@@ -695,6 +872,7 @@ setup() {
   printf '%s\n' '#!/bin/bash' 'exit 0' >"$ROOT/real/softnet"
   chmod +x "$ROOT/real/softnet"
   printf '%s\n' 'root -rwsr-xr-x' >"$ROOT/real/softnet.statout"
+  rm -f "$ROOT/mid/link" "$ROOT/bin/softnet"
   ln -s ../real/softnet "$ROOT/mid/link"
   ln -s ../mid/link "$ROOT/bin/softnet"
   export S11_STUB_ROOT=$ROOT
@@ -702,7 +880,7 @@ setup() {
   export TMPDIR=$CASE/tmp
   export S11_START_SEC=0
   unset BASH_ENV S11_XTRACE S11_BOUND_SEC S11_BOUND_POLLS S11_FORCE_NAME S11_PROBE_BUDGET S11_CLEANUP_BUDGET S11_REAP_POLLS S11_FAIL_ROW_N S11_FAIL_STAGE S11_PROBE_MODE
-  unset S11_HDIUTIL S11_DISKUTIL S11_PLUTIL S11_MOUNT S11_MDUTIL S11_TMUTIL S11_STAT S11_DF S11_VOLIO S11_LS S11_TEST_MODE
+  unset S11_HDIUTIL S11_DISKUTIL S11_PLUTIL S11_MOUNT S11_MDUTIL S11_TMUTIL S11_MDFIND S11_STAT S11_DF S11_VOLIO S11_LS S11_TEST_MODE S11_C10_WAIT  S11_R_BUDGET S11_RECEIPT_STALL S11_READY_SEC S11_C7_BUDGET
   export S11_TEST_MODE=1
   ARGS=(--ssh-key "$CASE/id_key" --tart-home "$CASE/thome" --out "$CASE/out")
 }
@@ -754,6 +932,10 @@ need_reason() {
   grep -F "\"$1\"" "$CASE/out/report.json" >/dev/null || die "missing reason $1"
 }
 
+need_reason_outr() {
+  grep -F "\"$1\"" "$CASE/outr/report.json" >/dev/null || die "missing reason $1"
+}
+
 assert_has() {
   awk -v s="$1" '$1==s {f=1} END{exit !f}' "$ROOT/inventory" || die "lost vm $1"
 }
@@ -788,7 +970,8 @@ ban_file() {
 
 common_end() {
   local keep_golden=${1:-yes}
-  [[ -f "$CASE/out/report.json" ]] || die "no report"
+  local report_dir=${2:-$CASE/out}
+  [[ -f "$report_dir/report.json" ]] || die "no report"
   [[ "$keep_golden" == yes ]] && assert_has macos-s2-eval
   assert_has macos-s2-eval.alt
   assert_has vm.dotted-name
@@ -798,7 +981,7 @@ common_end() {
     grep -F -q 'list --format json' "$ROOT/tart.log" || die "list format"
   fi
   assert_owned_only
-  ban_file "$CASE/out/report.json"
+  ban_file "$report_dir/report.json"
   ban_file "$CASE/stdout"
   ban_file "$CASE/stderr"
   if [[ -f "$ROOT/stat.log" ]]; then
@@ -811,7 +994,8 @@ common_end() {
   if find "$CASE/tmp" -maxdepth 1 -name 's11-0.*' -print | grep -q .; then
     die "workdir left behind"
   fi
-  grep -F -q '"h1_independent_of_ip":"unknown"' "$CASE/out/report.json" || die "h1 not unknown"
+  grep -F -q '"h1_independent_of_ip":"unknown"' "$report_dir/report.json" || die "h1 not unknown"
+  grep -F -q '"exclusive_window":"assumed"' "$report_dir/report.json" || die "exclusive window"
 }
 
 no_clone_ops() {
@@ -831,7 +1015,7 @@ static_checks() {
   bash -n "$HERE/test_s11_0_probe.sh"
   local n
   n=$(wc -l <"$PROBE" | tr -d ' ')
-  [[ "$n" -lt 2700 ]] || die "probe has $n lines"
+  [[ "$n" -lt 4600 ]] || die "probe has $n lines"
   [[ "$(head -n 1 "$PROBE")" == '#!/bin/bash' ]] || die "shebang"
   local pat
   for pat in 'mapfile' 'declare -A' 'readarray' 'readlink -f' 'ioreg' 'system_profiler' 'wait -n'; do
@@ -1185,7 +1369,8 @@ test_hang_ip() {
 test_hang_list_after_delete() {
   setup
   touch "$ROOT/hang_list_after_delete"
-  export S11_BOUND_POLLS=8
+  # The post-delete list hangs. 40 polls lets the guest ssh finish first.
+  export S11_BOUND_POLLS=40
   run_probe 12 --stage A "${ARGS[@]}"
   need_ec 5
   common_end
@@ -1726,6 +1911,22 @@ test_dispatcher_literal() {
   if grep -F -q 'eval ' "$CASE/dispatcher.sh"; then die "dispatcher uses eval"; fi
 }
 
+test_dispatcher_c6_c7_literals() {
+  setup
+  extract_dispatcher
+  expect_reject 'run C6'
+  expect_reject 'run C6 files'
+  expect_reject 'run C6 file extra'
+  expect_reject 'run C7 now'
+  expect_reject 'run C10'
+  local cmd
+  for cmd in 'run C6 file' 'run C6 dir' 'run C7'; do
+    SSH_ORIGINAL_COMMAND="$cmd" bash "$CASE/dispatcher.sh" >"$CASE/disp.out"
+    [[ "$?" == 6 ]] || die "accept ec for [$cmd]"
+    grep -F -q fail-run "$CASE/disp.out" || die "accept text for [$cmd]"
+  done
+}
+
 test_stage_m_c1() {
   setup
   write_pinned
@@ -2126,6 +2327,7 @@ run_case help-fail test_help_fail
 run_case output-exists test_output_exists
 run_case route-fail test_route_fail
 run_case dispatcher test_dispatcher_literal
+run_case dispatcher-c6 test_dispatcher_c6_c7_literals
 run_case stage-m-c1 test_stage_m_c1
 run_case c1-old-name test_c1_old_name_quarantine
 run_case stage-m-c2 test_stage_m_c2
@@ -2153,6 +2355,7 @@ enable_volume() {
   export S11_MOUNT=$ROOT/bin/mount
   export S11_MDUTIL=$ROOT/bin/mdutil
   export S11_TMUTIL=$ROOT/bin/tmutil
+  export S11_MDFIND=$ROOT/bin/mdfind
   export S11_STAT=$ROOT/bin/statv
   export S11_DF=$ROOT/bin/df
   export S11_LS=$ROOT/bin/lsacl
@@ -2326,7 +2529,8 @@ test_stage_v_timeout_quarantine() {
   setup
   enable_volume
   touch "$ROOT/hang_info"
-  export S11_BOUND_POLLS=4
+  # 40 polls still kills the info hang, and leaves room for list/stat under load.
+  export S11_BOUND_POLLS=40
   run_probe 12 --stage V --case C4 "${ARGS[@]}"
   need_ec 5
   common_end
@@ -2521,7 +2725,8 @@ test_stage_v_volio_hang_quarantine() {
   printf '%s\n' '#!/bin/bash' 'while true; do sleep 30; done' >"$ROOT/bin/volio-hang"
   chmod 700 "$ROOT/bin/volio-hang"
   export S11_VOLIO=$ROOT/bin/volio-hang
-  export S11_BOUND_POLLS=4
+  # 40 polls still kills the volio hang, and leaves room for list/stat under load.
+  export S11_BOUND_POLLS=40
   run_probe 12 --stage V --case C4 "${ARGS[@]}"
   need_ec 5
   common_end
@@ -2650,6 +2855,14 @@ test_stage_v_tool_override_refused() {
   common_end
   need_reason tool-override
   [[ ! -f "$ROOT/ls.log" ]] || die "override invoked ls"
+  rm -rf "$CASE/out"
+  unset S11_LS
+  export S11_MDFIND=$ROOT/bin/mdfind
+  run_probe 8 --stage V --case C4 "${ARGS[@]}"
+  need_ec 2
+  common_end
+  need_reason tool-override
+  [[ ! -f "$ROOT/mdfind.log" ]] || die "override invoked mdfind"
 }
 
 test_stage_v_c1_slot_stat_stall() {
@@ -2667,7 +2880,8 @@ exec bash "$PROBE" __volio "\$@"
 EOF
   chmod 700 "$ROOT/bin/volio-slot"
   export S11_VOLIO=$ROOT/bin/volio-slot
-  export S11_BOUND_POLLS=4
+  # 40 polls still kills the slot hang, and leaves the C1 boot commands time to finish.
+  export S11_BOUND_POLLS=40
   run_probe 20 --stage V --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
   need_ec 5
   common_end
@@ -2827,5 +3041,799 @@ run_case stage-v-acl test_stage_v_acl_grant_rejected
 run_case stage-v-c9-capture test_stage_v_c9_capture_bound
 run_case stage-v-c9-origin test_stage_v_c9_prefill_and_origin
 run_case stage-v-c9-growth test_stage_v_c9_alloc_growth
+
+detach_lines() {
+  local n=0
+  if [[ -f "$ROOT/hdiutil.log" ]]; then
+    n=$(grep -E -c '^detach( |$)' "$ROOT/hdiutil.log" || true)
+  fi
+  printf '%s\n' "$n"
+}
+force_lines() {
+  local n=0
+  if [[ -f "$ROOT/hdiutil.log" ]]; then
+    n=$(grep -E -c '^detach -force ' "$ROOT/hdiutil.log" || true)
+  fi
+  printf '%s\n' "$n"
+}
+receipt_field() {
+  awk -F= -v k="$1" '$1==k { print substr($0, index($0, "=")+1); exit }' "$RCPT"
+}
+c5_crash() {
+  local fault=$1
+  rm -rf "$CASE/out" "$CASE/outr"
+  rm -f "$ROOT/hdiutil.log" "$ROOT/diskutil.log" "$ROOT/vol.state" "$ROOT/info.count" "$ROOT/detach.out" "$ROOT/plutil.log"
+  run_probe 15 --stage V --case C5 --fault "$fault" "${ARGS[@]}"
+  need_ec 137
+  [[ ! -f "$CASE/out/report.json" ]] || die "killed C5 wrote a report"
+  RCPT=$CASE/out/volume-receipt
+  [[ -f "$RCPT" ]] || die "C5 left no receipt"
+  find "$CASE/tmp" -mindepth 1 -maxdepth 1 -name 's11-0.*' -exec rm -rf {} +
+  ATTEMPT=$(receipt_field attempt)
+  IMAGE=$(receipt_field image)
+  MOUNT=$(receipt_field mount)
+  [[ -n "$ATTEMPT" && -n "$IMAGE" && -n "$MOUNT" ]] || die "receipt fields"
+  DETACH_BEFORE=$(detach_lines)
+  FORCE_BEFORE=$(force_lines)
+}
+c5_recover() {
+  run_probe 15 --stage R --receipt "$RCPT" "${ARGS[@]}" --out "$CASE/outr"
+}
+assert_stage_r() {
+  "$PYTHON" - "$CASE/outr/report.json" "$1" "$2" "$3" "$4" "$5" <<'PY' || die "stage R shape"
+import json, sys
+path, verdict, reason, image, mount, attempt = sys.argv[1:]
+rep = json.load(open(path))
+assert rep["schema"] == "s11-0-probe/v2", rep["schema"]
+stages = rep["stages"]
+assert len(stages) == 1, stages
+st = stages[0]
+assert st["stage"] == "R", st
+assert st["verdict"] == verdict, st
+assert st["reason"] == reason, st
+assert (st["image"], st["mount"], st["attempt"]) == (image, mount, attempt), st
+if verdict == "quarantine":
+    assert "quarantine" in rep["reasons"], rep["reasons"]
+    assert reason in rep["reasons"], rep["reasons"]
+PY
+}
+c5_expect_clean() {
+  local want_detach=$1 after force_after left
+  need_ec 0
+  common_end yes "$CASE/outr"
+  grep -F -x -q 'recovery=noted' "$RCPT" || die "recovery not noted"
+  [[ -d "$ATTEMPT" && ! -L "$ATTEMPT" ]] || die "attempt not kept"
+  [[ ! -e "$IMAGE" && ! -L "$IMAGE" ]] || die "image remains"
+  [[ ! -e "$MOUNT" && ! -L "$MOUNT" ]] || die "mount remains"
+  left=$(find "$ATTEMPT" -mindepth 1 -print | wc -l | tr -d ' ')
+  [[ "$left" == 0 ]] || die "attempt not empty ($left)"
+  after=$(detach_lines)
+  force_after=$(force_lines)
+  [[ "$after" == "$want_detach" ]] || die "detach $DETACH_BEFORE -> $after want $want_detach"
+  [[ "$force_after" == "$FORCE_BEFORE" ]] || die "recovery forced"
+  assert_stage_r ok recovered absent absent kept
+}
+
+test_stage_v_c10_observed() {
+  setup
+  enable_volume
+  export S11_C10_WAIT=0
+  run_probe 20 --stage V --case C10 "${ARGS[@]}"
+  need_ec 4
+  common_end
+  need_reason observed
+  assert_image_gone
+  no_clone_ops
+  local f tok
+  for f in "$CASE/out/report.json" "$CASE/out/volume-receipt" "$CASE/stdout" "$CASE/stderr"; do
+    if grep -F -q S11SecretDestName "$f"; then die "secret in $f"; fi
+  done
+  [[ -f "$ROOT/mdfind.log" ]] || die "mdfind not called"
+  grep -F -q -- '-onlyin' "$ROOT/mdfind.log" || die "mdfind argv"
+  tok=$(awk 'NR==1 { print $NF; exit }' "$ROOT/mdfind.log")
+  [[ ${#tok} -eq 32 ]] || die "token len ${#tok}"
+  if grep -F -q -- "$tok" "$CASE/out/report.json" "$CASE/stdout" "$CASE/stderr"; then die "token leaked"; fi
+  if grep -E -q 'addexclusion|startbackup' "$ROOT/tmutil.log"; then die "tmutil mutated"; fi
+  grep -F -q destinationinfo "$ROOT/tmutil.log" || die "no destinationinfo"
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c10 fields"
+import json, sys
+rep = json.load(open(sys.argv[1]))
+st = rep["stages"][0]
+assert st["evidence"] == "volume-only", st["evidence"]
+cases = st["cases"]
+assert len(cases) == 1, cases
+c = cases[0]
+assert c["verdict"] == "unknown" and c["reason"] == "observed", (c["verdict"], c["reason"])
+fields = dict(tok.split("=", 1) for tok in c["record"].split())
+assert fields["op"] == "c10"
+assert fields["mdfind_hits"].isdigit(), fields["mdfind_hits"]
+assert fields["mdutil"] == "disabled", fields["mdutil"]
+assert fields["fsevents"] == "present", fields["fsevents"]
+assert fields["fsevents_uid"] == "0", fields["fsevents_uid"]
+assert fields["fsevents_mode"] == "0700", fields["fsevents_mode"]
+assert fields["dest_count"] == "1", fields["dest_count"]
+assert fields["excluded_i"] == "included", fields["excluded_i"]
+assert fields["excluded_m"] == "included", fields["excluded_m"]
+assert "S11SecretDestName" not in c["record"]
+PY
+}
+
+# Real Mini output when no backup destination exists.
+test_stage_v_c10_nodest() {
+  local flag want
+  for flag in tmutil_nodest tmutil_localonly tmutil_network tmutil_network_nourl tmutil_oddkind; do
+    rm -rf "$CASE/out"
+    setup
+    enable_volume
+    export S11_C10_WAIT=0
+    rm -f "$ROOT/tmutil_nodest" "$ROOT/tmutil_localonly" "$ROOT/tmutil_network" "$ROOT/tmutil_network_nourl" "$ROOT/tmutil_oddkind"
+    touch "$ROOT/$flag"
+    case "$flag" in
+      tmutil_nodest) want=0 ;;
+      tmutil_localonly|tmutil_network) want=1 ;;
+      *) want=unknown ;;
+    esac
+    run_probe 12 --stage V --case C10 "${ARGS[@]}"
+    need_ec 4
+    common_end
+    assert_image_gone
+    if grep -F -q S11SecretDestName "$CASE/out/report.json"; then die "dest name leaked"; fi
+    "$PYTHON" - "$CASE/out/report.json" "$want" <<'PY' || die "c10 $flag"
+import json, sys
+c = json.load(open(sys.argv[1]))["stages"][0]["cases"][0]
+fields = dict(tok.split("=", 1) for tok in c["record"].split())
+assert fields["dest_count"] == sys.argv[2], fields["dest_count"]
+PY
+  done
+}
+
+# Guest holds an FD until the VM stops; the host then tears down the ordinary way.
+test_stage_v_c6_guest_hold() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  run_probe 50 --stage V --case C6 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 0
+  common_end
+  local n=0 img nd
+  sed -n 's/^create .* \(.*\/mailbox\.sparseimage\)$/\1/p' "$ROOT/hdiutil.log" >"$CASE/images.list"
+  while IFS= read -r img; do
+    [[ -n "$img" ]] || continue
+    [[ ! -e "$img" && ! -L "$img" ]] || die "image remains $img"
+    n=$((n + 1))
+  done <"$CASE/images.list"
+  [[ "$n" == 2 ]] || die "c6 image count $n"
+  nd=$(grep -E -c '^detach [^ -]' "$ROOT/hdiutil.log" || true)
+  [[ "$nd" == 2 ]] || die "c6 normal detach $nd"
+  if grep -F -q -- '-force' "$ROOT/hdiutil.log"; then die "c6 forced"; fi
+  grep -F -q 'run C6 file' "$ROOT/ssh.log" || die "ssh file"
+  grep -F -q 'run C6 dir' "$ROOT/ssh.log" || die "ssh dir"
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c6 records"
+import json, sys
+st = json.load(open(sys.argv[1]))["stages"][0]
+assert st["verdict"] == "ok", st["verdict"]
+cases = st["cases"]
+assert [c["boundary"] for c in cases] == ["file", "dir"], cases
+for c in cases:
+    assert c["verdict"] == "ok" and c["reason"] == "measured", (c["boundary"], c["verdict"], c["reason"])
+    f = dict(tok.split("=", 1) for tok in c["record"].split())
+    assert f["guest_held"] == "1" and f["detach_rc"] == "0" and f["detach_class"] == "none" and f["force"] == "0", c["record"]
+PY
+}
+
+test_stage_v_c6_not_held() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/c6_nohold"
+  run_probe 50 --stage V --case C6 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  assert_image_gone
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c6 not held"
+import json, sys
+c = json.load(open(sys.argv[1]))["stages"][0]["cases"][0]
+assert c["verdict"] == "unknown" and c["reason"] == "guest-not-held", (c["verdict"], c["reason"])
+PY
+}
+
+test_stage_v_c6_no_force_while_vm_up() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/fail_stop"
+  run_probe 30 --stage V --case C6 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason quarantine
+  assert_image_kept
+  if grep -E '^detach( |$)' "$ROOT/hdiutil.log"; then die "detached while vm up"; fi
+  if grep -F -q -- '-force' "$ROOT/hdiutil.log"; then die "forced while vm up"; fi
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c6 vm up"
+import json, sys
+rep = json.load(open(sys.argv[1]))
+cases = rep["stages"][0]["cases"]
+assert [c["boundary"] for c in cases] == ["file", "dir"], cases
+assert cases[0]["verdict"] == "quarantine", cases[0]
+fields = dict(tok.split("=", 1) for tok in cases[0]["record"].split())
+assert fields["guest_held"] == "1", cases[0]["record"]
+assert fields["force"] == "0", cases[0]["record"]
+assert cases[1]["verdict"] == "not_run", cases[1]
+PY
+}
+
+test_stage_v_c7_m0_empty_ok() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  run_probe 30 --stage V --case C7 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 0
+  common_end
+  assert_image_gone
+  assert_detach_count 1
+  assert_force_count 0
+  grep -F -q 'run C7' "$ROOT/ssh.log" || die "ssh C7"
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c7 ok"
+import json, sys
+rep = json.load(open(sys.argv[1]))
+c = rep["stages"][0]["cases"][0]
+assert c["verdict"] == "ok" and c["reason"] == "measured", (c["verdict"], c["reason"])
+fields = dict(tok.split("=", 1) for tok in c["record"].split())
+assert fields["detach_class"] == "none", c["record"]
+assert fields["tart_alive"] == "yes", c["record"]
+assert fields["m0_entries"] == "0", c["record"]
+assert fields["guest"] == "ok:8,enoent:0,eio:0,other:0,hang:0", c["record"]
+PY
+}
+
+test_stage_v_c7_m0_entries_failed() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/plant_m0"
+  run_probe 30 --stage V --case C7 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 5
+  common_end
+  need_reason m0-write
+  local mp img
+  mp=$(mount_point)
+  [[ -f "$mp/s11-landed" ]] || die "landed missing"
+  img=$(image_path)
+  [[ -n "$img" && -f "$img" && ! -L "$img" ]] || die "m0 image removed"
+  if grep -F -q -- '-force' "$ROOT/hdiutil.log"; then die "m0 forced"; fi
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c7 m0"
+import json, sys
+rep = json.load(open(sys.argv[1]))
+c = rep["stages"][0]["cases"][0]
+assert c["verdict"] == "failed" and c["reason"] == "m0-write", (c["verdict"], c["reason"])
+fields = dict(tok.split("=", 1) for tok in c["record"].split())
+assert fields["m0_entries"] == "1", c["record"]
+assert fields["tart_alive"] == "yes", c["record"]
+assert fields["detach_rc"] == "0", c["record"]
+PY
+}
+
+test_stage_v_c7_detach_fail_no_force() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/fail_detach_once"
+  run_probe 30 --stage V --case C7 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 0
+  common_end
+  assert_image_gone
+  local nd nf
+  nd=$(grep -E -c '^detach [^ -]' "$ROOT/hdiutil.log" || true)
+  nf=$(force_lines)
+  [[ "$nd" == 2 && "$nf" == 0 ]] || die "c7 fail detach normal=$nd force=$nf"
+  grep -F -q 'run C7' "$ROOT/ssh.log" || die "ssh C7 after busy"
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c7 busy"
+import json, sys
+rep = json.load(open(sys.argv[1]))
+c = rep["stages"][0]["cases"][0]
+assert c["verdict"] == "ok", (c["verdict"], c["reason"])
+fields = dict(tok.split("=", 1) for tok in c["record"].split())
+assert fields["detach_class"] == "busy", c["record"]
+assert fields["detach_rc"] != "0", c["record"]
+assert fields["guest"] == "ok:8,enoent:0,eio:0,other:0,hang:0", c["record"]
+assert fields["m0_entries"] == "unknown", c["record"]
+PY
+}
+
+test_stage_v_c5_f1_recovery() {
+  setup
+  enable_volume
+  c5_crash F1
+  c5_recover
+  c5_expect_clean "$DETACH_BEFORE"
+}
+test_stage_v_c5_f3_recovery() {
+  setup
+  enable_volume
+  c5_crash F3
+  c5_recover
+  c5_expect_clean "$((DETACH_BEFORE + 1))"
+}
+test_stage_v_c5_f4_recovery() {
+  setup
+  enable_volume
+  c5_crash F4
+  c5_recover
+  c5_expect_clean "$DETACH_BEFORE"
+}
+test_stage_v_c5_f5_recovery() {
+  setup
+  enable_volume
+  c5_crash F5
+  c5_recover
+  c5_expect_clean "$DETACH_BEFORE"
+}
+test_stage_v_c5_f2_quarantine() {
+  setup
+  enable_volume
+  c5_crash F2
+  c5_recover
+  need_ec 5
+  common_end yes "$CASE/outr"
+  grep -F -x -q 'recovery=noted' "$RCPT" || die "F2 not noted"
+  [[ -f "$IMAGE" && ! -L "$IMAGE" ]] || die "F2 image not kept"
+  local after
+  after=$(detach_lines)
+  [[ "$after" == "$DETACH_BEFORE" ]] || die "F2 detached"
+  assert_stage_r quarantine image-unmatched kept kept kept
+}
+
+test_stage_r_receipt_tamper() {
+  setup
+  enable_volume
+  mkdir -p "$CASE/attempt"
+  printf 'keep\n' >"$CASE/sentinel"
+  printf 'keep\n' >"$CASE/attempt/keepme"
+  local kind body attempt image mount
+  attempt=$CASE/attempt
+  image=$CASE/attempt/mailbox.sparseimage
+  mount=$CASE/attempt/mnt
+  for kind in extra dup escape; do
+    rm -rf "$CASE/out"
+    rm -f "$ROOT/hdiutil.log" "$CASE/bad-receipt"
+    case "$kind" in
+      extra)
+        printf '%s\n' 'phase=reserved' "image=$image" 'image_dev=' 'image_ino=' 'device=' "mount=$mount" 'mount_dev=11' 'mount_ino=22' "attempt=$attempt" 'attempt_dev=11' 'attempt_ino=22' 'case=C5' 'boundary=-' 'evil=1' >"$CASE/bad-receipt"
+        ;;
+      dup)
+        printf '%s\n' 'phase=reserved' 'phase=created' "image=$image" 'image_dev=' 'image_ino=' 'device=' "mount=$mount" 'mount_dev=11' 'mount_ino=22' "attempt=$attempt" 'attempt_dev=11' 'attempt_ino=22' 'case=C5' 'boundary=-' >"$CASE/bad-receipt"
+        ;;
+      escape)
+        printf '%s\n' 'phase=reserved' "image=$image" 'image_dev=' 'image_ino=' 'device=' "mount=$mount" 'mount_dev=11' 'mount_ino=22' "attempt=$CASE/../escape" 'attempt_dev=11' 'attempt_ino=22' 'case=C5' 'boundary=-' >"$CASE/bad-receipt"
+        ;;
+    esac
+    run_probe 8 --stage R --receipt "$CASE/bad-receipt" "${ARGS[@]}"
+    need_ec 2
+    common_end
+    need_reason receipt-bad
+    [[ ! -f "$ROOT/hdiutil.log" ]] || die "tamper $kind called hdiutil"
+    if grep -F -x -q 'recovery=noted' "$CASE/bad-receipt"; then die "tamper $kind noted"; fi
+    [[ -f "$CASE/sentinel" && -f "$CASE/attempt/keepme" ]] || die "tamper $kind deleted sentinel"
+  done
+}
+
+assert_untouched() {
+  local why=$1
+  [[ "$(detach_lines)" == "$DETACH_BEFORE" ]] || die "$why detach $(detach_lines)"
+  [[ "$(force_lines)" == "$FORCE_BEFORE" ]] || die "$why force"
+  [[ -f "$IMAGE" && ! -L "$IMAGE" ]] || die "$why image"
+  [[ -d "$MOUNT" && ! -L "$MOUNT" ]] || die "$why mount"
+  if grep -F -x -q 'recovery=noted' "$RCPT"; then die "$why noted"; fi
+}
+
+assert_r_at() {
+  "$PYTHON" - "$1" "$2" "$3" "$4" "$5" "$6" <<'PY' || die "stage R shape"
+import json, sys
+path, verdict, reason, image, mount, attempt = sys.argv[1:]
+rep = json.load(open(path))
+assert rep["schema"] == "s11-0-probe/v2", rep["schema"]
+assert rep["exclusive_window"] == "assumed", rep["exclusive_window"]
+st = rep["stages"][0]
+assert st["stage"] == "R", st
+assert st["verdict"] == verdict, st
+assert st["reason"] == reason, st
+assert (st["image"], st["mount"], st["attempt"]) == (image, mount, attempt), st
+PY
+}
+
+set_receipt_case() {
+  local tmp=$RCPT.tmp
+  awk -F= -v c="$1" 'BEGIN{OFS="="} $1=="case"{$2=c} {print}' "$RCPT" >"$tmp"
+  mv "$tmp" "$RCPT"
+  chmod 600 "$RCPT"
+}
+
+# A parseable C7 receipt is refused before detach, unlink, or rmdir.
+test_stage_r_c7_refused() {
+  setup
+  enable_volume
+  c5_crash F3
+  set_receipt_case C7
+  [[ -f "$IMAGE" && -d "$MOUNT" ]] || die "F3 leftovers"
+  grep -F -q 'attached=1' "$ROOT/vol.state" || die "not attached"
+  c5_recover
+  need_ec 2
+  common_end yes "$CASE/outr"
+  need_reason_outr recovery-unsupported
+  assert_untouched c7
+}
+
+# Normal detach fails and the image inode moves: do not issue force.
+test_stage_r_shift_skips_force() {
+  setup
+  enable_volume
+  c5_crash F3
+  touch "$ROOT/fail_detach" "$ROOT/shift_after_detach"
+  c5_recover
+  need_ec 5
+  common_end yes "$CASE/outr"
+  assert_stage_r quarantine mapping-changed kept kept kept
+  [[ "$(detach_lines)" == $((DETACH_BEFORE + 1)) ]] || die "normal detach count"
+  [[ "$(force_lines)" == "$FORCE_BEFORE" ]] || die "force after shift"
+  [[ -f "$IMAGE" && -d "$MOUNT" ]] || die "shift removed volume"
+}
+
+test_stage_r_force_once() {
+  local f1 i
+  setup
+  enable_volume
+  c5_crash F3
+  touch "$ROOT/fail_detach" "$ROOT/fail_force"
+  c5_recover
+  need_ec 5
+  common_end yes "$CASE/outr"
+  assert_stage_r quarantine detach-failed kept kept kept
+  grep -F -x -q 'force=intent' "$RCPT" || die "intent not recorded"
+  [[ "$(force_lines)" == $((FORCE_BEFORE + 1)) ]] || die "first force count"
+  [[ -f "$IMAGE" ]] || die "first image gone"
+  f1=$(force_lines)
+  rm -rf "$CASE/outr2"
+  run_probe 12 --stage R --receipt "$RCPT" "${ARGS[@]}" --out "$CASE/outr2"
+  need_ec 5
+  common_end yes "$CASE/outr2"
+  assert_r_at "$CASE/outr2/report.json" quarantine force-spent kept kept kept
+  [[ "$(force_lines)" == "$f1" ]] || die "second run forced"
+  [[ -f "$IMAGE" && -d "$MOUNT" ]] || die "second run removed volume"
+
+  c5_crash F3
+  touch "$ROOT/fail_detach" "$ROOT/hang_force"
+  rm -f "$ROOT/force.count"
+  start_probe 20 --stage R --receipt "$RCPT" "${ARGS[@]}" --out "$CASE/outr"
+  i=0
+  while [[ "$i" -lt 50 ]]; do
+    [[ -s "$ROOT/force.count" ]] && grep -F -x -q 'force=intent' "$RCPT" && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [[ -s "$ROOT/force.count" ]] || die "force never started"
+  grep -F -x -q 'force=intent' "$RCPT" || die "intent missing at hang"
+  kill -KILL -- -"$PROBE_PID" 2>/dev/null || true
+  finish_probe
+  find "$CASE/tmp" -mindepth 1 -maxdepth 1 -name 's11-0.*' -exec rm -rf {} +
+  f1=$(force_lines)
+  rm -rf "$CASE/outr2"
+  run_probe 12 --stage R --receipt "$RCPT" "${ARGS[@]}" --out "$CASE/outr2"
+  need_ec 5
+  common_end yes "$CASE/outr2"
+  assert_r_at "$CASE/outr2/report.json" quarantine force-spent kept kept kept
+  [[ "$(force_lines)" == "$f1" ]] || die "force after crash"
+  [[ -f "$IMAGE" && -d "$MOUNT" ]] || die "crash recovery removed volume"
+}
+
+test_stage_r_trust_retarget() {
+  local decoy dev ino tmp
+  setup
+  enable_volume
+  c5_crash F4
+  decoy=$ATTEMPT/not-mailbox.sparseimage
+  cp "$IMAGE" "$decoy"
+  chmod 600 "$decoy"
+  /usr/bin/stat -c '%d %i' "$decoy" >"$CASE/id.tmp"
+  read -r dev ino <"$CASE/id.tmp"
+  tmp=$RCPT.tmp
+  awk -F= -v p="$decoy" -v d="$dev" -v i="$ino" 'BEGIN{OFS="="}
+    $1=="image"{$0="image=" p}
+    $1=="image_dev"{$0="image_dev=" d}
+    $1=="image_ino"{$0="image_ino=" i}
+    {print}' "$RCPT" >"$tmp"
+  mv "$tmp" "$RCPT"
+  chmod 600 "$RCPT"
+  c5_recover
+  need_ec 2
+  common_end yes "$CASE/outr"
+  need_reason_outr receipt-untrusted
+  assert_untouched retarget
+  [[ -f "$decoy" ]] || die "decoy removed"
+
+  c5_crash F4
+  mkdir -m 0700 "$CASE/out/s11v.sibling"
+  c5_recover
+  need_ec 2
+  common_end yes "$CASE/outr"
+  need_reason_outr receipt-untrusted
+  assert_untouched sibling
+  [[ -d "$CASE/out/s11v.sibling" ]] || die "sibling removed"
+
+  c5_crash F4
+  mv "$CASE" "$CASE.real"
+  ln -s "$CASE.real" "$CASE"
+  c5_recover
+  need_ec 2
+  common_end yes "$CASE/outr"
+  need_reason_outr receipt-untrusted
+  assert_untouched symlink
+}
+
+test_stage_r_preflight_keeps_image() {
+  setup
+  enable_volume
+  c5_crash F4
+  /usr/bin/rmdir "$MOUNT" || die "mount not empty"
+  mkdir -m 0700 "$MOUNT"
+  c5_recover
+  need_ec 5
+  common_end yes "$CASE/outr"
+  assert_stage_r quarantine identity-mismatch kept kept kept
+  [[ "$(detach_lines)" == "$DETACH_BEFORE" ]] || die "replaced mount detached"
+  [[ -f "$IMAGE" ]] || die "replaced mount unlinked image"
+
+  c5_crash F4
+  printf x >"$MOUNT/extra"
+  c5_recover
+  need_ec 5
+  common_end yes "$CASE/outr"
+  assert_stage_r quarantine mount-dirty kept kept kept
+  [[ "$(detach_lines)" == "$DETACH_BEFORE" ]] || die "dirty mount detached"
+  [[ -f "$IMAGE" && -f "$MOUNT/extra" ]] || die "dirty mount removed"
+
+  c5_crash F4
+  printf x >"$ATTEMPT/stray"
+  c5_recover
+  need_ec 5
+  common_end yes "$CASE/outr"
+  assert_stage_r quarantine attempt-dirty kept kept kept
+  [[ "$(detach_lines)" == "$DETACH_BEFORE" ]] || die "dirty attempt detached"
+  [[ -f "$IMAGE" && -f "$ATTEMPT/stray" ]] || die "dirty attempt removed"
+
+  # Line-breaking names must not hide from the attempt audit.
+  local nl
+  for nl in $'\n' $'mailbox.sparseimage\n'; do
+    c5_crash F4
+    printf x >"$ATTEMPT/$nl"
+    c5_recover
+    need_ec 5
+    common_end yes "$CASE/outr"
+    [[ "$(detach_lines)" == "$DETACH_BEFORE" ]] || die "newline name detached"
+    [[ -f "$IMAGE" && -f "$ATTEMPT/$nl" ]] || die "newline name removed image"
+    grep -F -q '"verdict":"quarantine"' "$CASE/outr/report.json" || die "newline name not quarantined"
+  done
+}
+
+test_stage_r_receipt_bound() {
+  local t0 n
+  setup
+  enable_volume
+  c5_crash F4
+  export S11_RECEIPT_STALL=30 S11_R_BUDGET=2
+  t0=$SECONDS
+  run_probe 8 --stage R --receipt "$RCPT" "${ARGS[@]}" --out "$CASE/outr"
+  need_ec 2
+  common_end yes "$CASE/outr"
+  need_reason_outr receipt-bad
+  assert_untouched stall
+  [[ $((SECONDS - t0)) -lt 5 ]] || die "stall blocked the probe"
+
+  c5_crash F4
+  unset S11_RECEIPT_STALL S11_R_BUDGET
+  /usr/bin/dd if=/dev/zero bs=1000 count=9 >>"$RCPT" 2>/dev/null
+  chmod 600 "$RCPT"
+  n=$(wc -c <"$RCPT" | tr -d ' ')
+  [[ "$n" -gt 8192 ]] || die "receipt not oversized ($n)"
+  t0=$SECONDS
+  run_probe 8 --stage R --receipt "$RCPT" "${ARGS[@]}" --out "$CASE/outr"
+  need_ec 2
+  common_end yes "$CASE/outr"
+  need_reason_outr receipt-bad
+  assert_untouched oversized
+  [[ $((SECONDS - t0)) -lt 5 ]] || die "oversized read blocked"
+}
+
+test_stage_v_c7_guest_failed() {
+  local kind reason
+  for kind in fail hang bad zero short; do
+    rm -rf "$CASE/out"
+    setup
+    enable_volume
+    write_pinned
+    write_fake_probe
+    rm -f "$ROOT/c7_ssh_fail" "$ROOT/c7_hang" "$ROOT/c7_bad" "$ROOT/c7_zero" "$ROOT/c7_short"
+    unset S11_C7_BUDGET
+    reason=guest-failed
+    case "$kind" in
+      fail) touch "$ROOT/c7_ssh_fail" ;;
+      hang) touch "$ROOT/c7_hang"; export S11_C7_BUDGET=2 ;;
+      bad) touch "$ROOT/c7_bad"; reason=guest-malformed ;;
+      zero) touch "$ROOT/c7_zero"; reason=guest-malformed ;;
+      short) touch "$ROOT/c7_short"; reason=guest-malformed ;;
+    esac
+    run_probe 25 --stage V --case C7 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+    need_ec 4
+    common_end
+    need_reason "$reason"
+    "$PYTHON" - "$CASE/out/report.json" "$reason" <<'PY' || die "c7 $kind"
+import json, sys
+c = json.load(open(sys.argv[1]))["stages"][0]["cases"][0]
+assert c["verdict"] == "unknown" and c["reason"] == sys.argv[2], (c["verdict"], c["reason"])
+PY
+  done
+}
+
+# A measured first-operation hang is a result, not a malformed record.
+test_stage_v_c7_hang_measured() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/c7_hang1"
+  run_probe 25 --stage V --case C7 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 0
+  common_end
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c7 hang measured"
+import json, sys
+c = json.load(open(sys.argv[1]))["stages"][0]["cases"][0]
+assert c["verdict"] == "ok" and c["reason"] == "measured", (c["verdict"], c["reason"])
+fields = dict(tok.split("=", 1) for tok in c["record"].split())
+assert fields["guest"] == "ok:0,enoent:0,eio:0,other:0,hang:1", c["record"]
+PY
+}
+
+test_stage_v_c7_tart_dead() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/c7_tart_dead"
+  run_probe 25 --stage V --case C7 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  need_reason tart-dead
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c7 tart dead"
+import json, sys
+c = json.load(open(sys.argv[1]))["stages"][0]["cases"][0]
+assert c["verdict"] == "unknown" and c["reason"] == "tart-dead", (c["verdict"], c["reason"])
+fields = dict(tok.split("=", 1) for tok in c["record"].split())
+assert fields["guest"].startswith("ok:"), c["record"]
+assert fields["tart_alive"] != "yes", c["record"]
+PY
+}
+
+test_stage_v_c7_not_ready() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/c7_no_ready"
+  export S11_READY_SEC=1
+  run_probe 25 --stage V --case C7 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 4
+  common_end
+  need_reason not-ready
+  if grep -F -q 'run C7' "$ROOT/ssh.log"; then die "ran C7 before ready"; fi
+  grep -F -q 'run C1' "$ROOT/ssh.log" || die "no ready handshake"
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c7 not ready"
+import json, sys
+c = json.load(open(sys.argv[1]))["stages"][0]["cases"][0]
+assert c["verdict"] == "unknown" and c["reason"] == "not-ready", (c["verdict"], c["reason"])
+PY
+}
+
+test_stage_v_c7_reattach_keeps_image() {
+  local img
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/c7_reattach"
+  run_probe 25 --stage V --case C7 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 5
+  common_end
+  img=$(image_path)
+  [[ -n "$img" && -f "$img" && ! -L "$img" ]] || die "reattach removed image"
+  [[ "$(detach_lines)" -ge 1 ]] || die "early detach missing"
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c7 reattach"
+import json, sys
+c = json.load(open(sys.argv[1]))["stages"][0]["cases"][0]
+assert c["verdict"] != "ok" and c["reason"] != "measured", (c["verdict"], c["reason"])
+PY
+}
+
+test_stage_v_c10_dest_unknown() {
+  local flag
+  for flag in tmutil_empty tmutil_sep tmutil_kind tmutil_trunc tmutil_mix; do
+    rm -rf "$CASE/out"
+    setup
+    enable_volume
+    export S11_C10_WAIT=0
+    rm -f "$ROOT/tmutil_empty" "$ROOT/tmutil_sep" "$ROOT/tmutil_kind" "$ROOT/tmutil_trunc" "$ROOT/tmutil_mix" \
+      "$ROOT/hdiutil.log" "$ROOT/diskutil.log" "$ROOT/vol.state" "$ROOT/tmutil.log"
+    touch "$ROOT/$flag"
+    run_probe 12 --stage V --case C10 "${ARGS[@]}"
+    need_ec 4
+    common_end
+    assert_image_gone
+    if grep -F -q S11SecretDestName "$CASE/out/report.json"; then die "secret in $flag"; fi
+    "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c10 $flag"
+import json, sys
+c = json.load(open(sys.argv[1]))["stages"][0]["cases"][0]
+fields = dict(tok.split("=", 1) for tok in c["record"].split())
+assert fields["dest_count"] == "unknown", fields["dest_count"]
+PY
+  done
+}
+
+test_stage_v_new_usage() {
+  setup
+  write_pinned
+  write_fake_probe
+  try_usage() {
+    rm -rf "$CASE/out"
+    rm -f "$ROOT/hdiutil.log" "$ROOT/diskutil.log"
+    run_probe 8 "$@"
+    need_ec 2
+    common_end
+    need_reason usage
+    [[ ! -f "$ROOT/hdiutil.log" ]] || die "usage called hdiutil"
+  }
+  try_usage --stage V --case C4 --fault F1 "${ARGS[@]}"
+  try_usage --stage V --case C10 --fault F1 "${ARGS[@]}"
+  try_usage --stage M --case C1 --fault F1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  try_usage --stage V --case C5 "${ARGS[@]}"
+  try_usage --stage V --case C6 --fault F1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  try_usage --stage R --fault F1 --receipt "$CASE/pinned" "${ARGS[@]}"
+  try_usage --stage R "${ARGS[@]}"
+  try_usage --dry-run --stage R --receipt "$CASE/pinned" "${ARGS[@]}"
+  try_usage --stage V --case C10 --probe "$ROOT/bin/s11probe" "${ARGS[@]}"
+  try_usage --stage V --case C10 --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  try_usage --stage all --fault F1 --endpoint-placeholder "${ARGS[@]}"
+}
+
+run_case stage-v-c10 test_stage_v_c10_observed
+run_case stage-v-c10-nodest test_stage_v_c10_nodest
+run_case stage-v-c6 test_stage_v_c6_guest_hold
+run_case stage-v-c6-notheld test_stage_v_c6_not_held
+run_case stage-v-c6-noforce test_stage_v_c6_no_force_while_vm_up
+run_case stage-v-c7-hang1 test_stage_v_c7_hang_measured
+run_case stage-v-c7-ok test_stage_v_c7_m0_empty_ok
+run_case stage-v-c7-m0 test_stage_v_c7_m0_entries_failed
+run_case stage-v-c7-busy test_stage_v_c7_detach_fail_no_force
+run_case stage-v-c5-f1 test_stage_v_c5_f1_recovery
+run_case stage-v-c5-f3 test_stage_v_c5_f3_recovery
+run_case stage-v-c5-f4 test_stage_v_c5_f4_recovery
+run_case stage-v-c5-f5 test_stage_v_c5_f5_recovery
+run_case stage-v-c5-f2 test_stage_v_c5_f2_quarantine
+run_case stage-r-tamper test_stage_r_receipt_tamper
+run_case stage-v-new-usage test_stage_v_new_usage
+run_case stage-r-c7 test_stage_r_c7_refused
+run_case stage-r-shift test_stage_r_shift_skips_force
+run_case stage-r-force-once test_stage_r_force_once
+run_case stage-r-trust test_stage_r_trust_retarget
+run_case stage-r-preflight test_stage_r_preflight_keeps_image
+run_case stage-r-bound test_stage_r_receipt_bound
+run_case stage-v-c7-guest test_stage_v_c7_guest_failed
+run_case stage-v-c7-tart test_stage_v_c7_tart_dead
+run_case stage-v-c7-ready test_stage_v_c7_not_ready
+run_case stage-v-c7-reattach test_stage_v_c7_reattach_keeps_image
+run_case stage-v-c10-unknown test_stage_v_c10_dest_unknown
 echo "ALL_OK ${SECONDS}s"
-[[ "$SECONDS" -lt 120 ]] || { echo "suite took ${SECONDS}s" >&2; exit 1; }
+[[ "$SECONDS" -lt 240 ]] || { echo "suite took ${SECONDS}s" >&2; exit 1; }

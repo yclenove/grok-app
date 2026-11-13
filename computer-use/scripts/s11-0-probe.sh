@@ -33,6 +33,7 @@ PLUTIL=/usr/bin/plutil
 MOUNTBIN=/sbin/mount
 MDUTIL=/usr/bin/mdutil
 TMUTIL=/usr/bin/tmutil
+MDFIND=/usr/bin/mdfind
 STATBIN=/usr/bin/stat
 DFBIN=/bin/df
 LSBIN=/bin/ls
@@ -44,10 +45,11 @@ if [[ "${S11_TEST_MODE:-}" == 1 ]]; then
   [[ -n "${S11_MOUNT:-}" ]] && MOUNTBIN=$S11_MOUNT
   [[ -n "${S11_MDUTIL:-}" ]] && MDUTIL=$S11_MDUTIL
   [[ -n "${S11_TMUTIL:-}" ]] && TMUTIL=$S11_TMUTIL
+  [[ -n "${S11_MDFIND:-}" ]] && MDFIND=$S11_MDFIND
   [[ -n "${S11_STAT:-}" ]] && STATBIN=$S11_STAT
   [[ -n "${S11_DF:-}" ]] && DFBIN=$S11_DF
   [[ -n "${S11_LS:-}" ]] && LSBIN=$S11_LS
-elif [[ -n "${S11_HDIUTIL:-}${S11_DISKUTIL:-}${S11_PLUTIL:-}${S11_MOUNT:-}${S11_MDUTIL:-}${S11_TMUTIL:-}${S11_STAT:-}${S11_DF:-}${S11_VOLIO:-}${S11_LS:-}" ]]; then
+elif [[ -n "${S11_HDIUTIL:-}${S11_DISKUTIL:-}${S11_PLUTIL:-}${S11_MOUNT:-}${S11_MDUTIL:-}${S11_TMUTIL:-}${S11_MDFIND:-}${S11_STAT:-}${S11_DF:-}${S11_VOLIO:-}${S11_LS:-}" ]]; then
   TOOL_OVERRIDE=1
 fi
 VOL_PREP_BUDGET=40; HOST_RESERVE=268435456; HOST_MARGIN=1048576; IMAGE_CAP=83886080
@@ -58,7 +60,7 @@ VOL_A=""; VOL_I=""; VOL_M=""; VOL_DEV=""; VOL_INO=""; VOL_DISK=""
 VOL_A_DEV=""; VOL_A_INO=""; VOL_M_DEV=""; VOL_M_INO=""; VOL_OUT_DEV=""; VOL_OUT_INO=""
 VOL_PHASE=none; VOL_MAYBE=0; VOL_ID_BROKEN=0; VOL_FORCE=0; VOL_OPT_REJECT=0; VOL_OVER=0
 VOL_IN_PREP=0; VOL_PREP_END=0; CLEANUP_DEADLINE=0
-VOL_CREATE_SEC=-1; VOL_ATTACH_SEC=-1; VOL_DETACH_SEC=-1
+VOL_CREATE_SEC=-1; VOL_ATTACH_SEC=-1; VOL_DETACH_SEC=-1; VOL_DETACH_RC=-
 VOL_FSTYPE=unknown; VOL_FSNAME=unknown; VOL_HINT=unknown; VOL_CAPACITY=unknown
 VOL_NOSUID=unknown; VOL_NOEXEC=unknown; VOL_NODEV=unknown; VOL_NOBROWSE=unknown
 VOL_OWNERS=unknown; VOL_CREATE_WARN=absent
@@ -67,6 +69,12 @@ VOL_IMAGE=unknown; VOL_ALLOC=unknown; VOL_HOST_DROP=unknown; VOL_ENOSPC=unknown;
 VOL_IMAGE_PEAK=unknown; VOL_ALLOC_PEAK=unknown; VOL_HOST_DROP_PEAK=unknown; VOL_SAMPLES=0
 VOL_BASE_ALLOC=0; VOL_BASE_HOST=0; VOL_HAVE_BASE=0
 VOL_HOST_PRE=unknown; VOL_HOST_FILL=unknown
+VOL_FAULT=""; RECEIPT=""; VOL_M0_DIRTY=0
+C6_HELD=0
+C7_DRC=-; C7_DSEC=-; C7_DCLASS=-; C7_ALIVE=unknown; C7_M0=unknown; C7_GUEST=unknown; C7_OK=0; C7_MEASURED=0; C7F=""
+VOL_FORCE_INTENT=0
+C10_HITS=unknown; C10_FS=unknown; C10_FUID=unknown; C10_FMODE=unknown; C10_DEST=unknown; C10_EXI=unknown; C10_EXM=unknown
+R_IMAGE=unknown; R_MOUNT=unknown; R_ATTEMPT=unknown
 PL_VAL=""; PL_TYPE=""; PL_COUNT=0; ST_SIZE=0; ST_BLOCKS=0; ST_DEV=0; ST_INO=0
 DF_AVAIL=0; DF_TOTAL=0; C9_ENOSPC=""; PROG_SEQ=0
 
@@ -545,7 +553,7 @@ cleanup_owned() {
   reap_ssh_bg
   if [[ "$NO_DELETE" == 1 ]]; then
     stop_run_proc
-    if [[ "$VOL_PHASE" == mounted || "$VOL_PHASE" == created || "$VOL_MAYBE" == 1 ]]; then vol_quarantine; fi
+    if [[ "$VOL_PHASE" == mounted || "$VOL_PHASE" == created || "$VOL_PHASE" == detached || "$VOL_MAYBE" == 1 ]]; then vol_quarantine; fi
     IN_CLEANUP=0; CLEANUP_DEADLINE=0
     [[ "$FINALIZING" == 1 ]] || trap 'REQUEST_CLEANUP=1' INT TERM HUP
     return 0
@@ -749,13 +757,13 @@ write_report() {
   (
     set -e
     first=1
-    printf '{"schema":"s11-0-probe/v2","status":"%s","endpoint_source":"%s","h1_independent_of_ip":"unknown",' "$STATUS" "$ENDPOINT_SOURCE"
+    printf '{"schema":"s11-0-probe/v2","exclusive_window":"assumed","status":"%s","endpoint_source":"%s","h1_independent_of_ip":"unknown",' "$STATUS" "$ENDPOINT_SOURCE"
     printf '"probe_budget_sec":%s,"cleanup_budget_sec":%s,"elapsed_sec":%s,' "$PROBE_BUDGET" "$CLEANUP_BUDGET" "$SECONDS"
     printf '"inventory_columns":%s,' "$cols"
     printf '"measured":%s,"unmeasured":%s,"reasons":%s,' "$measured" "$unmeasured" "$reasons"
     printf '"tart_help":"%s","tart_help_subcommands":%s,"tart_exec_help":"%s","tart_exec_options":%s,%s"stages":[' \
       "$HELP_STATE" "$help_subs" "$EXEC_HELP" "$exec_opts" "$extra"
-    for st in A B C M V; do
+    for st in A B C M V R; do
       f=$WORKDIR/stage-$st.json
       [[ -f "$f" ]] || continue
       [[ -s "$f" ]] || exit 1
@@ -828,7 +836,7 @@ case "$cmd" in
     chmod 0600 "$WORK/probe.sha256"
     exit 0
     ;;
-  'run C1'|'run C2'|'run C8'|'run C9')
+  'run C1'|'run C2'|'run C8'|'run C9'|'run C6 file'|'run C6 dir'|'run C7')
     [[ -f "$WORK/probe" && ! -L "$WORK/probe" && -f "$WORK/probe.sha256" && ! -L "$WORK/probe.sha256" ]] || { printf 'fail-run\n'; exit 6; }
     want=$(awk '{print $1; exit}' "$WORK/probe.sha256")
     got=$(/usr/bin/shasum -a 256 "$WORK/probe" | awk '{print $1}')
@@ -854,6 +862,15 @@ case "$cmd" in
         b=$(printf '%s' "$raw" | tr -d '\r\n')
         case "$b" in data|small) ;; *) printf 'reject\n'; exit 2 ;; esac
         "$WORK/probe" fill --dir "$MBX" --role guest --mode "$b" --timeout 50 || exit 6
+        ;;
+      'run C6 file')
+        "$WORK/probe" hold --dir "$MBX" --role guest --kind file --secs 300 || exit 6
+        ;;
+      'run C6 dir')
+        "$WORK/probe" hold --dir "$MBX" --role guest --kind dir --secs 300 || exit 6
+        ;;
+      'run C7')
+        "$WORK/probe" c7ops --dir "$MBX" --role guest --ms 2000 || exit 6
         ;;
     esac
     exit 0
@@ -990,6 +1007,19 @@ prepare_mailbox() {
       printf '%s\n' "$M_BOUNDARY" >"$root/mailbox/fill-mode" || return 1
       printf '%s\n' 'v=1 seq=0 bytes=0 files=0 enospc=0' >"$root/mailbox/progress" || return 1
       printf '%s\n' 'v=1 op=empty seq=0' >"$root/mailbox/result-guest" || return 1
+      ;;
+    C6)
+      printf '%s\n' held >"$root/mailbox/c6-held" || return 1
+      ;;
+    C7)
+      local i=0
+      mkdir -m 0700 "$root/mailbox/host-write" "$root/mailbox/guest-write" || return 1
+      seed_c1_slots "$root/mailbox" || return 1
+      while [[ "$i" -lt 4 ]]; do
+        printf '%s\n' 'v=1 op=empty seq=0' >"$root/mailbox/c7-r$i" || return 1
+        printf '%s\n' 'v=1 op=empty seq=0' >"$root/mailbox/c7-w$i" || return 1
+        i=$((i + 1))
+      done
       ;;
   esac
 }
@@ -1234,6 +1264,8 @@ m_measure() {
     C2) m_run_c2 ;;
     C8) m_run_c8 ;;
     C9) m_run_c9 ;;
+    C6) m_run_c6 ;;
+    C7) m_run_c7 ;;
     *) M_VERDICT=unknown; M_REASON=probe-failed; return 1 ;;
   esac
 }
@@ -1388,15 +1420,15 @@ run_m_one() {
   record_m_row
 }
 fold_m() {
-  local v b any_f=0 any_u=0 any_a=0 any_o=0 agg=unknown n=0 fs=0 ds=0 rn=0 dn=0 sn=0 need=1
+  local v b any_f=0 any_u=0 any_a=0 any_o=0 agg=unknown n=0 fs=0 ds=0 rn=0 dn=0 sn=0 c6f=0 c6d=0 need=1
   [[ "$M_CASE" == C2 ]] && need=3
-  [[ "$M_CASE" == C9 ]] && need=2
+  [[ "$M_CASE" == C9 || "$M_CASE" == C6 ]] && need=2
   if [[ "$IO_FAIL" == 1 || ! -s "$WORKDIR/m.rows" ]]; then any_u=1; n=-1; fi
   if [[ -f "$WORKDIR/m.rows" ]]; then
     while read -r _ b v _; do
       [[ -n "$v" ]] || continue
       n=$((n + 1))
-      case "$b" in file-sync) fs=$((fs + 1)) ;; dir-sync) ds=$((ds + 1)) ;; rename) rn=$((rn + 1)) ;; data) dn=$((dn + 1)) ;; small) sn=$((sn + 1)) ;; esac
+      case "$b" in file-sync) fs=$((fs + 1)) ;; dir-sync) ds=$((ds + 1)) ;; rename) rn=$((rn + 1)) ;; data) dn=$((dn + 1)) ;; small) sn=$((sn + 1)) ;; file) c6f=$((c6f + 1)) ;; dir) c6d=$((c6d + 1)) ;; esac
       case "$v" in
         failed) any_f=1 ;;
         unknown|not_run) any_u=1 ;;
@@ -1409,6 +1441,7 @@ fold_m() {
   [[ "$n" -eq "$need" ]] || any_u=1
   if [[ "$M_CASE" == C2 && ( "$fs" -ne 1 || "$ds" -ne 1 || "$rn" -ne 1 ) ]]; then any_u=1; fi
   if [[ "$M_CASE" == C9 && ( "$dn" -ne 1 || "$sn" -ne 1 ) ]]; then any_u=1; fi
+  if [[ "$M_CASE" == C6 && ( "$c6f" -ne 1 || "$c6d" -ne 1 ) ]]; then any_u=1; fi
   if [[ "$any_f" == 1 ]]; then agg=failed
   elif [[ "$any_u" == 1 ]]; then agg=unknown
   elif [[ "$any_o" == 1 && "$any_a" == 1 ]]; then agg=unknown
@@ -1457,8 +1490,18 @@ vol_quarantine() {
   [[ -n "$VOL_A" ]] && write_receipt || true
 }
 vol_run() {
-  local secs=$1 left
+  local secs=$1 left remain
   shift
+  # Cleanup and recovery share one absolute deadline. A step whose own cap
+  # does not fit in the remaining time (plus the 2s reap reserve) is not started
+  # on a shorter clock: that would hide a budget miss inside a truncated command.
+  if [[ "$IN_CLEANUP" == 1 && "$CLEANUP_DEADLINE" -gt 0 ]]; then
+    remain=$((CLEANUP_DEADLINE - SECONDS))
+    if [[ "$remain" -lt $((secs + 2)) ]]; then
+      RB_TIMED_OUT=1; RB_OVERFLOW=0; RB_ABORTED=0; RB_STATUS=124; REAP_UNKNOWN=0
+      return 2
+    fi
+  fi
   if [[ "$VOL_IN_PREP" == 1 && "$IN_CLEANUP" != 1 && "$VOL_PREP_END" -gt 0 ]]; then
     left=$((VOL_PREP_END - SECONDS))
     if [[ "$left" -lt 1 ]]; then RB_TIMED_OUT=1; RB_STATUS=124; return 2; fi
@@ -1583,7 +1626,9 @@ df_avail() {
 }
 vm_proven_stopped() {
   local abs
-  [[ "$HALT" == 1 || "$REAP_UNKNOWN" == 1 ]] && return 1
+  # HALT stops a later boundary. It is not itself proof the VM is still up:
+  # a skipped delete records absent=unknown, and a completed delete records yes.
+  [[ "$REAP_UNKNOWN" == 1 ]] && return 1
   [[ "$S_CREATED" != yes ]] && return 0
   abs=$(awk '{print $3; exit}' "$WORKDIR/cleanup.last" 2>/dev/null || true)
   [[ "$abs" == yes ]]
@@ -1657,11 +1702,11 @@ acl_blocks() {
   done <"$WORKDIR/v.out"
   return 1
 }
-out_ancestors_ok() {
-  local p owner mode st n=0 uid
+ancestors_ok() {
+  local p=$1 owner mode st n=0 uid
   uid=$(id -u)
-  p=$OUT
   while [[ "$n" -lt 64 ]]; do
+    [[ -n "$p" ]] || return 1
     [[ -L "$p" ]] && return 1
     vol_run 5 "$STATBIN" -f '%u %OLp' "$p"
     st=$?
@@ -1676,6 +1721,7 @@ out_ancestors_ok() {
   done
   return 1
 }
+out_ancestors_ok() { ancestors_ok "$OUT"; }
 write_receipt() {
   local tmp=$OUT/volume-receipt.tmp
   [[ -n "$OUT" && -d "$OUT" && ! -L "$OUT" ]] || return 1
@@ -1693,6 +1739,7 @@ write_receipt() {
     printf 'attempt_ino=%s\n' "$VOL_A_INO"
     printf 'case=%s\n' "$M_CASE"
     printf 'boundary=%s\n' "$M_BOUNDARY"
+    if [[ "$VOL_FORCE_INTENT" == 1 ]]; then printf 'force=intent\n'; fi
   } >"$tmp" || return 1
   mv "$tmp" "$OUT/volume-receipt" || return 1
 }
@@ -1724,7 +1771,7 @@ info_absent() {
   return 0
 }
 info_holds() {
-  local i=0 n=0 idx=0 path j ents dev mp found=0
+  local i=0 n=0 idx=0 path ents dev mp
   info_inventory || return
   while IFS= read -r path; do
     if [[ "$path" == "$VOL_I" ]]; then n=$((n + 1)); idx=$i; fi
@@ -1735,21 +1782,35 @@ info_holds() {
   [[ "$ST_DEV" == "$VOL_DEV" && "$ST_INO" == "$VOL_INO" ]] || return 1
   pl_count "images.$idx.system-entities" "$WORKDIR/info.plist" "$PL_CAP_ENTS" || return
   ents=$PL_COUNT
-  [[ "$ents" -ge 1 ]] || return 1
-  j=0
-  while [[ "$j" -lt "$ents" ]]; do
-    pl_get "images.$idx.system-entities.$j.dev-entry" "$WORKDIR/info.plist" || return
-    dev=$(norm_disk "$PL_VAL") || return 1
-    pl_get "images.$idx.system-entities.$j.mount-point" "$WORKDIR/info.plist" || return
-    mp=$PL_VAL
-    if [[ "$mp" == "$VOL_M" ]]; then
-      [[ "$dev" == "$VOL_DISK" ]] || return 1
-      [[ "$found" -eq 1 ]] && return 1
-      found=1
-    fi
-    j=$((j + 1))
-  done
-  [[ "$found" -eq 1 ]]
+  # One entity only: an extra mount or attachment is not this attempt.
+  [[ "$ents" -eq 1 ]] || return 1
+  pl_get "images.$idx.system-entities.0.dev-entry" "$WORKDIR/info.plist" || return
+  dev=$(norm_disk "$PL_VAL") || return 1
+  pl_get "images.$idx.system-entities.0.mount-point" "$WORKDIR/info.plist" || return
+  mp=$PL_VAL
+  [[ "$mp" == "$VOL_M" && "$dev" == "$VOL_DISK" ]]
+}
+# F3 receipts have no device yet. Take it from the single fresh image-path match.
+adopt_device() {
+  local i=0 n=0 idx=0 path ents dev mp
+  [[ -n "$VOL_DISK" ]] && return 0
+  info_inventory || return 1
+  while IFS= read -r path; do
+    if [[ "$path" == "$VOL_I" ]]; then n=$((n + 1)); idx=$i; fi
+    i=$((i + 1))
+  done <"$WORKDIR/info.paths"
+  [[ "$n" -eq 1 ]] || return 1
+  stat_image || return 1
+  [[ "$ST_DEV" == "$VOL_DEV" && "$ST_INO" == "$VOL_INO" ]] || return 1
+  pl_count "images.$idx.system-entities" "$WORKDIR/info.plist" "$PL_CAP_ENTS" || return 1
+  ents=$PL_COUNT
+  [[ "$ents" -eq 1 ]] || return 1
+  pl_get "images.$idx.system-entities.0.mount-point" "$WORKDIR/info.plist" || return 1
+  mp=$PL_VAL
+  [[ "$mp" == "$VOL_M" ]] || return 1
+  pl_get "images.$idx.system-entities.0.dev-entry" "$WORKDIR/info.plist" || return 1
+  dev=$(norm_disk "$PL_VAL") || return 1
+  VOL_DISK=$dev
 }
 map_fsname() {
   case "$1" in
@@ -1881,8 +1942,56 @@ drop_empty() {
   fi
   VOL_A=""; VOL_M=""; VOL_PHASE=none
 }
+a_allowed() {
+  local name img mnt n=0
+  [[ -n "$VOL_A" && -n "$VOL_A_DEV" && -n "$VOL_A_INO" && -n "$VOL_M" ]] || return 1
+  img=mailbox.sparseimage
+  mnt=${VOL_M##*/}
+  vol_io 5 names "$VOL_A" "$VOL_A_DEV" "$VOL_A_INO" || return 1
+  local seen=" "
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || return 1
+    n=$((n + 1))
+    [[ "$n" -le 32 ]] || return 1
+    [[ "$name" == "$img" || "$name" == "$mnt" ]] || return 1
+    [[ "$seen" != *" $name "* ]] || return 1
+    seen="$seen$name "
+  done <"$WORKDIR/v.out"
+  return 0
+}
+m0_count() {
+  local st
+  M0_N=
+  [[ -n "$VOL_M" && -n "$VOL_M_DEV" && -n "$VOL_M_INO" ]] || return 1
+  vol_io 5 entries "$VOL_M" "$VOL_M_DEV" "$VOL_M_INO"
+  st=$?
+  [[ "$st" -eq 0 ]] || return 1
+  M0_N=$(awk 'NR==1 { print; exit }' "$WORKDIR/v.out" 2>/dev/null || true)
+  case "$M0_N" in
+    ""|*[!0-9]*|absent) return 1 ;;
+  esac
+  return 0
+}
+unlink_barrier() {
+  local st
+  if ! vm_proven_stopped; then return 1; fi
+  info_absent
+  st=$?
+  [[ "$st" -eq 0 ]]
+}
 unlink_image() {
+  if ! m0_count; then return 1; fi
+  if [[ "$M0_N" != 0 ]]; then
+    VOL_M0_DIRTY=1
+    M_VERDICT=failed
+    M_REASON=m0-write
+    return 1
+  fi
+  if ! a_allowed; then return 1; fi
+  # Last, right before the removal: the M0/A workers above can take seconds.
+  if ! unlink_barrier; then return 1; fi
   id_remove file "$VOL_A" "$VOL_A_DEV" "$VOL_A_INO" "$VOL_I" "$VOL_DEV" "$VOL_INO" || return $?
+  vol_fault F5
   id_remove dir "$VOL_A" "$VOL_A_DEV" "$VOL_A_INO" "$VOL_M" "$VOL_M_DEV" "$VOL_M_INO" || return $?
   id_remove dir "$OUT" "$VOL_OUT_DEV" "$VOL_OUT_INO" "$VOL_A" "$VOL_A_DEV" "$VOL_A_INO" || return $?
   EXPORT_STATE=removed; VOL_PHASE=gone
@@ -1893,7 +2002,7 @@ reset_vol() {
   VOL_A_DEV=""; VOL_A_INO=""; VOL_M_DEV=""; VOL_M_INO=""
   VOL_PHASE=none; VOL_MAYBE=0; VOL_ID_BROKEN=0; VOL_FORCE=0; VOL_OPT_REJECT=0; VOL_OVER=0
   VOL_IN_PREP=0; VOL_PREP_END=0
-  VOL_CREATE_SEC=-1; VOL_ATTACH_SEC=-1; VOL_DETACH_SEC=-1
+  VOL_CREATE_SEC=-1; VOL_ATTACH_SEC=-1; VOL_DETACH_SEC=-1; VOL_DETACH_RC=-
   VOL_FSTYPE=unknown; VOL_FSNAME=unknown; VOL_HINT=unknown; VOL_CAPACITY=unknown
   VOL_NOSUID=unknown; VOL_NOEXEC=unknown; VOL_NODEV=unknown; VOL_NOBROWSE=unknown
   VOL_OWNERS=unknown; VOL_CREATE_WARN=absent
@@ -1903,6 +2012,10 @@ reset_vol() {
   VOL_BASE_ALLOC=0; VOL_BASE_HOST=0; VOL_HAVE_BASE=0
   VOL_HOST_PRE=unknown; VOL_HOST_FILL=unknown
   EXPORT_DIR=""; EXPORT_STATE=absent; EXPORT_DONE=0
+  VOL_M0_DIRTY=0; VOL_FORCE_INTENT=0
+  C6_HELD=0
+    C7_DRC=-; C7_DSEC=-; C7_DCLASS=-; C7_ALIVE=unknown; C7_M0=unknown; C7_GUEST=unknown; C7_OK=0; C7_MEASURED=0
+  C10_HITS=unknown; C10_FS=unknown; C10_FUID=unknown; C10_FMODE=unknown; C10_DEST=unknown; C10_EXI=unknown; C10_EXM=unknown
 }
 volume_up() {
   local t0 st alloc ist=0
@@ -1941,6 +2054,7 @@ volume_up() {
   VOL_I=$VOL_A/mailbox.sparseimage
   VOL_PHASE=reserved
   write_receipt || { vol_quarantine; return 4; }
+  vol_fault F1
   t0=$SECONDS
   vol_run 20 "$HDIUTIL" create -size 64m -fs HFSX -type SPARSE -layout NONE -volname GCU-MAILBOX "$VOL_I"
   st=$?
@@ -1954,6 +2068,7 @@ volume_up() {
   fi
   note_create_warn
   if [[ -L "$VOL_I" || ! -f "$VOL_I" ]]; then vol_quarantine; return 4; fi
+  vol_fault F2
   if ! stat_image; then vol_quarantine; return 4; fi
   VOL_DEV=$ST_DEV; VOL_INO=$ST_INO; VOL_PHASE=created
   alloc=$((ST_BLOCKS * 512))
@@ -1978,6 +2093,7 @@ volume_up() {
     vol_quarantine
     return 4
   fi
+  vol_fault F3
   cp "$WORKDIR/v.out" "$WORKDIR/attach.plist" || { VOL_MAYBE=1; vol_quarantine; return 4; }
   if ! parse_attach; then VOL_MAYBE=1; vol_quarantine; return 4; fi
   if ! info_holds; then VOL_MAYBE=1; vol_quarantine; return 4; fi
@@ -2001,6 +2117,7 @@ volume_up() {
 volume_down() {
   local st t0
   VOL_IN_PREP=0
+  if [[ "$VOL_M0_DIRTY" == 1 ]]; then vol_quarantine; return 0; fi
   if [[ "$VOL_PHASE" == gone ]]; then return 0; fi
   if [[ "$VOL_PHASE" == none ]]; then
     if [[ -n "$VOL_A" ]]; then drop_empty || true; fi
@@ -2024,10 +2141,12 @@ volume_down() {
     # the image unmounted but attached. detach_sec records the real time.
     vol_run 20 "$HDIUTIL" detach "$VOL_M"
     st=$?
+    VOL_DETACH_RC=$RB_STATUS
     VOL_DETACH_SEC=$((SECONDS - t0))
     if [[ "$st" -eq 2 ]]; then vol_quarantine; return 0; fi
     if [[ "$st" -ne 0 ]]; then
-      if vm_proven_stopped && info_holds; then
+      # Intent first (its IO can take seconds), then the final checks right before force.
+      if arm_force_intent && vm_proven_stopped && info_holds; then
         vol_run 10 "$HDIUTIL" detach -force "$VOL_M"
         st=$?
         if [[ "$st" -eq 2 ]]; then VOL_MAYBE=1; vol_quarantine; return 0; fi
@@ -2038,11 +2157,12 @@ volume_down() {
         return 0
       fi
     fi
+    vol_fault F4
     if ! info_absent; then vol_quarantine; return 0; fi
-    VOL_PHASE=created
+    VOL_PHASE=detached
     write_receipt || true
   fi
-  if [[ "$VOL_PHASE" == created ]]; then
+  if [[ "$VOL_PHASE" == created || "$VOL_PHASE" == detached ]]; then
     if [[ "$VOL_ID_BROKEN" == 1 ]]; then vol_quarantine; return 0; fi
     unlink_image || vol_quarantine
   fi
@@ -2255,6 +2375,426 @@ finish_c4() {
   fi
   M_RECORD="v=1 op=c4 fstype=${VOL_FSTYPE} fsname=${VOL_FSNAME} hint=${VOL_HINT} capacity=${VOL_CAPACITY} nosuid=${VOL_NOSUID} noexec=${VOL_NOEXEC} nodev=${VOL_NODEV} nobrowse=${VOL_NOBROWSE} owners=${VOL_OWNERS} mdutil=${VOL_MDUTIL} tmutil=${VOL_TMUTIL} create=${VOL_CREATE_WARN} force=${VOL_FORCE}"
 }
+vol_fault() {
+  [[ "$VOL_FAULT" == "$1" ]] || return 0
+  kill -KILL $$
+  exit 137
+}
+detach_class() {
+  # By exit status: hdiutil's message is localized (zh_CN Mini: "资源忙").
+  case "$1" in
+    0) printf none ;;
+    16) printf busy ;;
+    *) printf other ;;
+  esac
+}
+# stop ok, delete ok and absence confirmed for this attempt's clone.
+vm_clean() {
+  local line
+  line=$(awk 'NR==1 { print; exit }' "$WORKDIR/cleanup.last" 2>/dev/null || true)
+  [[ "$line" == "ok ok yes" ]]
+}
+c6_record() {
+  M_RECORD="v=1 op=c6 kind=${M_BOUNDARY} guest_held=${C6_HELD} detach_rc=${VOL_DETACH_RC} detach_sec=${VOL_DETACH_SEC} detach_class=$(detach_class "$VOL_DETACH_RC") force=${VOL_FORCE}"
+}
+# The guest holds a file or dir FD on the mailbox until the VM stops; the host
+# then tears down through the ordinary path. A host-side busy holder is not
+# exercised here: measured by hand on a scratch volume (ADR 0019 M2c-b facts).
+m_run_c6() {
+  local gpid want
+  clear_snaps
+  arm_m_load
+  ssh_bg "$ONCE_KEY" "run C6 $M_BOUNDARY" || { M_VERDICT=unknown; M_REASON=not-sole; ANY_COLLECTION_FAILED=1; return 1; }
+  gpid=$SSH_BG_PID
+  want="v=1 op=c6 role=guest kind=${M_BOUNDARY} held=1"
+  while [[ "$SECONDS" -lt "$M_LOAD_END" ]]; do
+    if grep -F -x -q -- "$want" "$WORKDIR/ssh.bg.out" 2>/dev/null; then C6_HELD=1; break; fi
+    note_ssh_bg "$gpid" && break
+    job_running "$gpid" || break
+    sleep 0.05
+  done
+  if [[ "$C6_HELD" != 1 ]]; then
+    M_VERDICT=unknown; M_REASON=guest-not-held; ANY_COLLECTION_FAILED=1
+    return 1
+  fi
+  return 0
+}
+finish_c6() {
+  [[ "$M_CASE" == C6 ]] || return 0
+  c6_record
+  if [[ "$M_QUARANTINE" == 1 || "$EXPORT_STATE" == quarantine ]]; then
+    [[ "$M_VERDICT" == failed ]] || M_VERDICT=quarantine
+    case "$M_REASON" in skipped|measured) M_REASON=quarantine ;; esac
+    return 0
+  fi
+  if [[ "$C6_HELD" == 1 && "$VOL_PHASE" == gone && "$EXPORT_STATE" == removed ]] && vm_clean; then
+    M_VERDICT=ok; M_REASON=measured
+    return 0
+  fi
+  [[ "$M_VERDICT" == ok ]] && M_VERDICT=unknown
+  [[ "$M_REASON" == skipped ]] && M_REASON=incomplete
+  ANY_COLLECTION_FAILED=1
+}
+c7_field() {
+  local key=$1 tok=$2 val
+  case "$tok" in
+    "$key"=*) val=${tok#"$key"=} ;;
+    *) return 1 ;;
+  esac
+  vol_num "$val" || return 1
+  C7F=$val
+}
+c7_ready_secs() {
+  local s=15
+  if [[ "${S11_TEST_MODE:-}" == 1 ]]; then
+    s=2
+    case "${S11_READY_SEC:-}" in
+      ""|*[!0-9]*) ;;
+      *) s=$S11_READY_SEC ;;
+    esac
+  fi
+  printf '%s\n' "$s"
+}
+c7_slot_mark() {
+  local n line marker
+  vol_io 5 slot "$1" || return 1
+  n=$(wc -l <"$WORKDIR/v.out" | tr -d ' ')
+  [[ "$n" == 1 ]] || return 1
+  marker=$(tail -c 1 "$WORKDIR/v.out"; printf x)
+  [[ "$marker" == $'\nx' ]] || return 1
+  IFS= read -r line <"$WORKDIR/v.out" || return 1
+  [[ "$line" == "$2" ]]
+}
+c7_ready() {
+  local end slot=$EXPORT_DIR/mailbox/guest-write/hg-ready mark='v=1 op=ready dir=hg' gpid
+  ssh_bg "$ONCE_KEY" "run C1" || { M_VERDICT=unknown; M_REASON=not-ready; return 1; }
+  gpid=$SSH_BG_PID
+  end=$((SECONDS + $(c7_ready_secs)))
+  while [[ "$SECONDS" -lt "$end" ]]; do
+    c7_slot_mark "$slot" "$mark" && break
+    job_running "$gpid" || break
+    sleep 0.05
+  done
+  if job_running "$gpid"; then term_kill_reap "$gpid"; else wait "$gpid" 2>/dev/null || true; fi
+  SSH_BG_PID=""
+  # The guest can publish the mark and exit between the last miss and the job check.
+  if c7_slot_mark "$slot" "$mark"; then return 0; fi
+  M_VERDICT=unknown
+  M_REASON=not-ready
+  return 1
+}
+c7_budget() {
+  local s
+  s=$(m_left)
+  if [[ "${S11_TEST_MODE:-}" == 1 ]]; then
+    case "${S11_C7_BUDGET:-}" in
+      ""|*[!0-9]*) ;;
+      *) [[ "$S11_C7_BUDGET" -lt "$s" ]] && s=$S11_C7_BUDGET ;;
+    esac
+  fi
+  [[ "$s" -lt 1 ]] && s=1
+  printf '%s\n' "$s"
+}
+c7_take_guest() {
+  local line rest ops ok enoent eio other hang bytes n marker sum
+  C7_GUEST=unknown
+  [[ "$G_ST" -eq 0 && "$G_TO" != 1 && "$G_OV" != 1 && "$G_AB" != 1 && "$G_RU" != 1 ]] || return 1
+  bytes=$(wc -c <"$WORKDIR/ssh.out" | tr -d ' ')
+  case "$bytes" in ""|*[!0-9]*) return 1 ;; esac
+  [[ "$bytes" -ge 1 && "$bytes" -le 4096 ]] || return 1
+  n=$(wc -l <"$WORKDIR/ssh.out" | tr -d ' ')
+  [[ "$n" == 1 ]] || return 1
+  marker=$(tail -c 1 "$WORKDIR/ssh.out"; printf x)
+  [[ "$marker" == $'\nx' ]] || return 1
+  IFS= read -r line <"$WORKDIR/ssh.out" || return 1
+  rest=${line#"v=1 op=c7 role=guest "}
+  [[ "$line" == "v=1 op=c7 role=guest $rest" && -n "$rest" ]] || return 1
+  set -- $rest
+  [[ $# -eq 6 ]] || return 1
+  c7_field ops "$1" || return 1
+  ops=$C7F
+  c7_field ok "$2" || return 1
+  ok=$C7F
+  c7_field enoent "$3" || return 1
+  enoent=$C7F
+  c7_field eio "$4" || return 1
+  eio=$C7F
+  c7_field other "$5" || return 1
+  other=$C7F
+  c7_field hang "$6" || return 1
+  hang=$C7F
+  # ops counts attempted operations: all 8, or up to and including the one hang.
+  [[ "$ops" -ge 1 && "$ops" -le 8 && "$hang" -le 1 ]] || return 1
+  [[ "$hang" -eq 1 || "$ops" -eq 8 ]] || return 1
+  sum=$((ok + enoent + eio + other + hang))
+  [[ "$sum" -eq "$ops" ]] || return 1
+  C7_GUEST="ok:${ok},enoent:${enoent},eio:${eio},other:${other},hang:${hang}"
+  return 0
+}
+c7_tart_alive() {
+  local st
+  C7_ALIVE=unknown
+  refresh_list || return 0
+  st=$(vm_status "$OWN_NAME" 2>/dev/null || true)
+  case "$st" in
+    running|Running|RUNNING) C7_ALIVE=yes ;;
+    stopped|Stopped|STOPPED) C7_ALIVE=no ;;
+    "") C7_ALIVE=absent ;;
+    *) C7_ALIVE=unknown ;;
+  esac
+}
+c7_list_m0() {
+  local st n
+  vol_io 5 entries "$VOL_M" "$VOL_M_DEV" "$VOL_M_INO"
+  st=$?
+  if [[ "$st" -ne 0 ]]; then C7_M0=unknown; vol_quarantine; return 1; fi
+  n=$(awk 'NR==1 { print; exit }' "$WORKDIR/v.out" 2>/dev/null || true)
+  case "$n" in
+    ""|*[!0-9]*|absent) C7_M0=unknown; vol_quarantine; return 1 ;;
+  esac
+  C7_M0=$n
+  [[ "$n" != 0 ]] && VOL_M0_DIRTY=1
+  return 0
+}
+c7_record() {
+  M_RECORD="v=1 op=c7 detach_rc=${C7_DRC} detach_sec=${C7_DSEC} detach_class=${C7_DCLASS} tart_alive=${C7_ALIVE} m0_entries=${C7_M0} guest=${C7_GUEST}"
+}
+m_run_c7() {
+  local t0 st left
+  if ! c7_ready; then return 0; fi
+  if ! info_holds; then M_REASON=identity; vol_quarantine; return 1; fi
+  t0=$SECONDS
+  vol_run 20 "$HDIUTIL" detach "$VOL_M"
+  st=$?
+  C7_DRC=$RB_STATUS
+  C7_DSEC=$((SECONDS - t0))
+  C7_DCLASS=$(detach_class "$RB_STATUS")
+  if [[ "$st" -eq 2 ]]; then VOL_MAYBE=1; vol_quarantine; return 1; fi
+  if [[ "$st" -eq 0 ]]; then
+    if ! info_absent; then VOL_MAYBE=1; vol_quarantine; return 1; fi
+    VOL_PHASE=detached
+    write_receipt || true
+  fi
+  clear_snaps
+  arm_m_load
+  left=$(c7_budget)
+  ssh_lab "$left" /dev/null "$ONCE_KEY" "run C7"
+  snapg
+  c7_tart_alive
+  if [[ "$VOL_PHASE" == detached ]]; then
+    c7_list_m0 || true
+  fi
+  if [[ "$VOL_M0_DIRTY" == 1 ]]; then
+    M_VERDICT=failed
+    M_REASON=m0-write
+    return 0
+  fi
+  if [[ "$G_ST" -ne 0 || "$G_TO" == 1 || "$G_OV" == 1 || "$G_AB" == 1 || "$G_RU" == 1 ]]; then
+    M_VERDICT=unknown
+    M_REASON=guest-failed
+    return 0
+  fi
+  if ! c7_take_guest; then
+    M_VERDICT=unknown
+    M_REASON=guest-malformed
+    return 0
+  fi
+  if [[ "$C7_ALIVE" != yes ]]; then
+    M_VERDICT=unknown
+    M_REASON=tart-dead
+    return 0
+  fi
+  C7_MEASURED=1
+  C7_OK=1
+  return 0
+}
+finish_c7() {
+  [[ "$M_CASE" == C7 ]] || return 0
+  c7_record
+  if [[ "$M_VERDICT" == failed ]]; then M_QUARANTINE=1; ANY_CLEANUP_FAILED=1; return 0; fi
+  if [[ "$M_QUARANTINE" == 1 || "$EXPORT_STATE" == quarantine || "$VOL_M0_DIRTY" == 1 ]]; then
+    [[ "$M_VERDICT" == failed ]] || M_VERDICT=quarantine
+    case "$M_REASON" in skipped|measured) M_REASON=quarantine ;; esac
+    return 0
+  fi
+  if [[ "$C7_MEASURED" == 1 && "$VOL_PHASE" == gone && "$EXPORT_STATE" == removed ]] && vm_clean; then
+    M_VERDICT=ok; M_REASON=measured
+    return 0
+  fi
+  [[ "$M_VERDICT" == ok ]] && M_VERDICT=unknown
+  case "$M_REASON" in
+    not-ready|guest-failed|guest-malformed|tart-dead|m0-write) ;;
+    *) M_REASON=incomplete ;;
+  esac
+  ANY_COLLECTION_FAILED=1
+}
+c10_wait() {
+  local w=30 left
+  if [[ "${S11_TEST_MODE:-}" == 1 ]]; then
+    case "${S11_C10_WAIT:-}" in
+      ""|*[!0-9]*) ;;
+      *) w=$S11_C10_WAIT ;;
+    esac
+  fi
+  if [[ "$PROBE_DEADLINE" -gt "$SECONDS" ]]; then
+    left=$((PROBE_DEADLINE - SECONDS))
+    [[ "$w" -gt "$left" ]] && w=$left
+  else
+    w=0
+  fi
+  [[ "$w" -gt 0 ]] && sleep "$w"
+  return 0
+}
+c10_hits() {
+  local n
+  vol_bin_ok "$MDFIND" || { printf unknown; return 0; }
+  vol_run 10 "$MDFIND" -onlyin "$VOL_M" "$1" || { printf unknown; return 0; }
+  n=$(grep -c . "$WORKDIR/v.out" 2>/dev/null || true)
+  n=${n//[[:space:]]/}
+  vol_num "$n" || { printf unknown; return 0; }
+  printf '%s' "$n"
+}
+c10_field_value() {
+  local line=$1 val
+  C10F=
+  case "$line" in
+    *:*)
+      val=${line#*:}
+      val=${val#"${val%%[![:space:]]*}"}
+      val=${val%"${val##*[![:space:]]}"}
+      [[ -n "$val" ]] || return 1
+      C10F=$val
+      return 0
+      ;;
+  esac
+  return 1
+}
+c10_dest_count() {
+  local line n=0 bad=0 nodest=0 in_rec=0 rec_bad=0 have_name=0 have_kind=0 have_url=0 have_id=0 have_mp=0 kind=
+  vol_bin_ok "$TMUTIL" || { printf unknown; return 0; }
+  vol_run 5 "$TMUTIL" destinationinfo || { printf unknown; return 0; }
+  # The no-destination line may arrive on either stream.
+  cat "$WORKDIR/v.out" "$WORKDIR/v.err" >"$WORKDIR/tm.all" 2>/dev/null || { printf unknown; return 0; }
+  c10_dest_flush() {
+    [[ "$in_rec" == 1 ]] || return 0
+    # Required fields depend on Kind: Local has a Mount Point, Network a URL.
+    case "$kind" in
+      Local) [[ "$have_mp" == 1 ]] || rec_bad=1 ;;
+      Network) [[ "$have_url" == 1 ]] || rec_bad=1 ;;
+      *) rec_bad=1 ;;
+    esac
+    if [[ "$rec_bad" == 0 && "$have_name" == 1 && "$have_kind" == 1 && "$have_id" == 1 ]]; then
+      n=$((n + 1))
+    else
+      bad=1
+    fi
+    in_rec=0; rec_bad=0; have_name=0; have_kind=0; have_url=0; have_id=0; have_mp=0; kind=
+  }
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line=${line%$'\r'}
+    line=${line#"${line%%[![:space:]]*}"}
+    [[ -z "$line" ]] && continue
+    case "$line" in
+      ====*) continue ;;
+      "No destinations configured"*|"tmutil: No destinations configured"*) nodest=1; continue ;;
+      Name*)
+        c10_dest_flush
+        in_rec=1
+        if c10_field_value "$line"; then have_name=1; else rec_bad=1; fi
+        ;;
+      Kind*)
+        [[ "$in_rec" == 1 ]] || bad=1
+        if c10_field_value "$line"; then have_kind=1; kind=$C10F; else rec_bad=1; fi
+        ;;
+      URL*)
+        [[ "$in_rec" == 1 ]] || bad=1
+        if c10_field_value "$line"; then have_url=1; else rec_bad=1; fi
+        ;;
+      ID*)
+        [[ "$in_rec" == 1 ]] || bad=1
+        if c10_field_value "$line"; then have_id=1; else rec_bad=1; fi
+        ;;
+      Mount\ Point*)
+        [[ "$in_rec" == 1 ]] || bad=1
+        if c10_field_value "$line"; then have_mp=1; else rec_bad=1; fi
+        ;;
+      Destination*)
+        [[ "$in_rec" == 1 ]] || bad=1
+        ;;
+      *) bad=1 ;;
+    esac
+  done <"$WORKDIR/tm.all"
+  c10_dest_flush
+  if [[ "$bad" == 1 || ( "$nodest" == 1 && "$n" -gt 0 ) || ( "$nodest" == 0 && "$n" -eq 0 ) ]]; then
+    printf unknown
+    return 0
+  fi
+  printf '%s' "$n"
+}
+c10_excl() {
+  local path=$1 line status n path2
+  vol_bin_ok "$TMUTIL" || { printf unknown; return 0; }
+  vol_run 5 "$TMUTIL" isexcluded "$path" || { printf unknown; return 0; }
+  n=$(wc -l <"$WORKDIR/v.out" | tr -d ' ')
+  [[ "$n" == 1 ]] || { printf unknown; return 0; }
+  IFS= read -r line <"$WORKDIR/v.out" || { printf unknown; return 0; }
+  case "$line" in
+    "[Excluded]"*) status=excluded ;;
+    "[Included]"*) status=included ;;
+    *) printf unknown; return 0 ;;
+  esac
+  path2=${line#*]}
+  path2=${path2#"${path2%%[![:space:]]*}"}
+  [[ "$path2" == "$path" ]] || { printf unknown; return 0; }
+  printf '%s' "$status"
+}
+c10_fsevents() {
+  local st line a b
+  C10_FS=unknown; C10_FUID=unknown; C10_FMODE=unknown
+  vol_io 5 fsevents "$VOL_M" || return 0
+  st=$?
+  [[ "$st" -eq 0 ]] || return 0
+  line=$(awk 'NR==1 { print; exit }' "$WORKDIR/v.out" 2>/dev/null || true)
+  [[ "$line" == absent ]] && { C10_FS=absent; return 0; }
+  set -- $line
+  [[ $# -eq 2 ]] || return 0
+  a=$1; b=$2
+  vol_num "$a" || return 0
+  case "$b" in *[!0-9]*|"") return 0 ;; esac
+  [[ ${#b} -le 6 ]] || return 0
+  C10_FS=present; C10_FUID=$a; C10_FMODE=$b
+}
+c10_record() {
+  M_RECORD="v=1 op=c10 mdfind_hits=${C10_HITS} mdutil=${VOL_MDUTIL} fsevents=${C10_FS} fsevents_uid=${C10_FUID} fsevents_mode=${C10_FMODE} dest_count=${C10_DEST} excluded_i=${C10_EXI} excluded_m=${C10_EXM}"
+}
+m_run_c10() {
+  local token st
+  token=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || true)
+  case "$token" in *[!0-9a-f]*|"") M_REASON=io; ANY_COLLECTION_FAILED=1; return 1 ;; esac
+  [[ ${#token} -eq 32 ]] || { M_REASON=io; ANY_COLLECTION_FAILED=1; return 1; }
+  vol_io 10 canaries "$VOL_M" "$token"
+  st=$?
+  if [[ "$st" -ne 0 ]]; then M_REASON=io; ANY_COLLECTION_FAILED=1; return 1; fi
+  c10_wait
+  C10_HITS=$(c10_hits "$token")
+  note_mdutil
+  c10_fsevents
+  C10_DEST=$(c10_dest_count)
+  C10_EXI=$(c10_excl "$VOL_I")
+  C10_EXM=$(c10_excl "$VOL_M")
+  M_VERDICT=unknown
+  M_REASON=observed
+  ANY_COLLECTION_FAILED=1
+}
+finish_c10() {
+  [[ "$M_CASE" == C10 ]] || return 0
+  c10_record
+  if [[ "$M_QUARANTINE" == 1 || "$EXPORT_STATE" == quarantine ]]; then
+    M_VERDICT=unknown; M_REASON=quarantine
+    return 0
+  fi
+  if [[ "$M_REASON" == observed ]]; then M_VERDICT=unknown; ANY_COLLECTION_FAILED=1; fi
+}
 run_v_one() {
   local st=0 vrc=0
   M_VERDICT=unknown; M_REASON=skipped; EXPORT_STATE=absent; M_RECORD=""
@@ -2262,12 +2802,17 @@ run_v_one() {
   reset_vol
   volume_up || vrc=$?
   VOL_IN_PREP=0
-  if [[ "$vrc" -eq 0 && "$M_CASE" != C4 ]]; then
+  if [[ "$vrc" -eq 0 && "$M_CASE" == C10 ]]; then
+    m_run_c10 || true
+  elif [[ "$vrc" -eq 0 && "$M_CASE" != C4 && "$M_CASE" != C5 ]]; then
     if prepare_export; then
       stage_main V || st=$?
       if [[ "$st" -eq 0 ]]; then
         m_measure || true
-        case "$M_VERDICT" in ok|not-ack) ;; *) ANY_COLLECTION_FAILED=1 ;; esac
+        case "$M_CASE" in
+          C6|C7) ;;
+          *) case "$M_VERDICT" in ok|not-ack) ;; *) ANY_COLLECTION_FAILED=1 ;; esac ;;
+        esac
       else
         M_VERDICT=unknown
         [[ "$M_REASON" == skipped ]] && M_REASON=launch-failed
@@ -2281,14 +2826,28 @@ run_v_one() {
   cleanup_owned
   cleanup_export
   finish_c4
+  finish_c6
+  finish_c7
+  finish_c10
   write_vol_meta
   record_m_row
 }
 run_volume() {
   : >"$WORKDIR/m.rows"
-  if [[ "$M_CASE" == C4 ]]; then printf '%s\n' volume-only >"$WORKDIR/v.evidence"
+  if [[ "$M_CASE" == C4 || "$M_CASE" == C5 || "$M_CASE" == C10 ]]; then printf '%s\n' volume-only >"$WORKDIR/v.evidence"
   else printf '%s\n' 'DEFAULT-network/mechanics-only' >"$WORKDIR/v.evidence"; fi
   case "$M_CASE" in
+    C6)
+      for M_BOUNDARY in file dir; do
+        if ! can_advance; then
+          begin_stage V; reset_vol
+          M_VERDICT=not_run; M_REASON=skipped; EXPORT_STATE=absent; S_ARGV_OK=0; M_RECORD=""
+          record_m_row
+          continue
+        fi
+        run_v_one
+      done
+      ;;
     C2)
       for M_BOUNDARY in file-sync dir-sync rename; do
         if ! can_advance; then
@@ -2372,6 +2931,67 @@ volio_remove() {
   fi
   if [[ -e "$target" || -L "$target" ]]; then exit 1; fi
 }
+volio_canaries() {
+  local root=$1 token=$2 i=0 suf f body n
+  [[ ${#token} -eq 32 ]] || exit 2
+  case "$token" in *[!0-9a-f]*) exit 2 ;; esac
+  [[ ! -L "$root" && -d "$root" ]] || exit 1
+  while [[ "$i" -lt 16 ]]; do
+    suf=$(printf '%02d' "$i")
+    f=$root/canary-$token-$suf
+    [[ -e "$f" || -L "$f" ]] && exit 1
+    body=$token
+    while [[ ${#body} -lt 1024 ]]; do body=$body$token; done
+    body=${body:0:1024}
+    printf '%s' "$body" >"$f" || exit 1
+    n=$(wc -c <"$f" | tr -d ' ')
+    [[ "$n" -eq 1024 ]] || exit 1
+    i=$((i + 1))
+  done
+}
+volio_fsevents() {
+  local root=$1 p got
+  [[ ! -L "$root" && -d "$root" ]] || exit 1
+  p=$root/.fseventsd
+  if [[ -L "$p" ]]; then printf 'unknown\n'; return 0; fi
+  if [[ ! -e "$p" ]]; then printf 'absent\n'; return 0; fi
+  got=$("$STATBIN" -f '%u %OLp' "$p" 2>/dev/null) || { printf 'unknown\n'; return 0; }
+  printf '%s\n' "$got"
+}
+volio_entries() {
+  local d=$1 pdev=$2 pino=$3 got n=0 pat
+  if [[ -L "$d" ]]; then exit 3; fi
+  if [[ ! -e "$d" ]]; then printf 'absent\n'; return 0; fi
+  [[ -d "$d" ]] || exit 3
+  got=$("$STATBIN" -f '%d %i' "$d" 2>/dev/null) || exit 1
+  [[ "$got" == "$pdev $pino" ]] || exit 3
+  set +f
+  for pat in "$d"/* "$d"/.[!.]* "$d"/..?*; do
+    [[ -e "$pat" || -L "$pat" ]] || continue
+    n=$((n + 1))
+    [[ "$n" -ge 32 ]] && break
+  done
+  set -f
+  printf '%s\n' "$n"
+}
+volio_names() {
+  local d=$1 pdev=$2 pino=$3 got pat base n=0
+  [[ ! -L "$d" && -d "$d" ]] || exit 3
+  got=$("$STATBIN" -f '%d %i' "$d" 2>/dev/null) || exit 1
+  [[ "$got" == "$pdev $pino" ]] || exit 3
+  set +f
+  for pat in "$d"/* "$d"/.[!.]* "$d"/..?*; do
+    [[ -e "$pat" || -L "$pat" ]] || continue
+    [[ -L "$pat" ]] && { set -f; exit 3; }
+    base=${pat##*/}
+    # One name per line: a name with a line break would hide from the audit.
+    case "$base" in *$'\n'*|*$'\r'*) set -f; exit 3 ;; esac
+    printf '%s\n' "$base"
+    n=$((n + 1))
+    [[ "$n" -ge 64 ]] && { set -f; exit 3; }
+  done
+  set -f
+}
 volio_main() {
   local cmd=${1:-} f d got
   shift || exit 2
@@ -2399,6 +3019,22 @@ volio_main() {
       got=$("$STATBIN" -f '%d %i' "$f" 2>/dev/null) || exit 3
       [[ "$got" == link ]] && exit 3
       head -c 4097 -- "$f" || exit 3
+      ;;
+    canaries)
+      [[ $# -eq 2 ]] || exit 2
+      volio_canaries "$1" "$2"
+      ;;
+    fsevents)
+      [[ $# -eq 1 ]] || exit 2
+      volio_fsevents "$1"
+      ;;
+    entries)
+      [[ $# -eq 3 ]] || exit 2
+      volio_entries "$1" "$2" "$3"
+      ;;
+    names)
+      [[ $# -eq 3 ]] || exit 2
+      volio_names "$1" "$2" "$3"
       ;;
     *) exit 2 ;;
   esac
@@ -2457,12 +3093,499 @@ dry_stage_m() {
   save_stage_m
 }
 
+rec_bad() { add_reason receipt-bad; PRECHECK_FAILED=1; return 1; }
+rec_mark() {
+  M_QUARANTINE=1
+  M_VERDICT=quarantine
+  M_REASON=$1
+  EXPORT_STATE=quarantine
+  ANY_CLEANUP_FAILED=1
+  add_reason quarantine
+  add_reason "$1"
+  R_IMAGE=$2
+  R_MOUNT=$3
+  R_ATTEMPT=$4
+}
+rec_freeze() {
+  VOL_PHASE=gone
+  VOL_A=""; VOL_I=""; VOL_M=""
+  VOL_M0_DIRTY=0
+}
+rec_shape() {
+  local p=$1
+  [[ "$p" == /* ]] || return 1
+  case "$p" in *$'\n'*|*$'\r'*|*$'\t'*|*//*) return 1 ;; esac
+  case "$p" in *"/../"*|*/..|*/./*|*/.|*/.) return 1 ;; esac
+  return 0
+}
+rec_direct() {
+  local parent=$1 child=$2 rest
+  [[ "$child" == "$parent/"* ]] || return 1
+  rest=${child#"$parent/"}
+  [[ -n "$rest" && "$rest" != */* && "$rest" != . && "$rest" != .. ]] || return 1
+}
+rec_take() {
+  case "$1" in
+    phase) RP_phase=$2 ;;
+    image) RP_image=$2 ;;
+    image_dev) RP_image_dev=$2 ;;
+    image_ino) RP_image_ino=$2 ;;
+    device) RP_device=$2 ;;
+    mount) RP_mount=$2 ;;
+    mount_dev) RP_mount_dev=$2 ;;
+    mount_ino) RP_mount_ino=$2 ;;
+    attempt) RP_attempt=$2 ;;
+    attempt_dev) RP_attempt_dev=$2 ;;
+    attempt_ino) RP_attempt_ino=$2 ;;
+    case) RP_case=$2 ;;
+    boundary) RP_boundary=$2 ;;
+    recovery) RP_recovery=$2 ;;
+    force) RP_force=$2 ;;
+    *) return 1 ;;
+  esac
+}
+receipt_capture() {
+  local f=$1 sz
+  : >"$WORKDIR/rcpt.out"; : >"$WORKDIR/rcpt.err"
+  run_bounded 30 "$WORKDIR/rcpt.out" "$WORKDIR/rcpt.err" - -- bash -c 'set -f; set -u; f=$1; st=$2; if [[ -L "$f" || ! -f "$f" ]]; then exit 3; fi; if [[ "${S11_TEST_MODE:-}" == 1 ]]; then case "${S11_RECEIPT_STALL:-}" in ""|*[!0-9]*) ;; *) sleep "$S11_RECEIPT_STALL" || exit 3 ;; esac; fi; "$st" -f "%u %OLp" "$f" >&2 || exit 3; exec /usr/bin/head -c 8193 -- "$f"' bash "$f" "$STATBIN" || true
+  if [[ "$RB_TIMED_OUT" == 1 || "$RB_OVERFLOW" == 1 || "$RB_ABORTED" == 1 || "$REAP_UNKNOWN" == 1 || "$RB_STATUS" -ne 0 ]]; then return 1; fi
+  sz=$(wc -c <"$WORKDIR/rcpt.out" | tr -d ' ')
+  case "$sz" in ""|*[!0-9]*) return 1 ;; esac
+  [[ "$sz" -le 8192 ]] || return 1
+  return 0
+}
+arm_force_intent() {
+  local f
+  if [[ "$STAGE" == R ]]; then f=$RECEIPT; else f=$OUT/volume-receipt; fi
+  [[ -n "$f" ]] || return 1
+  receipt_capture "$f" || return 1
+  if grep -F -x -q -- 'force=intent' "$WORKDIR/rcpt.out"; then
+    VOL_FORCE_INTENT=1
+    return 1
+  fi
+  run_bounded 5 "$WORKDIR/fa.out" "$WORKDIR/fa.err" - -- bash -c 'set -f; set -u; printf "%s\n" force=intent >>"$1"' bash "$f" || true
+  if [[ "$RB_STATUS" -ne 0 || "$RB_TIMED_OUT" == 1 || "$RB_OVERFLOW" == 1 || "$RB_ABORTED" == 1 || "$REAP_UNKNOWN" == 1 ]]; then
+    return 1
+  fi
+  VOL_FORCE_INTENT=1
+  return 0
+}
+rec_parse() {
+  local n=0 line key val seen=" " sz parent rest
+  RP_phase=""; RP_image=""; RP_image_dev=""; RP_image_ino=""; RP_device=""
+  RP_mount=""; RP_mount_dev=""; RP_mount_ino=""; RP_attempt=""; RP_attempt_dev=""; RP_attempt_ino=""
+  RP_case=""; RP_boundary=""; RP_recovery=""; RP_force=""
+  [[ -s "$WORKDIR/rcpt.out" ]] || return 1
+  sz=$(wc -c <"$WORKDIR/rcpt.out" | tr -d ' ')
+  case "$sz" in ""|*[!0-9]*) return 1 ;; esac
+  [[ "$sz" -gt 0 && "$sz" -le 8192 ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    n=$((n + 1))
+    [[ "$n" -le 40 ]] || return 1
+    [[ -n "$line" && "$line" != *$'\r'* && "$line" == *=* ]] || return 1
+    key=${line%%=*}
+    val=${line#*=}
+    case "$key" in
+      phase|image|image_dev|image_ino|device|mount|mount_dev|mount_ino|attempt|attempt_dev|attempt_ino|case|boundary|recovery|force) ;;
+      *) return 1 ;;
+    esac
+    case "$seen" in *" $key "*) return 1 ;; esac
+    seen="$seen$key "
+    rec_take "$key" "$val" || return 1
+  done <"$WORKDIR/rcpt.out"
+  case "$RP_phase" in none|reserved|created|mounted|detached|gone|quarantine) ;; *) return 1 ;; esac
+  case "$RP_case" in C1|C2|C4|C5|C6|C7|C8|C9|C10) ;; *) return 1 ;; esac
+  case "$RP_boundary" in ""|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$RP_recovery" in ""|noted) ;; *) return 1 ;; esac
+  case "$RP_force" in ""|intent) ;; *) return 1 ;; esac
+  rec_shape "$RP_image" || return 1
+  rec_shape "$RP_mount" || return 1
+  rec_shape "$RP_attempt" || return 1
+  parent=${RECEIPT%/*}
+  [[ "$parent" == /* ]] || return 1
+  rec_direct "$parent" "$RP_attempt" || return 1
+  rec_direct "$RP_attempt" "$RP_image" || return 1
+  rec_direct "$RP_attempt" "$RP_mount" || return 1
+  [[ "$RP_image" != "$RP_mount" ]] || return 1
+  vol_num "$RP_attempt_dev" || return 1
+  vol_num "$RP_attempt_ino" || return 1
+  vol_num "$RP_mount_dev" || return 1
+  vol_num "$RP_mount_ino" || return 1
+  if [[ -n "$RP_image_dev" || -n "$RP_image_ino" ]]; then
+    vol_num "$RP_image_dev" || return 1
+    vol_num "$RP_image_ino" || return 1
+  fi
+  case "$RP_device" in
+    "") ;;
+    /dev/disk*)
+      rest=${RP_device#/dev/disk}
+      vol_num "$rest" || return 1
+      ;;
+    disk*)
+      rest=${RP_device#disk}
+      vol_num "$rest" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  case "$seen" in
+    *" phase "*|*" image "*|*" attempt "*|*" mount "*) ;;
+    *) return 1 ;;
+  esac
+  [[ "$seen" == *" phase "* && "$seen" == *" image "* && "$seen" == *" image_dev "* && "$seen" == *" image_ino "* ]] || return 1
+  [[ "$seen" == *" device "* && "$seen" == *" mount "* && "$seen" == *" mount_dev "* && "$seen" == *" mount_ino "* ]] || return 1
+  [[ "$seen" == *" attempt "* && "$seen" == *" attempt_dev "* && "$seen" == *" attempt_ino "* ]] || return 1
+  [[ "$seen" == *" case "* && "$seen" == *" boundary "* ]] || return 1
+  return 0
+}
+rec_save() {
+  local tmp=$WORKDIR/stage-R.json.tmp
+  case "$M_VERDICT" in ok|quarantine) ;; *) return 1 ;; esac
+  case "$R_IMAGE" in absent|kept|unknown) ;; *) return 1 ;; esac
+  case "$R_MOUNT" in absent|kept|unknown) ;; *) return 1 ;; esac
+  case "$R_ATTEMPT" in kept|absent|unknown) ;; *) return 1 ;; esac
+  printf '{"stage":"R","verdict":"%s","reason":"%s","image":"%s","mount":"%s","attempt":"%s"}\n' \
+    "$M_VERDICT" "$M_REASON" "$R_IMAGE" "$R_MOUNT" "$R_ATTEMPT" >"$tmp" || return 1
+  mv "$tmp" "$WORKDIR/stage-R.json" || return 1
+}
+rec_mount_word() {
+  local st n
+  vol_io 5 entries "$VOL_M" "$VOL_M_DEV" "$VOL_M_INO"
+  st=$?
+  if [[ "$st" -ne 0 ]]; then printf bad; return 0; fi
+  n=$(awk 'NR==1 { print; exit }' "$WORKDIR/v.out" 2>/dev/null || true)
+  case "$n" in
+    absent) printf absent ;;
+    ""|*[!0-9]*) printf bad ;;
+    *) printf 'count %s' "$n" ;;
+  esac
+}
+rec_attached() {
+  local i=0 n=0 idx=0 path ents j mp found=0
+  REC_ATTACHED=0
+  info_inventory || return 2
+  while IFS= read -r path; do
+    if [[ "$path" == "$VOL_I" ]]; then n=$((n + 1)); idx=$i; fi
+    i=$((i + 1))
+  done <"$WORKDIR/info.paths"
+  [[ "$n" -eq 0 ]] && return 0
+  [[ "$n" -eq 1 ]] || return 1
+  pl_count "images.$idx.system-entities" "$WORKDIR/info.plist" "$PL_CAP_ENTS" || return 2
+  ents=$PL_COUNT
+  j=0
+  while [[ "$j" -lt "$ents" ]]; do
+    pl_get "images.$idx.system-entities.$j.mount-point" "$WORKDIR/info.plist" || return 2
+    mp=$PL_VAL
+    if [[ "$mp" == "$VOL_M" ]]; then
+      [[ "$found" -eq 1 ]] && return 1
+      found=1
+    fi
+    j=$((j + 1))
+  done
+  [[ "$found" -eq 1 ]] || return 1
+  REC_ATTACHED=1
+  return 0
+}
+rec_map_ok() {
+  adopt_device || return 1
+  info_holds
+}
+rec_trust() {
+  local parent uid owner mode name bn n=0
+  parent=${RECEIPT%/*}
+  uid=$(id -u)
+  [[ -n "$parent" && "$parent" == /* ]] || return 1
+  read -r owner mode <"$WORKDIR/rcpt.err" || return 1
+  [[ "$owner" == "$uid" ]] || return 1
+  case "$mode" in 600|0600) ;; *) return 1 ;; esac
+  ancestors_ok "$parent" || return 1
+  bn=${RP_attempt##*/}
+  case "$bn" in s11v.*) ;; *) return 1 ;; esac
+  [[ "${RP_image##*/}" == mailbox.sparseimage ]] || return 1
+  case "${RP_mount##*/}" in mnt.*) ;; *) return 1 ;; esac
+  stat_id "$parent" || return 1
+  vol_io 5 names "$parent" "$ST_DEV" "$ST_INO" || return 1
+  while IFS= read -r name; do
+    case "$name" in
+      s11v.*)
+        n=$((n + 1))
+        [[ "$name" == "$bn" ]] || return 1
+        ;;
+    esac
+  done <"$WORKDIR/v.out"
+  [[ "$n" -eq 1 ]]
+}
+rec_refuse() {
+  add_reason "$1"
+  PRECHECK_FAILED=1
+  return 1
+}
+r_deadline() {
+  local b=90
+  if [[ "${S11_TEST_MODE:-}" == 1 ]]; then
+    case "${S11_R_BUDGET:-}" in
+      ""|*[!0-9]*) ;;
+      *) b=$S11_R_BUDGET ;;
+    esac
+  fi
+  IN_CLEANUP=1
+  CLEANUP_DEADLINE=$((SECONDS + b))
+  CLEANUP_LEFT=$b
+}
+rec_detach() {
+  local st
+  rec_map_ok || return 4
+  vol_run 20 "$HDIUTIL" detach "$VOL_M"
+  st=$?
+  [[ "$st" -eq 0 ]] && return 0
+  [[ "$st" -eq 2 ]] && return 2
+  arm_force_intent || return 3
+  rec_map_ok || return 4
+  vol_run 10 "$HDIUTIL" detach -force "$VOL_M"
+  st=$?
+  [[ "$st" -eq 0 ]] && return 0
+  [[ "$st" -eq 2 ]] && return 2
+  return 1
+}
+run_recovery() {
+  local img_state st word count parent_ok=0
+  M_VERDICT=quarantine
+  M_REASON=incomplete
+  R_IMAGE=unknown
+  R_MOUNT=unknown
+  R_ATTEMPT=unknown
+  r_deadline
+  if ! receipt_capture "$RECEIPT"; then rec_bad; rec_freeze; return 1; fi
+  if ! rec_parse; then rec_bad; rec_freeze; return 1; fi
+  [[ "$RP_case" == C5 ]] || { rec_refuse recovery-unsupported; return 1; }
+  if ! rec_trust; then rec_refuse receipt-untrusted; return 1; fi
+  [[ "$RP_force" == intent ]] && VOL_FORCE_INTENT=1
+  if [[ "$RP_recovery" != noted ]]; then
+    run_bounded 5 "$WORKDIR/note.out" "$WORKDIR/note.err" - -- bash -c 'set -f; set -u; printf "%s\n" recovery=noted >>"$1"' bash "$RECEIPT" || true
+    if [[ "$RB_STATUS" -ne 0 || "$RB_TIMED_OUT" == 1 || "$RB_OVERFLOW" == 1 || "$RB_ABORTED" == 1 || "$REAP_UNKNOWN" == 1 ]]; then
+      rec_mark io unknown unknown unknown
+      rec_save || true
+      rec_freeze
+      return 1
+    fi
+  fi
+  if ! vol_bin_ok "$HDIUTIL" || ! vol_bin_ok "$PLUTIL" || ! vol_bin_ok "$STATBIN"; then
+    rec_mark tool-missing unknown unknown unknown
+    rec_save || true
+    rec_freeze
+    return 1
+  fi
+  VOL_I=$RP_image
+  VOL_DEV=$RP_image_dev
+  VOL_INO=$RP_image_ino
+  VOL_M=$RP_mount
+  VOL_M_DEV=$RP_mount_dev
+  VOL_M_INO=$RP_mount_ino
+  VOL_A=$RP_attempt
+  VOL_A_DEV=$RP_attempt_dev
+  VOL_A_INO=$RP_attempt_ino
+  VOL_DISK=$RP_device
+  if [[ -L "$VOL_A" ]]; then
+    rec_mark identity-mismatch unknown unknown unknown
+    rec_save || true
+    rec_freeze
+    return 1
+  fi
+  if [[ -e "$VOL_A" ]]; then
+    if ! stat_id "$VOL_A" || [[ "$ST_DEV" != "$VOL_A_DEV" || "$ST_INO" != "$VOL_A_INO" || ! -d "$VOL_A" ]]; then
+      rec_mark identity-mismatch unknown unknown unknown
+      rec_save || true
+      rec_freeze
+      return 1
+    fi
+    R_ATTEMPT=kept
+    parent_ok=1
+  else
+    R_ATTEMPT=absent
+  fi
+  if [[ -L "$VOL_I" ]]; then img_state=symlink
+  elif [[ ! -e "$VOL_I" ]]; then img_state=absent
+  elif [[ -f "$VOL_I" ]]; then img_state=present
+  else img_state=other
+  fi
+  if [[ "$img_state" == present && ( -z "$VOL_DEV" || -z "$VOL_INO" ) ]]; then
+    rec_mark image-unmatched kept kept "$R_ATTEMPT"
+    rec_save || true
+    rec_freeze
+    return 1
+  fi
+  if [[ "$img_state" == symlink || "$img_state" == other ]]; then
+    rec_mark identity-mismatch kept unknown "$R_ATTEMPT"
+    rec_save || true
+    rec_freeze
+    return 1
+  fi
+  if [[ "$img_state" == present ]]; then
+    if ! stat_image || [[ "$ST_DEV" != "$VOL_DEV" || "$ST_INO" != "$VOL_INO" ]]; then
+      rec_mark identity-mismatch kept unknown "$R_ATTEMPT"
+      rec_save || true
+      rec_freeze
+      return 1
+    fi
+    R_IMAGE=kept
+  else
+    R_IMAGE=absent
+  fi
+  rec_attached
+  st=$?
+  if [[ "$st" -ne 0 ]]; then
+    rec_mark info-unknown "$R_IMAGE" unknown "$R_ATTEMPT"
+    rec_save || true
+    rec_freeze
+    return 1
+  fi
+  if [[ "$REC_ATTACHED" == 1 ]]; then
+    if [[ "$img_state" != present ]]; then
+      rec_mark identity-mismatch unknown kept "$R_ATTEMPT"
+      rec_save || true
+      rec_freeze
+      return 1
+    fi
+    if [[ "$RP_force" == intent ]]; then
+      rec_mark force-spent kept kept "$R_ATTEMPT"
+      rec_save || true
+      rec_freeze
+      return 1
+    fi
+    rec_detach
+    st=$?
+    if [[ "$st" -eq 3 ]]; then
+      rec_mark force-spent kept kept "$R_ATTEMPT"
+      rec_save || true
+      rec_freeze
+      return 1
+    fi
+    if [[ "$st" -eq 4 ]]; then
+      rec_mark mapping-changed kept kept "$R_ATTEMPT"
+      rec_save || true
+      rec_freeze
+      return 1
+    fi
+    if [[ "$st" -ne 0 ]]; then
+      rec_mark detach-failed kept kept "$R_ATTEMPT"
+      rec_save || true
+      rec_freeze
+      return 1
+    fi
+    rec_attached
+    st=$?
+    if [[ "$st" -ne 0 || "$REC_ATTACHED" == 1 ]]; then
+      rec_mark still-attached kept kept "$R_ATTEMPT"
+      rec_save || true
+      rec_freeze
+      return 1
+    fi
+  fi
+  if [[ "$img_state" == present ]]; then
+    if [[ "$parent_ok" != 1 ]]; then
+      rec_mark identity-mismatch kept unknown absent
+      rec_save || true
+      rec_freeze
+      return 1
+    fi
+    if ! m0_count; then
+      rec_mark identity-mismatch kept kept "$R_ATTEMPT"
+      rec_save || true
+      rec_freeze
+      return 1
+    fi
+    if [[ "$M0_N" != 0 ]]; then
+      rec_mark mount-dirty kept kept "$R_ATTEMPT"
+      rec_save || true
+      rec_freeze
+      return 1
+    fi
+    if ! a_allowed; then
+      rec_mark attempt-dirty kept kept "$R_ATTEMPT"
+      rec_save || true
+      rec_freeze
+      return 1
+    fi
+    if ! unlink_barrier; then
+      rec_mark still-attached kept kept "$R_ATTEMPT"
+      rec_save || true
+      rec_freeze
+      return 1
+    fi
+    if ! id_remove file "$VOL_A" "$VOL_A_DEV" "$VOL_A_INO" "$VOL_I" "$VOL_DEV" "$VOL_INO"; then
+      rec_mark unlink-failed kept unknown "$R_ATTEMPT"
+      rec_save || true
+      rec_freeze
+      return 1
+    fi
+    R_IMAGE=absent
+  elif [[ "$parent_ok" == 1 ]] && ! a_allowed; then
+    rec_mark attempt-dirty absent kept "$R_ATTEMPT"
+    rec_save || true
+    rec_freeze
+    return 1
+  fi
+  word=$(rec_mount_word)
+  case "$word" in
+    absent) R_MOUNT=absent ;;
+    "count 0")
+      if [[ "$parent_ok" != 1 ]]; then
+        rec_mark identity-mismatch "$R_IMAGE" kept absent
+        rec_save || true
+        rec_freeze
+        return 1
+      fi
+      if ! id_remove dir "$VOL_A" "$VOL_A_DEV" "$VOL_A_INO" "$VOL_M" "$VOL_M_DEV" "$VOL_M_INO"; then
+        rec_mark mount-dirty "$R_IMAGE" kept "$R_ATTEMPT"
+        rec_save || true
+        rec_freeze
+        return 1
+      fi
+      R_MOUNT=absent
+      ;;
+    count\ *)
+      rec_mark mount-dirty "$R_IMAGE" kept "$R_ATTEMPT"
+      rec_save || true
+      rec_freeze
+      return 1
+      ;;
+    *)
+      rec_mark identity-mismatch "$R_IMAGE" unknown "$R_ATTEMPT"
+      rec_save || true
+      rec_freeze
+      return 1
+      ;;
+  esac
+  if [[ "$R_ATTEMPT" == kept ]]; then
+    if [[ -e "$VOL_I" || -L "$VOL_I" ]]; then
+      rec_mark image-remains kept "$R_MOUNT" kept
+      rec_save || true
+      rec_freeze
+      return 1
+    fi
+    word=$(rec_mount_word)
+    [[ "$word" == absent ]] || {
+      rec_mark mount-remains "$R_IMAGE" kept kept
+      rec_save || true
+      rec_freeze
+      return 1
+    }
+  fi
+  M_VERDICT=ok
+  M_REASON=recovered
+  M_QUARANTINE=0
+  EXPORT_STATE=kept
+  rec_save || { IO_FAIL=1; rec_freeze; return 1; }
+  rec_freeze
+  return 0
+}
 need_arg() { [[ $# -ge 2 ]] || { USAGE_REASON=usage; return 1; }; }
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --stage) need_arg "$@" || return; case "$2" in A|B|C|M|V|all) STAGE=$2 ;; *) USAGE_REASON=usage; return ;; esac; shift 2 ;;
-      --case) need_arg "$@" || return; case "$2" in C1|C2|C8|C4|C9) M_CASE=$2 ;; *) USAGE_REASON=usage; return ;; esac; shift 2 ;;
+      --stage) need_arg "$@" || return; case "$2" in A|B|C|M|V|R|all) STAGE=$2 ;; *) USAGE_REASON=usage; return ;; esac; shift 2 ;;
+      --case) need_arg "$@" || return; case "$2" in C1|C2|C8|C4|C9|C5|C6|C7|C10) M_CASE=$2 ;; *) USAGE_REASON=usage; return ;; esac; shift 2 ;;
+      --fault) need_arg "$@" || return; case "$2" in F1|F2|F3|F4|F5) VOL_FAULT=$2 ;; *) USAGE_REASON=usage; return ;; esac; shift 2 ;;
+      --receipt) need_arg "$@" || return; RECEIPT=$2; shift 2 ;;
       --probe) need_arg "$@" || return; M_PROBE=$2; shift 2 ;;
       --pinned-host-key) need_arg "$@" || return; PINNED_KEY=$2; shift 2 ;;
       --out) need_arg "$@" || return; OUT=$2; shift 2 ;;
@@ -2483,6 +3606,15 @@ parse_args() {
   esac
   case "$OUT" in *$'\n'*|*$'\r'*|*$'\t'*) USAGE_REASON=usage; OUT=""; return ;; esac
   case "$OUT" in *"/../"*|*/..) USAGE_REASON=usage; return ;; esac
+  if [[ -n "$RECEIPT" ]]; then
+    case "$RECEIPT" in
+      /*) ;;
+      ./*) RECEIPT=$(pwd)/${RECEIPT#./} ;;
+      *) RECEIPT=$(pwd)/$RECEIPT ;;
+    esac
+    case "$RECEIPT" in *$'\n'*|*$'\r'*|*$'\t'*) USAGE_REASON=usage; RECEIPT=""; return ;; esac
+    case "$RECEIPT" in *"/../"*|*/..) USAGE_REASON=usage; return ;; esac
+  fi
   [[ -n "$ENDPOINT" && "$ENDPOINT_SOURCE" == placeholder ]] && { USAGE_REASON=usage; ENDPOINT=""; ENDPOINT_SOURCE=absent; return; }
   if [[ -n "$ENDPOINT" ]]; then is_public_ip "$ENDPOINT" && ENDPOINT_SOURCE=argument || { USAGE_REASON=endpoint-invalid; ENDPOINT=""; return; }; fi
   [[ "$ENDPOINT_SOURCE" == placeholder ]] && ENDPOINT=$PLACEHOLDER_IP
@@ -2492,25 +3624,36 @@ parse_args() {
     case "$M_CASE" in C1|C2|C8) ;; *) USAGE_REASON=usage ;; esac
     [[ -n "$PINNED_KEY" ]] || USAGE_REASON=usage
     [[ "$DRY" == 1 || -n "$M_PROBE" ]] || USAGE_REASON=usage
+    [[ -z "$VOL_FAULT" && -z "$RECEIPT" ]] || USAGE_REASON=usage
   elif [[ "$STAGE" == V ]]; then
-    case "$M_CASE" in C4|C1|C2|C9) ;; *) USAGE_REASON=usage ;; esac
-    if [[ "$M_CASE" == C4 ]]; then
+    case "$M_CASE" in C4|C1|C2|C9|C5|C6|C7|C10) ;; *) USAGE_REASON=usage ;; esac
+    [[ -z "$RECEIPT" ]] || USAGE_REASON=usage
+    if [[ "$M_CASE" == C5 ]]; then
+      case "$VOL_FAULT" in F1|F2|F3|F4|F5) ;; *) USAGE_REASON=usage ;; esac
       [[ -z "$M_PROBE" && -z "$PINNED_KEY" ]] || USAGE_REASON=usage
+    elif [[ "$M_CASE" == C4 || "$M_CASE" == C10 ]]; then
+      [[ -z "$VOL_FAULT" && -z "$M_PROBE" && -z "$PINNED_KEY" ]] || USAGE_REASON=usage
     else
+      [[ -z "$VOL_FAULT" ]] || USAGE_REASON=usage
       [[ -n "$PINNED_KEY" ]] || USAGE_REASON=usage
       [[ "$DRY" == 1 || -n "$M_PROBE" ]] || USAGE_REASON=usage
     fi
+  elif [[ "$STAGE" == R ]]; then
+    [[ -n "$RECEIPT" ]] || USAGE_REASON=usage
+    [[ "$DRY" == 0 ]] || USAGE_REASON=usage
+    [[ -z "$M_CASE" && -z "$VOL_FAULT" && -z "$M_PROBE" && -z "$PINNED_KEY" ]] || USAGE_REASON=usage
   else
-    [[ -z "$M_CASE" && -z "$PINNED_KEY" && -z "$M_PROBE" ]] || USAGE_REASON=usage
+    [[ -z "$M_CASE" && -z "$PINNED_KEY" && -z "$M_PROBE" && -z "$VOL_FAULT" && -z "$RECEIPT" ]] || USAGE_REASON=usage
   fi
 }
 precheck() {
   local gst
   [[ "$TOOL_OVERRIDE" == 1 ]] && { add_reason tool-override; return 1; }
   [[ "$(id -u)" == 0 ]] && { add_reason root; return 1; }
+  if [[ "$STAGE" == R ]]; then return 0; fi
   check_softnet || return 1
   [[ -f "$SSH_KEY" && -r "$SSH_KEY" ]] || { add_reason ssh-key-unreadable; return 1; }
-  if [[ "$STAGE" == M || ( "$STAGE" == V && "$M_CASE" != C4 ) ]]; then
+  if [[ "$STAGE" == M || ( "$STAGE" == V && "$M_CASE" != C4 && "$M_CASE" != C5 && "$M_CASE" != C10 ) ]]; then
     [[ -f "$PINNED_KEY" && -r "$PINNED_KEY" && ! -L "$PINNED_KEY" ]] || { add_reason pinned-host-key; return 1; }
     awk '$1=="ssh-ed25519" && $2 ~ /^[A-Za-z0-9+\/=]+$/ {found=1; exit} END{exit !found}' "$PINNED_KEY" || { add_reason pinned-host-key; return 1; }
     if [[ "$DRY" != 1 ]]; then
@@ -2535,7 +3678,7 @@ decide() {
   if [[ "$PRECHECK_FAILED" == 1 ]]; then STATUS=precheck-failed; FINAL_EC=2
   elif [[ "$DRY" == 1 ]]; then STATUS=not-run; FINAL_EC=0
   elif [[ "$ANY_AMBIGUOUS" == 1 ]]; then STATUS=partial; FINAL_EC=5
-  elif [[ ( "$STAGE" == M || "$STAGE" == V ) && "$M_QUARANTINE" == 1 ]]; then STATUS=partial; FINAL_EC=5
+  elif [[ ( "$STAGE" == M || "$STAGE" == V || "$STAGE" == R ) && "$M_QUARANTINE" == 1 ]]; then STATUS=partial; FINAL_EC=5
   elif [[ "$ANY_COLLECTION_FAILED" == 1 ]]; then STATUS=partial; FINAL_EC=4
   elif [[ "$ANY_CLEANUP_FAILED" == 1 ]]; then STATUS=partial; FINAL_EC=5
   elif [[ "$ANY_CREATE_FAILED" == 1 ]]; then STATUS=partial; FINAL_EC=3
@@ -2588,7 +3731,7 @@ main() {
   trap on_exit EXIT
   trap 'REQUEST_CLEANUP=1' INT TERM HUP
   if [[ -n "$USAGE_REASON" ]]; then
-    [[ "$USAGE_REASON" == help ]] && say 'usage: s11-0-probe.sh [--dry-run] [--stage A|B|C|M|V|all] [--case C1|C2|C8|C4|C9] [--probe FILE] [--pinned-host-key FILE] [--endpoint-ip A.B.C.D|--endpoint-placeholder] [--lan-ip A.B.C.D] [--ssh-key FILE] [--tart-home DIR] [--out DIR]'
+    [[ "$USAGE_REASON" == help ]] && say 'usage: s11-0-probe.sh [--dry-run] [--stage A|B|C|M|V|R|all] [--case C1|C2|C8|C4|C9|C5|C6|C7|C10] [--fault F1|F2|F3|F4|F5] [--receipt FILE] [--probe FILE] [--pinned-host-key FILE] [--endpoint-ip A.B.C.D|--endpoint-placeholder] [--lan-ip A.B.C.D] [--ssh-key FILE] [--tart-home DIR] [--out DIR]'
     add_reason "$USAGE_REASON"; PRECHECK_FAILED=1
     [[ -z "$OUT" ]] && exit 2
     prepare_out || exit 2
@@ -2596,6 +3739,7 @@ main() {
   fi
   prepare_out || exit 2
   precheck || { PRECHECK_FAILED=1; exit 2; }
+  if [[ "$STAGE" == R ]]; then run_recovery; exit 0; fi
   write_guest
   if [[ "$DRY" == 1 ]]; then dry_stages; exit 0; fi
   if [[ "$STAGE" == M ]]; then run_mailbox; exit 0; fi
