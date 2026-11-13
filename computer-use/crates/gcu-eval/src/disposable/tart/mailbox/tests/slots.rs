@@ -5,6 +5,7 @@
 
 #![cfg(unix)]
 
+use std::cell::Cell;
 use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::Write;
@@ -12,18 +13,21 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use super::super::super::deadline::{FakeClock, MonoInstant};
+use super::super::super::schedule::POLL_BYTE_BUDGET;
 use super::super::ids::AttemptNonce;
 use super::super::ops::{
     MsgStatus, Op, Payload, ReplyResult, ReplyState, SideOp, SnapStatus, FRAME_MAX,
 };
 use super::super::seq::SeqTracker;
 use super::super::slots::{
-    arm, poll_guest, prepare_slots, publish, read_checked, read_slot, CheckedRead, GuestPoll,
-    HostSlot, IoPoint, SlotBody, SlotRef, GUEST_WRITE_DIR, HOST_STAGE_DIR, HOST_WRITE_DIR,
-    MAILBOX_DIR,
+    arm, poll_guest, prepare_slots, publish, read_checked, read_slot, read_slot_until, CheckedRead,
+    GuestPoll, HostSlot, IoPoint, SlotBody, SlotRef, GUEST_WRITE_DIR, HOST_STAGE_DIR,
+    HOST_WRITE_DIR, MAILBOX_DIR,
 };
 use super::super::sys;
 use super::super::{Breach, FailedRead, MailboxError, SeqFault};
@@ -253,7 +257,11 @@ fn replace_during_read_is_pending() {
     let dest = root.message(HOST_WRITE_DIR, Op::Probe.file_name());
     let hook_spare = spare.clone();
     let hook_dest = dest.clone();
+    let once = Cell::new(true);
     let _guard = arm(IoPoint::AfterRead, move || {
+        if !once.replace(false) {
+            return;
+        }
         if let Err(err) = fs::rename(&hook_spare, &hook_dest) {
             panic!("rename over slot: {err}");
         }
@@ -263,8 +271,249 @@ fn replace_during_read_is_pending() {
         &mut layout,
         SlotRef::Host(HostSlot::Op(Op::Probe)),
     ));
-    if read.body != SlotBody::Pending || read.retry_replaced != 1 || read.retry_absent != 0 {
+    let SlotBody::Frame(bytes) = read.body else {
         panic!("replaced read: {read:?}");
+    };
+    if bytes != b"replacement-object"
+        || read.retry_replaced != 1
+        || read.retry_absent != 0
+        || read.bytes != frame.len() + b"replacement-object".len()
+    {
+        panic!(
+            "replaced read: bytes={bytes:?} charged={} retries={}",
+            read.bytes, read.retry_replaced
+        );
+    }
+}
+
+#[test]
+fn exact_budget_leaves_the_next_frame_unread() {
+    let root = scratch();
+    let mut layout = need(prepare_slots(root.raw()));
+    let dest = root.message(GUEST_WRITE_DIR, Op::Probe.file_name());
+    let legal = probe_terminal(1, Check::Passed);
+    write_bytes(&dest, &vec![b'a'; 4_096]);
+    let n = Rc::new(Cell::new(0u32));
+    let counter = Rc::clone(&n);
+    let hook_dest = dest.clone();
+    let legal_hook = legal.clone();
+    let dir = root.path().to_path_buf();
+    let _guard = arm(IoPoint::AfterRead, move || {
+        let i = counter.get();
+        counter.set(i.saturating_add(1));
+        let spare = dir.join(format!("edge-{i}"));
+        let bytes = if i == 31 {
+            legal_hook.clone()
+        } else {
+            let mut body = vec![b'c'; 4_096];
+            body[0] = u8::try_from(i % 200).unwrap_or(1);
+            body
+        };
+        write_bytes(&spare, &bytes);
+        if let Err(err) = fs::rename(&spare, &hook_dest) {
+            panic!("rename: {err}");
+        }
+    });
+    match read_slot(root.raw(), &mut layout, SlotRef::Guest(Op::Probe)) {
+        Err(err)
+            if err.error == MailboxError::PollBudget
+                && err.bytes == POLL_BYTE_BUDGET
+                && err.retry_replaced == 32 => {}
+        other => panic!("exact boundary: {other:?}"),
+    }
+    if n.get() != 32 {
+        panic!("reads {}", n.get());
+    }
+    match fs::read(&dest) {
+        Ok(bytes) if bytes == legal => {}
+        other => panic!("legal frame: {other:?}"),
+    }
+    // A sticky call does no IO: it charges nothing and reads nothing.
+    match read_slot(root.raw(), &mut layout, SlotRef::Guest(Op::Probe)) {
+        Err(err)
+            if err.error == MailboxError::Sticky && err.bytes == 0 && err.retry_replaced == 32 => {}
+        other => panic!("sticky boundary: {other:?}"),
+    }
+    if n.get() != 32 {
+        panic!("sticky call read again: {}", n.get());
+    }
+}
+
+/// The stable try runs past the shared end: the late frame is not handed
+/// back, the bytes are charged, and a later call with a fresh end reads it.
+#[test]
+fn stable_try_past_the_end_is_deadline_not_frame() {
+    let root = scratch();
+    let mut layout = need(prepare_slots(root.raw()));
+    let dest = root.message(GUEST_WRITE_DIR, Op::Probe.file_name());
+    let frame = vec![b's'; 120];
+    write_bytes(&dest, &frame);
+    let clock = FakeClock::new();
+    let end = MonoInstant::from_nanos(1_000_000);
+    let clock_hook = clock.clone();
+    let once = Cell::new(true);
+    let guard = arm(IoPoint::AfterRead, move || {
+        if once.replace(false) && clock_hook.advance(Duration::from_millis(1)).is_err() {
+            panic!("advance");
+        }
+    });
+    match read_slot_until(
+        root.raw(),
+        &mut layout,
+        SlotRef::Guest(Op::Probe),
+        &clock,
+        end,
+    ) {
+        Err(err) if err.error == MailboxError::Deadline && err.bytes == frame.len() => {}
+        other => panic!("late stable frame: {other:?}"),
+    }
+    drop(guard);
+    let later = MonoInstant::from_nanos(10_000_000);
+    match read_slot_until(
+        root.raw(),
+        &mut layout,
+        SlotRef::Guest(Op::Probe),
+        &clock,
+        later,
+    ) {
+        Ok(read) if read.body == SlotBody::Frame(frame.clone()) && read.bytes == frame.len() => {}
+        other => panic!("fresh end: {other:?}"),
+    }
+}
+
+/// A short read followed by an IO error still charges the bytes it read.
+#[test]
+fn partial_read_then_error_charges_its_bytes() {
+    let root = scratch();
+    let mut layout = need(prepare_slots(root.raw()));
+    let dest = root.message(GUEST_WRITE_DIR, Op::Probe.file_name());
+    write_bytes(&dest, &vec![b'p'; 4_096]);
+    let fail = sys::force_read_fail(1_024);
+    match read_slot(root.raw(), &mut layout, SlotRef::Guest(Op::Probe)) {
+        Err(err) if err.bytes == 1_024 => {}
+        other => panic!("partial then error: {other:?}"),
+    }
+    drop(fail);
+}
+
+/// Same, after an earlier replaced frame: both reads are charged.
+#[test]
+fn replaced_then_partial_error_charges_both() {
+    let root = scratch();
+    let mut layout = need(prepare_slots(root.raw()));
+    let dest = root.message(GUEST_WRITE_DIR, Op::Probe.file_name());
+    let first = vec![b'f'; 300];
+    write_bytes(&dest, &first);
+    let hook_dest = dest.clone();
+    let dir = root.path().to_path_buf();
+    let once = Cell::new(true);
+    let _guard = arm(IoPoint::AfterRead, move || {
+        if !once.replace(false) {
+            return;
+        }
+        let spare = dir.join("partial-spare");
+        write_bytes(&spare, &vec![b'g'; 4_000]);
+        if let Err(err) = fs::rename(&spare, &hook_dest) {
+            panic!("rename: {err}");
+        }
+        // Armed for the next read; the guard would clear it on drop.
+        std::mem::forget(sys::force_read_fail(500));
+    });
+    match read_slot(root.raw(), &mut layout, SlotRef::Guest(Op::Probe)) {
+        Err(err) if err.bytes == first.len() + 500 && err.retry_replaced == 1 => {}
+        other => panic!("replaced then partial error: {other:?}"),
+    }
+}
+
+#[test]
+fn replaced_frame_past_the_remainder_is_not_read() {
+    let root = scratch();
+    let mut layout = need(prepare_slots(root.raw()));
+    let dest = root.message(GUEST_WRITE_DIR, Op::Probe.file_name());
+    write_bytes(&dest, &vec![b'a'; 4_000]);
+    let n = Rc::new(Cell::new(0u32));
+    let counter = Rc::clone(&n);
+    let hook_dest = dest.clone();
+    let dir = root.path().to_path_buf();
+    let _guard = arm(IoPoint::AfterRead, move || {
+        let i = counter.get();
+        counter.set(i.saturating_add(1));
+        let spare = dir.join(format!("over-{i}"));
+        let mut body = vec![b'd'; 4_000];
+        body[0] = u8::try_from(i % 200).unwrap_or(1);
+        write_bytes(&spare, &body);
+        if let Err(err) = fs::rename(&spare, &hook_dest) {
+            panic!("rename: {err}");
+        }
+    });
+    let charged = 32 * 4_000;
+    match read_slot(root.raw(), &mut layout, SlotRef::Guest(Op::Probe)) {
+        Err(err)
+            if err.error == MailboxError::PollBudget
+                && err.bytes == charged
+                && err.retry_replaced == 32 => {}
+        other => panic!("over-remainder: {other:?}"),
+    }
+    if n.get() != 32 || charged >= POLL_BYTE_BUDGET {
+        panic!("hooks {} charged {charged}", n.get());
+    }
+}
+
+#[test]
+fn read_stops_at_the_shared_deadline() {
+    let root = scratch();
+    let mut layout = need(prepare_slots(root.raw()));
+    let dest = root.message(GUEST_WRITE_DIR, Op::Probe.file_name());
+    let first = vec![b'e'; 80];
+    write_bytes(&dest, &first);
+    let clock = FakeClock::new();
+    let end = MonoInstant::from_nanos(1_000_000);
+    let clock_hook = clock.clone();
+    let hook_dest = dest.clone();
+    let dir = root.path().to_path_buf();
+    let once = Cell::new(true);
+    let n = Rc::new(Cell::new(0u32));
+    let counter = Rc::clone(&n);
+    let _guard = arm(IoPoint::AfterRead, move || {
+        counter.set(counter.get().saturating_add(1));
+        if !once.replace(false) {
+            return;
+        }
+        if clock_hook.advance(Duration::from_millis(1)).is_err() {
+            panic!("advance");
+        }
+        let spare = dir.join("deadline-spare");
+        write_bytes(&spare, b"later-frame");
+        if let Err(err) = fs::rename(&spare, &hook_dest) {
+            panic!("rename: {err}");
+        }
+    });
+    match read_slot_until(
+        root.raw(),
+        &mut layout,
+        SlotRef::Guest(Op::Probe),
+        &clock,
+        end,
+    ) {
+        Err(err) if err.error == MailboxError::Deadline && err.bytes == first.len() => {}
+        other => panic!("deadline: {other:?}"),
+    }
+    if n.get() != 1 {
+        panic!("deadline reads {}", n.get());
+    }
+    let later = MonoInstant::from_nanos(2_000_000);
+    let read = need(read_slot_until(
+        root.raw(),
+        &mut layout,
+        SlotRef::Guest(Op::Probe),
+        &clock,
+        later,
+    ));
+    let SlotBody::Frame(bytes) = read.body else {
+        panic!("resumed read: {read:?}");
+    };
+    if bytes != b"later-frame" || read.bytes != b"later-frame".len() {
+        panic!("resumed bytes {} {:?}", read.bytes, bytes);
     }
 }
 
@@ -764,28 +1013,32 @@ fn replaced_slot_then_stable_reply() {
     write_bytes(&login, &probe_terminal(1, Check::Failed));
     let hook_login = login.clone();
     let hook_probe = probe.clone();
+    let once = Cell::new(true);
     let guard = arm(IoPoint::AfterRead, move || {
+        if !once.replace(false) {
+            return;
+        }
         if let Err(err) = fs::rename(&hook_login, &hook_probe) {
             panic!("rename over probe: {err}");
         }
     });
     match poll_guest(root.raw(), &mut layout, Op::Probe, &mut tracker) {
-        Ok(GuestPoll::Pending {
-            request_seq: 1,
-            retry_replaced: 1,
-            retry_absent: 0,
-            ..
-        }) => {}
-        other => panic!("replaced poll: {other:?}"),
-    }
-    drop(guard);
-    match poll_guest(root.raw(), &mut layout, Op::Probe, &mut tracker) {
         Ok(GuestPoll::Ready {
             reply,
             retry_replaced: 1,
+            retry_absent: 0,
             ..
         }) if reply.result == ReplyResult::Probe(Check::Failed) && reply.request_seq == 1 => {}
         other => panic!("stable replacement: {other:?}"),
+    }
+    drop(guard);
+    match poll_guest(root.raw(), &mut layout, Op::Probe, &mut tracker) {
+        Ok(GuestPoll::Pending {
+            request_seq: 1,
+            retry_replaced: 1,
+            ..
+        }) => {}
+        other => panic!("replay of the replacement: {other:?}"),
     }
 }
 

@@ -384,6 +384,15 @@ C7 自主终止及所有 transport/liveness 验收移到 M7/M9，在 block-all �
 
 **推论与建议**：`-srcfolder` 能让两个 marker 在首次受控挂载前就生效，但代价是一次全局可见、无 noexec 的内部挂载；依 §2“必须限制所有内部挂载而此配方做不到就拒绝配方”，**建议保留普通 create**：不出现内部挂载；受控 attach 后写 `.metadata_never_index`（实测不被索引）；系统创建的 `.fseventsd` 日志只在一次性卷上、随镜像删除，记录的只是固定槽位名。最终由 M6 定。
 
+### M4a 调度可行性（2026-11-13）
+
+M4 第 2 轮审阅后拆为 M4a（邮箱侧）与 M4b（machine 集成，见 §6）。M4a 的可行性门按实际协议周期计时：inventory 请求 → 访客采样 → 回复对宿主可见 → 宿主下一步发布 grant → grant 对访客可见；两个方向分开计，只用实测上界。
+
+- 已有实测：C1 往返 max 1023 ms；单向只知不超过往返；一步服务 100 ms；发布间隔 800 ms；访客截止固定为 `g+2000`。
+- 样本在 grant 对访客可见时的年龄上界 1023+100+1023 = 2146 ms；相邻 grant 可见间隔上界 800+100+1023 = 1923 ms；连续性要求“年龄 + 间隔 < 2000 ms”，不满足。即使把整段交换只算一次往返：1023+100+800+100 = 2023 ms，仍超过 2000 ms。
+- 结论：**在现有常量（`g+2s`、访客 ≤3 s 停树）与实测 virtiofs 可见延迟下，没有可行的 fresh-sample/grant 调度**；可行性门对任何窗口都返回 `Infeasible`，按 §3“无可行调度即 gate 失败，不增租约/线程/observer”，真实通道不得准入。代码与测试见 S11-M4a。
+- 待 owner 决定的方向（未决定，均需另行审阅）：(1) 修订租约常量（例如更长的访客租约与停树时限），这会改变 §3 的安全时限；(2) 精测单向延迟分布（实测“访客 rename 宿主约 0.16 s 可见”“宿主覆盖访客约 1 s 可见”提示两向不对称，可能来自 virtiofs 属性缓存），看能否在不改常量下证明可行；(3) 换一种宿主→访客的快速通知方式（须仍符合 2026-11-10 的“无 IP 控制通道”决定）。
+
 **仍未测**：C8 真正的双主体映射（准备副本 `macos-s2-eval-c8` 已克隆，等 owner 建标准账号，步骤见 runbook）、block-all 下的自主运行与存活（M7/M9）。
 
 ## 6. 残余风险、not_run 与分步交付
@@ -401,7 +410,8 @@ endpoint 泄漏、短期凭据/无 refresh、进程/窗口残余及 S3/S4/S12/TC
 | S11-M1 | 本修订独立复审 | 未通过不操作宿主 | §1决定/§5 notice |
 | S11-M2 | [S11-0c](#lab)机械结果/无提权清单；失败缩减设计 | M1；不依赖 S11e/M7 | 复制探针无需 owner 安装；已有双主体可测，否则按§5 unknown/后移，不登录模型 |
 | S11-M3 | [codec/open/publication](#宿主发布与读取) fake/离线竞态、固定槽/源名替换、有界状态帧/过时 ACK | [七操作](#operations)；独立审阅 | 无 |
-| S11-M4 | 七方法（含 startup inventory）全部解析/转移，pending/lease/scheduling/deadline machine | M3、下列 code/trace/[同步契约](#schedule)独立审阅后才真实接线 | 无 |
+| S11-M4a | 邮箱侧：`MailboxGuestChannel`（七方法、pending、不重发、仅经 inventory 完成、消费记录核对）、grant 记账与样本固定、按实测上界的调度可行性门、单次读取 128 KiB | M3；独立审阅 | 无 |
+| S11-M4b | machine 集成：每个公开 step 共享 100 ms 截止与可续跑分片、kill/reap 句柄与冻结截止、Stop/owner 证明服务（reserve→seal）、unknown effect 粘性隔离、回收游标、保存的 revoke end；先短设计再代码 | M4a、调度可行性有解（见“M4a 调度可行性”）、设计与代码独立审阅后才真实接线 | 视调度结论而定 |
 | S11-M5 | 卷账本/持久目录身份/销毁屏障 fake、C5/recovery | [五条规则](#destroy)；禁 VM-only 成功先 seal | 无 |
 | S11-M6 | 宿主卷/Tart 私有适配（依§2生命周期） | 仅 M2 已测固定 argv，接 M5；[准入边界](#admission) | 只在已审阅宿主范围内 |
 | S11-M7 | S11e supervisor/golden/sandbox | [§4](#supervisor)与下列自主终止义务 | 必要准备安装/封存签认 |

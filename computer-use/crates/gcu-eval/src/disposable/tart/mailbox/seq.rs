@@ -148,6 +148,12 @@ impl SeqTracker {
         self.deadline
     }
 
+    /// Boot bound by the first inventory terminal, if that reply has arrived.
+    #[must_use]
+    pub fn boot_id(&self) -> Option<&AsciiId> {
+        self.boot.as_ref()
+    }
+
     fn admit_request(&self, env: &Envelope) -> Result<(), MailboxError> {
         if env.status != MsgStatus::Request {
             return Err(MailboxError::Sequence(SeqFault::Status));

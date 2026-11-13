@@ -31,6 +31,7 @@ pub use ops::{
 };
 pub use seq::{AttemptBinding, Observe, SeqTracker};
 pub use slots::{
-    poll_guest, prepare_slots, publish, read_checked, read_slot, CheckedRead, GuestPoll, HostSlot,
-    Layout, SlotBody, SlotRead, SlotRef, GUEST_WRITE_DIR, HOST_WRITE_DIR, MAILBOX_DIR,
+    poll_guest, poll_guest_until, prepare_slots, publish, read_checked, read_slot, CheckedRead,
+    GuestPoll, HostSlot, Layout, SlotBody, SlotRead, SlotRef, GUEST_WRITE_DIR, HOST_WRITE_DIR,
+    MAILBOX_DIR,
 };

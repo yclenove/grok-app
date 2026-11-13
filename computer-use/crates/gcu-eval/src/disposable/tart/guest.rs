@@ -6,6 +6,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::num::NonZeroU64;
+use std::time::Duration;
 
 use super::super::Probe;
 use super::deadline::{
@@ -88,11 +89,42 @@ pub trait GuestChannel {
     fn revoke(&mut self, deadline: RevokeDeadline) -> Result<BoundedOutput, CallError>;
 }
 
+/// Machine-side consumption note. Not a [`GuestChannel`] method.
+///
+/// `active_kind` is 1 bootstrap, 2 login, 3 run, or 0 when only revoke is consumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsumeNote {
+    /// Ordinary op, or 0.
+    pub active_kind: u8,
+    /// Nested active sequence. Zero when no active row is consumed.
+    pub active_seq: u64,
+    /// Nested revoke sequence. Zero when revoke is not consumed.
+    pub revoke_seq: u64,
+}
+
+/// Private accounting beside [`GuestChannel`]. Version 1 gains no method.
+///
+/// Scripted fakes ignore consumption. The mailbox adapter records it.
+pub trait GuestAccounting {
+    /// Boot from the first verified inventory envelope, when this channel has one.
+    fn envelope_boot(&self) -> Option<String> {
+        None
+    }
+
+    /// Queue consume only after the machine has recorded that handoff.
+    fn note_consumed(&mut self, note: ConsumeNote) -> Result<(), CallError> {
+        let _ = note;
+        Ok(())
+    }
+}
+
 /// Fake channel. It records operations and does not bind a transport.
 pub struct FakeGuestChannel {
     clock: FakeClock,
     script: VecDeque<ScriptedReply>,
     trace: Vec<TraceEntry<GuestCommand>>,
+    io_cost: Option<Duration>,
+    envelope: Option<String>,
 }
 
 impl FakeGuestChannel {
@@ -103,7 +135,22 @@ impl FakeGuestChannel {
             clock,
             script: VecDeque::new(),
             trace: Vec::new(),
+            io_cost: None,
+            envelope: None,
         }
+    }
+
+    /// Boot the machine should treat as the first verified inventory envelope.
+    pub fn set_envelope_boot(&mut self, boot: impl Into<String>) {
+        self.envelope = Some(boot.into());
+    }
+
+    /// Charge `cost` on the next calls that fit in their deadline.
+    ///
+    /// A cost that would pass the deadline returns [`CallError::Expired`]
+    /// without moving the clock and without taking a script. Does not sleep.
+    pub fn set_io_cost(&mut self, cost: Duration) {
+        self.io_cost = Some(cost);
     }
 
     /// Queue one reply.
@@ -122,6 +169,29 @@ impl FakeGuestChannel {
         command: GuestCommand,
         deadline: MonoInstant,
     ) -> Result<BoundedOutput, CallError> {
+        if let Some(cost) = self.io_cost.filter(|cost| !cost.is_zero()) {
+            let now = self.clock.now();
+            let fits = now < deadline && now.checked_add(cost).is_ok_and(|next| next <= deadline);
+            if !fits {
+                let result = Err(CallError::Expired);
+                self.trace.push(TraceEntry {
+                    command,
+                    deadline,
+                    outcome: script_outcome(&result),
+                });
+                return result;
+            }
+            let result = dispatch_script(&mut self.script, now, deadline);
+            self.trace.push(TraceEntry {
+                command,
+                deadline,
+                outcome: script_outcome(&result),
+            });
+            if result.is_ok() {
+                let _ = self.clock.advance(cost);
+            }
+            return result;
+        }
         let result = dispatch_script(&mut self.script, self.clock.now(), deadline);
         self.trace.push(TraceEntry {
             command,
@@ -177,5 +247,11 @@ impl fmt::Debug for FakeGuestChannel {
             .field("queued", &self.script.len())
             .field("traced", &self.trace.len())
             .finish()
+    }
+}
+
+impl GuestAccounting for FakeGuestChannel {
+    fn envelope_boot(&self) -> Option<String> {
+        self.envelope.clone()
     }
 }
