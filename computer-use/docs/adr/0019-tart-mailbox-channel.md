@@ -317,7 +317,7 @@ C7 自主终止及所有 transport/liveness 验收移到 M7/M9，在 block-all �
 
 ### S11-0c 拆分与首轮实测事实（2026-11-11）
 
-**拆分**：S11-0c 分为 **M2a**（邮箱目录机制 C1/C2/C8，导出为宿主普通 0700 私有目录，不是限容 HFSX 卷）与 **M2c**（卷实验 C4/C5/C6/C7/C9/C10，含 hdiutil 流程与本节原有卷相关约束；其中 M2c-a 即 C4 与 C1/C2/C9 的卷上复测，已实测，见下节，M2c-b 即 C5/C6/C7/C10，尚未实现）。M2a 的私有根规则：叶子目录为当前 UID 所有且 0700，祖先由 root 或当前 UID 所有、无组/其他写权限、无 ACL 写授权（逐段 FD 遍历，类似 ssh StrictModes），替代“每段 0700”的字面要求（Mini 的家目录与临时目录祖先不是 0700）。
+**拆分**：S11-0c 分为 **M2a**（邮箱目录机制 C1/C2/C8，导出为宿主普通 0700 私有目录，不是限容 HFSX 卷）与 **M2c**（卷实验 C4/C5/C6/C7/C9/C10，含 hdiutil 流程与本节原有卷相关约束；其中 M2c-a 即 C4 与 C1/C2/C9 的卷上复测，已实测，见下节，M2c-b 即 C5/C6/C7/C10，已实测，见 M2c-b 一节）。M2a 的私有根规则：叶子目录为当前 UID 所有且 0700，祖先由 root 或当前 UID 所有、无组/其他写权限、无 ACL 写授权（逐段 FD 遍历，类似 ssh StrictModes），替代“每段 0700”的字面要求（Mini 的家目录与临时目录祖先不是 0700）。
 
 **实测**（Mac mini，Tart 2.41.1，一次性 DEFAULT-Softnet clone + 受限 SSH 实验室 driver，无模型、无凭据；每例结束确认 clone 删除且缺席、无 tart/softnet 残留进程；证据标签 `DEFAULT-network/mechanics-only`，导出为普通私有目录）：
 
@@ -355,7 +355,21 @@ C7 自主终止及所有 transport/liveness 验收移到 M7/M9，在 block-all �
 
 **推论**：(a) 限容有效：同样的写入，镜像峰值是确定的，且受 64 MiB 卷约束；访客得到 ENOSPC，宿主卷没有被写满。(b) 宿主可用空间下降只能做旁证：在共享系统盘上，一分钟内的其它写入/释放会带来约 ±10 MB 的噪声，同一写入两次判定不同；上限证据以镜像 st_size/blocks 峰值为准，M5/M9 不得只凭宿主空间差值判卷外增长。(c) normal detach 偶尔会超过 5 s，而超时 kill 会留下已卸载但仍 attached 的镜像；探针已把 normal detach 的上限放到整个卷清理份额 20 s（force 10 s），并记录实际耗时。§2 预算表的 5 s 目标要在 M5 按实测分布重定，不能在 5 s 时直接 kill。(d) 工具教训：macOS 的 bash 3.2 下进程替换的管道要等读端回收才关闭，探针每 20 ms 轮询一次，会把打开的 fd 推到约 100 个（`ulimit -n` 为 256）；已改为不用进程替换。Linux 上的桩套件发现不了这个问题。
 
-**仍未测**：C8 真正的双主体映射（需 owner 在准备副本中另建非管理员账号，S11e 本来也需要）、卷实验 C5/C6/C7/C10（M2c-b）、block-all 下的自主运行与存活（M7/M9）。
+### M2c-b 卷实验实测事实（2026-11-12）
+
+同一台 Mac mini（系统语言 zh_CN），`s11-0-probe.sh --stage V --case C5|C6|C7|C10` 与 `--stage R`。每例结束都确认：无 clone、无挂载、`hdiutil info` 中无本次镜像。所有报告带 `"exclusive_window":"assumed"`：按路径删除依赖所有者保留的排他窗口（§2 规则 1），不是生产实现。
+
+| 实验 | 结果（只记事实） |
+| --- | --- |
+| C10 索引/备份（不起 VM） | 卷根 16 个 1 KiB canary，等 30 s：`mdfind -onlyin` 命中 0，`mdutil -s` 为 Indexing disabled；`.fseventsd` 挂载即出现，uid 0、0700，本用户不能写 `no_log`；`tmutil destinationinfo` 为 `tmutil: No destinations configured.`（0 个目的地，因而没有可观察的备份作业）；`isexcluded` 镜像 I 为 Included、挂载点 M 为 Excluded。判定 `unknown/observed`：看不到系统服务读取，不能证明无读取/备份。写完 canary 后 normal detach 耗时 11 s（未 force） |
+| C5 崩溃/恢复（不起 VM） | 5 个故障点各崩溃一次（`kill -KILL`，无退出陷阱），再用 `--stage R` 恢复。F1（意图已记、未 create）、F3（已 attach、receipt 未记 mounted）、F4（已 detach、receipt 未记）、F5（已删镜像、receipt 未记）均 `ok/recovered`，F3 由新鲜映射核验后 normal detach 成功、未 force；F2（create 已成、镜像 inode 未记）按设计 `quarantine/image-unmatched`，镜像保留，R 未做任何卸载/删除；总控按 receipt 核对 attempt/挂载目录 inode、镜像未 attach、挂载目录为空后手工删除。崩溃运行各留下一个 `$TMPDIR/s11-0.*` 工作目录（无卷内容），已删 |
+| C6 客机持 FD 至停机 | file、dir 两子例：客机握住预建槽位或 mailbox 目录直到 VM 停止；VM 停止删除后宿主 normal detach 0 s、退出码 0、未 force。客机 FD 不会在停机后继续占住卷 |
+| C7 VM 运行时提前 detach | normal detach 立即被拒：退出码 16（“资源忙”）、0 s；按设计不 force。随后客机 8 次有界读写全部成功，Tart 一直运行。卷未卸下，所以 M₀ 不可观察（`m0_entries=unknown`）。VM 停止后 normal detach 成功、删除完成 |
+| 宿主进程占用卷（手工，临时 64 MiB 卷） | 文件被占用：normal detach 退出码 16、hdiutil 自行重试约 10.7 s 才失败；目录（cwd）被占用：0.15 s 失败；`detach -force` 0.14 s 成功，占用进程不会被杀、持有失效 FD。报错文案随系统语言本地化，分类只能用退出码 |
+
+**推论**：(a) 运行中的 VM 共享卷时，normal detach 会被系统拒绝，所以提前拆卷只能靠 force，而 force 仍只允许在证明停机之后。(b) 被占用时 hdiutil 会自行重试约 10 s，写入后服务短暂占用也会触发（C10 的 11 s）；§2 预算表“normal detach 5s”不可行，M5 至少按 20 s 份额重定，并且不能在重试中途 kill（会留下已卸载但仍 attached 的镜像，见 M2c-a）。(c) 恢复只对 receipt 能正向对应的状态生效；“create 已成、身份未记”这类状态只能隔离，生产实现应在 create 前把预期路径与排他窗口写入账本，并在 create 返回后立即记下身份。(d) `.fseventsd` 由系统在挂载时创建且本用户不可写，`-srcfolder` 预置 marker 能否生效仍待验证；C10 只能给观察，不能给保证。
+
+**仍未测**：C8 真正的双主体映射（需 owner 在准备副本中另建非管理员账号，S11e 本来也需要）、`-srcfolder` 预置 marker 与内部挂载 gate、block-all 下的自主运行与存活（M7/M9）。
 
 ## 6. 残余风险、not_run 与分步交付
 
