@@ -194,7 +194,7 @@ install_templates() {
     '  exit 0; fi' \
     'case " $* " in *s11m.XXXXXX*) cat >"$ROOT/init.body"; printf "init-ok\n"; exit 0 ;; esac' \
     'remote=""; for remote in "$@"; do :; done' \
-    'case "$remote" in upload|verify\ *|run\ C2|run\ C8) cat >/dev/null; exit 0 ;; "run C1"|"run C7") "$ROOT/bin/c7guest" "$remote"; exit $? ;; "run C9") cat >/dev/null; mode=""; mbx=$(awk '"'"'match($0,/--dir s11mbx:/){p=substr($0,RSTART+13)} END{print p}'"'"' "$ROOT/tart.log"); [[ -n "$mbx" && -f "$mbx/fill-mode" ]] && mode=$(tr -d "\r\n" <"$mbx/fill-mode"); if [[ -f "$ROOT/c9_hold_after" && "$mode" == small ]]; then "$ROOT/bin/c9write" & cpid=$!; trap "exit 0" TERM INT HUP; wait "$cpid"; exit $?; fi; "$ROOT/bin/c9write"; exit $? ;; "run C6 file"|"run C6 dir") kind=file; [[ "$remote" == "run C6 dir" ]] && kind=dir; printf "v=1 op=c6 role=guest kind=%s held=1\n" "$kind"; pp=$PPID; trap "exit 0" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done ;; esac' \
+    'case "$remote" in upload|verify\ *|run\ C2|run\ C8) cat >/dev/null; exit 0 ;; "run C1"|"run C7") "$ROOT/bin/c7guest" "$remote"; exit $? ;; "run C9") cat >/dev/null; mode=""; mbx=$(awk '"'"'match($0,/--dir s11mbx:/){p=substr($0,RSTART+13)} END{print p}'"'"' "$ROOT/tart.log"); [[ -n "$mbx" && -f "$mbx/fill-mode" ]] && mode=$(tr -d "\r\n" <"$mbx/fill-mode"); if [[ -f "$ROOT/c9_hold_after" && "$mode" == small ]]; then "$ROOT/bin/c9write" & cpid=$!; trap "exit 0" TERM INT HUP; wait "$cpid"; exit $?; fi; "$ROOT/bin/c9write"; exit $? ;; "run C6 file"|"run C6 dir") kind=file; [[ "$remote" == "run C6 dir" ]] && kind=dir; [[ -f "$ROOT/c6_nohold" ]] && exit 0; printf "v=1 op=c6 role=guest kind=%s held=1\n" "$kind"; pp=$PPID; trap "exit 0" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done ;; esac' \
     '[[ -f "$ROOT/guest_fail" ]] && exit 9' \
     'if [[ -f "$ROOT/guest_hang" ]]; then pp=$PPID; trap "exit 143" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done; exit 143; fi' \
     'last=""' \
@@ -590,6 +590,14 @@ if [[ "$1" == destinationinfo && $# -eq 1 ]]; then
     printf '%s\n' 'tmutil: No destinations configured.'
     exit 0
   fi
+  if [[ -f "$ROOT/tmutil_localonly" ]]; then
+    printf '%s\n' '====================================================' \
+      'Name          : S11SecretDestName' \
+      'Kind          : Local' \
+      'Mount Point   : /var/empty/secret' \
+      'ID            : ABC'
+    exit 0
+  fi
   if [[ -f "$ROOT/tmutil_dest_fail" ]]; then
     printf '%s\n' 'Operation not permitted' >&2
     exit 1
@@ -793,6 +801,10 @@ if [[ "$remote" == "run C7" ]]; then
   fi
   line="v=1 op=c7 role=guest ops=8 ok=8 enoent=0 eio=0 other=0 hang=0"
   [[ -f "$ROOT/c7_enoent" ]] && line="v=1 op=c7 role=guest ops=8 ok=7 enoent=1 eio=0 other=0 hang=0"
+  # Real c7ops shape when the first operation hangs: ops counts attempts.
+  [[ -f "$ROOT/c7_hang1" ]] && line="v=1 op=c7 role=guest ops=1 ok=0 enoent=0 eio=0 other=0 hang=1"
+  [[ -f "$ROOT/c7_zero" ]] && line="v=1 op=c7 role=guest ops=0 ok=0 enoent=0 eio=0 other=0 hang=0"
+  [[ -f "$ROOT/c7_short" ]] && line="v=1 op=c7 role=guest ops=3 ok=3 enoent=0 eio=0 other=0 hang=0"
   printf '%s\n' "$line"
   exit 0
 fi
@@ -848,7 +860,7 @@ setup() {
   export TMPDIR=$CASE/tmp
   export S11_START_SEC=0
   unset BASH_ENV S11_XTRACE S11_BOUND_SEC S11_BOUND_POLLS S11_FORCE_NAME S11_PROBE_BUDGET S11_CLEANUP_BUDGET S11_REAP_POLLS S11_FAIL_ROW_N S11_FAIL_STAGE S11_PROBE_MODE
-  unset S11_HDIUTIL S11_DISKUTIL S11_PLUTIL S11_MOUNT S11_MDUTIL S11_TMUTIL S11_MDFIND S11_STAT S11_DF S11_VOLIO S11_LS S11_TEST_MODE S11_C10_WAIT S11_HOLD_SEC S11_C6_HOST_BUDGET S11_R_BUDGET S11_RECEIPT_STALL S11_HOLD_NEED S11_READY_SEC S11_C7_BUDGET
+  unset S11_HDIUTIL S11_DISKUTIL S11_PLUTIL S11_MOUNT S11_MDUTIL S11_TMUTIL S11_MDFIND S11_STAT S11_DF S11_VOLIO S11_LS S11_TEST_MODE S11_C10_WAIT  S11_R_BUDGET S11_RECEIPT_STALL S11_READY_SEC S11_C7_BUDGET
   export S11_TEST_MODE=1
   ARGS=(--ssh-key "$CASE/id_key" --tart-home "$CASE/thome" --out "$CASE/out")
 }
@@ -3128,81 +3140,79 @@ PY
 
 # Real Mini output when no backup destination exists.
 test_stage_v_c10_nodest() {
-  setup
-  enable_volume
-  export S11_C10_WAIT=0
-  touch "$ROOT/tmutil_nodest"
-  run_probe 12 --stage V --case C10 "${ARGS[@]}"
-  need_ec 4
-  common_end
-  assert_image_gone
-  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c10 nodest"
+  local flag want
+  for flag in tmutil_nodest tmutil_localonly; do
+    rm -rf "$CASE/out"
+    setup
+    enable_volume
+    export S11_C10_WAIT=0
+    rm -f "$ROOT/tmutil_nodest" "$ROOT/tmutil_localonly"
+    touch "$ROOT/$flag"
+    want=0; [[ "$flag" == tmutil_localonly ]] && want=1
+    run_probe 12 --stage V --case C10 "${ARGS[@]}"
+    need_ec 4
+    common_end
+    assert_image_gone
+    if grep -F -q S11SecretDestName "$CASE/out/report.json"; then die "dest name leaked"; fi
+    "$PYTHON" - "$CASE/out/report.json" "$want" <<'PY' || die "c10 $flag"
 import json, sys
 c = json.load(open(sys.argv[1]))["stages"][0]["cases"][0]
 fields = dict(tok.split("=", 1) for tok in c["record"].split())
-assert fields["dest_count"] == "0", fields["dest_count"]
+assert fields["dest_count"] == sys.argv[2], fields["dest_count"]
 PY
+  done
 }
 
-test_stage_v_c6_force_and_reap() {
+# Guest holds an FD until the VM stops; the host then tears down the ordinary way.
+test_stage_v_c6_guest_hold() {
   setup
   enable_volume
   write_pinned
   write_fake_probe
-  export S11_HOLD_SEC=5
-  touch "$ROOT/fail_detach" "$ROOT/busy_err"
   run_probe 50 --stage V --case C6 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
   need_ec 0
   common_end
-  local n=0 img nd nf
+  local n=0 img nd
   sed -n 's/^create .* \(.*\/mailbox\.sparseimage\)$/\1/p' "$ROOT/hdiutil.log" >"$CASE/images.list"
   while IFS= read -r img; do
     [[ -n "$img" ]] || continue
     [[ ! -e "$img" && ! -L "$img" ]] || die "image remains $img"
-    [[ ! -d "$(dirname "$img")" ]] || die "attempt remains"
     n=$((n + 1))
   done <"$CASE/images.list"
   [[ "$n" == 2 ]] || die "c6 image count $n"
   nd=$(grep -E -c '^detach [^ -]' "$ROOT/hdiutil.log" || true)
-  nf=$(force_lines)
-  [[ "$nd" == 2 && "$nf" == 2 ]] || die "c6 detach normal=$nd force=$nf"
+  [[ "$nd" == 2 ]] || die "c6 normal detach $nd"
+  if grep -F -q -- '-force' "$ROOT/hdiutil.log"; then die "c6 forced"; fi
   grep -F -q 'run C6 file' "$ROOT/ssh.log" || die "ssh file"
   grep -F -q 'run C6 dir' "$ROOT/ssh.log" || die "ssh dir"
   "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c6 records"
 import json, sys
-rep = json.load(open(sys.argv[1]))
-st = rep["stages"][0]
+st = json.load(open(sys.argv[1]))["stages"][0]
 assert st["verdict"] == "ok", st["verdict"]
 cases = st["cases"]
 assert [c["boundary"] for c in cases] == ["file", "dir"], cases
 for c in cases:
     assert c["verdict"] == "ok" and c["reason"] == "measured", (c["boundary"], c["verdict"], c["reason"])
-    fields = dict(tok.split("=", 1) for tok in c["record"].split())
-    assert fields["guest_held"] == "1", c["record"]
-    assert fields["normal_class"] == "busy", c["record"]
-    assert fields["normal_rc"] == "16", c["record"]
-    assert fields["force"] == "1" and fields["force_rc"] == "0", c["record"]
-    assert fields["holder_reaped"] == "1", c["record"]
+    f = dict(tok.split("=", 1) for tok in c["record"].split())
+    assert f["guest_held"] == "1" and f["detach_rc"] == "0" and f["detach_class"] == "none" and f["force"] == "0", c["record"]
 PY
 }
 
-# A failed force must quarantine and keep the image (st must be the force's status).
-test_stage_v_c6_force_fail_quarantine() {
+test_stage_v_c6_not_held() {
   setup
   enable_volume
   write_pinned
   write_fake_probe
-  export S11_HOLD_SEC=5
-  touch "$ROOT/fail_detach" "$ROOT/busy_err" "$ROOT/fail_force"
+  touch "$ROOT/c6_nohold"
   run_probe 50 --stage V --case C6 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
-  need_ec 5
+  need_ec 4
   common_end
-  need_reason quarantine
-  local img
-  img=$(image_path)
-  [[ -n "$img" && -f "$img" && ! -L "$img" ]] || die "image not kept"
-  [[ "$(force_lines)" == 1 ]] || die "force count"
-  grep -F -q '"export_state":"quarantine"' "$CASE/out/report.json" || die "c6 force fail state"
+  assert_image_gone
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c6 not held"
+import json, sys
+c = json.load(open(sys.argv[1]))["stages"][0]["cases"][0]
+assert c["verdict"] == "unknown" and c["reason"] == "guest-not-held", (c["verdict"], c["reason"])
+PY
 }
 
 test_stage_v_c6_no_force_while_vm_up() {
@@ -3210,7 +3220,6 @@ test_stage_v_c6_no_force_while_vm_up() {
   enable_volume
   write_pinned
   write_fake_probe
-  export S11_HOLD_SEC=5
   touch "$ROOT/fail_stop"
   run_probe 30 --stage V --case C6 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
   need_ec 5
@@ -3421,23 +3430,6 @@ set_receipt_case() {
   chmod 600 "$RCPT"
 }
 
-holder_pid_dead() {
-  local pid
-  pid=$("$PYTHON" - "$1" <<'PY'
-import json, sys
-rep = json.load(open(sys.argv[1]))
-for c in rep["stages"][0]["cases"]:
-    if c.get("boundary") != "file":
-        continue
-    fields = dict(tok.split("=", 1) for tok in c["record"].split())
-    sys.stdout.write(fields.get("holder_pid", ""))
-    break
-PY
-)
-  case "$pid" in ""|*[!0-9]*) die "holder pid [$pid]" ;; esac
-  if kill -0 "$pid" 2>/dev/null; then die "holder $pid still alive"; fi
-}
-
 # A parseable C7 receipt is refused before detach, unlink, or rmdir.
 test_stage_r_c7_refused() {
   setup
@@ -3589,6 +3581,19 @@ test_stage_r_preflight_keeps_image() {
   assert_stage_r quarantine attempt-dirty kept kept kept
   [[ "$(detach_lines)" == "$DETACH_BEFORE" ]] || die "dirty attempt detached"
   [[ -f "$IMAGE" && -f "$ATTEMPT/stray" ]] || die "dirty attempt removed"
+
+  # Line-breaking names must not hide from the attempt audit.
+  local nl
+  for nl in $'\n' $'mailbox.sparseimage\n'; do
+    c5_crash F4
+    printf x >"$ATTEMPT/$nl"
+    c5_recover
+    need_ec 5
+    common_end yes "$CASE/outr"
+    [[ "$(detach_lines)" == "$DETACH_BEFORE" ]] || die "newline name detached"
+    [[ -f "$IMAGE" && -f "$ATTEMPT/$nl" ]] || die "newline name removed image"
+    grep -F -q '"verdict":"quarantine"' "$CASE/outr/report.json" || die "newline name not quarantined"
+  done
 }
 
 test_stage_r_receipt_bound() {
@@ -3620,88 +3625,23 @@ test_stage_r_receipt_bound() {
   [[ $((SECONDS - t0)) -lt 5 ]] || die "oversized read blocked"
 }
 
-test_stage_v_c6_host_budget() {
-  setup
-  enable_volume
-  write_pinned
-  write_fake_probe
-  # 12s covers the 5s info checks and refuses the 20s detach (plus the 2s reserve).
-  export S11_C6_HOST_BUDGET=12
-  run_probe 30 --stage V --case C6 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
-  need_ec 5
-  common_end
-  need_reason quarantine
-  assert_image_kept
-  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c6 budget rows"
-import json, sys
-cases = json.load(open(sys.argv[1]))["stages"][0]["cases"]
-assert [c["boundary"] for c in cases] == ["file", "dir"], cases
-assert cases[0]["verdict"] == "quarantine", cases[0]
-fields = dict(tok.split("=", 1) for tok in cases[0]["record"].split())
-assert fields["holder_reaped"] == "1", cases[0]["record"]
-assert cases[1]["verdict"] == "not_run", cases[1]
-PY
-  holder_pid_dead "$CASE/out/report.json"
-}
-
-test_stage_v_c6_hold_incomplete() {
-  setup
-  enable_volume
-  write_pinned
-  write_fake_probe
-  export S11_HOLD_SEC=5 S11_HOLD_NEED=20
-  run_probe 30 --stage V --case C6 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
-  need_ec 4
-  common_end
-  need_reason incomplete
-  assert_image_kept
-  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c6 incomplete"
-import json, sys
-c = json.load(open(sys.argv[1]))["stages"][0]["cases"][0]
-assert c["verdict"] == "unknown" and c["reason"] == "incomplete", (c["verdict"], c["reason"])
-PY
-  holder_pid_dead "$CASE/out/report.json"
-}
-
-test_stage_v_c6_holder_died() {
-  setup
-  enable_volume
-  write_pinned
-  write_fake_probe
-  export S11_HOLD_SEC=1
-  touch "$ROOT/detach_pause"
-  run_probe 30 --stage V --case C6 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
-  need_ec 4
-  common_end
-  need_reason holder-expired
-  assert_image_gone
-  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c6 holder died"
-import json, sys
-rep = json.load(open(sys.argv[1]))
-cases = rep["stages"][0]["cases"]
-assert cases[0]["verdict"] == "unknown" and cases[0]["reason"] == "holder-expired", cases[0]
-fields = dict(tok.split("=", 1) for tok in cases[0]["record"].split())
-assert fields["holder_reaped"] == "1", cases[0]["record"]
-assert cases[1]["verdict"] == "not_run", cases[1]
-PY
-  holder_pid_dead "$CASE/out/report.json"
-}
-
 test_stage_v_c7_guest_failed() {
   local kind reason
-  for kind in fail hang bad; do
+  for kind in fail hang bad zero short; do
     rm -rf "$CASE/out"
     setup
     enable_volume
     write_pinned
     write_fake_probe
-    rm -f "$ROOT/c7_ssh_fail" "$ROOT/c7_hang" "$ROOT/c7_bad"
+    rm -f "$ROOT/c7_ssh_fail" "$ROOT/c7_hang" "$ROOT/c7_bad" "$ROOT/c7_zero" "$ROOT/c7_short"
     unset S11_C7_BUDGET
     reason=guest-failed
     case "$kind" in
       fail) touch "$ROOT/c7_ssh_fail" ;;
       hang) touch "$ROOT/c7_hang"; export S11_C7_BUDGET=2 ;;
       bad) touch "$ROOT/c7_bad"; reason=guest-malformed ;;
+      zero) touch "$ROOT/c7_zero"; reason=guest-malformed ;;
+      short) touch "$ROOT/c7_short"; reason=guest-malformed ;;
     esac
     run_probe 25 --stage V --case C7 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
     need_ec 4
@@ -3713,6 +3653,25 @@ c = json.load(open(sys.argv[1]))["stages"][0]["cases"][0]
 assert c["verdict"] == "unknown" and c["reason"] == sys.argv[2], (c["verdict"], c["reason"])
 PY
   done
+}
+
+# A measured first-operation hang is a result, not a malformed record.
+test_stage_v_c7_hang_measured() {
+  setup
+  enable_volume
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/c7_hang1"
+  run_probe 25 --stage V --case C7 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  need_ec 0
+  common_end
+  "$PYTHON" - "$CASE/out/report.json" <<'PY' || die "c7 hang measured"
+import json, sys
+c = json.load(open(sys.argv[1]))["stages"][0]["cases"][0]
+assert c["verdict"] == "ok" and c["reason"] == "measured", (c["verdict"], c["reason"])
+fields = dict(tok.split("=", 1) for tok in c["record"].split())
+assert fields["guest"] == "ok:0,enoent:0,eio:0,other:0,hang:1", c["record"]
+PY
 }
 
 test_stage_v_c7_tart_dead() {
@@ -3827,9 +3786,10 @@ test_stage_v_new_usage() {
 
 run_case stage-v-c10 test_stage_v_c10_observed
 run_case stage-v-c10-nodest test_stage_v_c10_nodest
-run_case stage-v-c6-force-fail test_stage_v_c6_force_fail_quarantine
-run_case stage-v-c6-force test_stage_v_c6_force_and_reap
+run_case stage-v-c6 test_stage_v_c6_guest_hold
+run_case stage-v-c6-notheld test_stage_v_c6_not_held
 run_case stage-v-c6-noforce test_stage_v_c6_no_force_while_vm_up
+run_case stage-v-c7-hang1 test_stage_v_c7_hang_measured
 run_case stage-v-c7-ok test_stage_v_c7_m0_empty_ok
 run_case stage-v-c7-m0 test_stage_v_c7_m0_entries_failed
 run_case stage-v-c7-busy test_stage_v_c7_detach_fail_no_force
@@ -3846,9 +3806,6 @@ run_case stage-r-force-once test_stage_r_force_once
 run_case stage-r-trust test_stage_r_trust_retarget
 run_case stage-r-preflight test_stage_r_preflight_keeps_image
 run_case stage-r-bound test_stage_r_receipt_bound
-run_case stage-v-c6-budget test_stage_v_c6_host_budget
-run_case stage-v-c6-incomplete test_stage_v_c6_hold_incomplete
-run_case stage-v-c6-died test_stage_v_c6_holder_died
 run_case stage-v-c7-guest test_stage_v_c7_guest_failed
 run_case stage-v-c7-tart test_stage_v_c7_tart_dead
 run_case stage-v-c7-ready test_stage_v_c7_not_ready

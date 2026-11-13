@@ -60,7 +60,7 @@ VOL_A=""; VOL_I=""; VOL_M=""; VOL_DEV=""; VOL_INO=""; VOL_DISK=""
 VOL_A_DEV=""; VOL_A_INO=""; VOL_M_DEV=""; VOL_M_INO=""; VOL_OUT_DEV=""; VOL_OUT_INO=""
 VOL_PHASE=none; VOL_MAYBE=0; VOL_ID_BROKEN=0; VOL_FORCE=0; VOL_OPT_REJECT=0; VOL_OVER=0
 VOL_IN_PREP=0; VOL_PREP_END=0; CLEANUP_DEADLINE=0
-VOL_CREATE_SEC=-1; VOL_ATTACH_SEC=-1; VOL_DETACH_SEC=-1
+VOL_CREATE_SEC=-1; VOL_ATTACH_SEC=-1; VOL_DETACH_SEC=-1; VOL_DETACH_RC=-
 VOL_FSTYPE=unknown; VOL_FSNAME=unknown; VOL_HINT=unknown; VOL_CAPACITY=unknown
 VOL_NOSUID=unknown; VOL_NOEXEC=unknown; VOL_NODEV=unknown; VOL_NOBROWSE=unknown
 VOL_OWNERS=unknown; VOL_CREATE_WARN=absent
@@ -69,9 +69,8 @@ VOL_IMAGE=unknown; VOL_ALLOC=unknown; VOL_HOST_DROP=unknown; VOL_ENOSPC=unknown;
 VOL_IMAGE_PEAK=unknown; VOL_ALLOC_PEAK=unknown; VOL_HOST_DROP_PEAK=unknown; VOL_SAMPLES=0
 VOL_BASE_ALLOC=0; VOL_BASE_HOST=0; VOL_HAVE_BASE=0
 VOL_HOST_PRE=unknown; VOL_HOST_FILL=unknown
-VOL_FAULT=""; RECEIPT=""; VOL_SKIP_DOWN=0; VOL_M0_DIRTY=0
-C6_HELD=0; C6_NRC=-; C6_NSEC=-; C6_NCLASS=-; C6_FORCE=0; C6_FRC=-; C6_FSEC=-; C6_REAP=0; C6_OK=0; C6_HOLDER=""
-C6_HOLD_UNTIL=0; C6_HOLDER_PID=0
+VOL_FAULT=""; RECEIPT=""; VOL_M0_DIRTY=0
+C6_HELD=0
 C7_DRC=-; C7_DSEC=-; C7_DCLASS=-; C7_ALIVE=unknown; C7_M0=unknown; C7_GUEST=unknown; C7_OK=0; C7_MEASURED=0; C7F=""
 VOL_FORCE_INTENT=0
 C10_HITS=unknown; C10_FS=unknown; C10_FUID=unknown; C10_FMODE=unknown; C10_DEST=unknown; C10_EXI=unknown; C10_EXM=unknown
@@ -587,11 +586,6 @@ cleanup_owned() {
       printf '%s %s %s\n' "$stop" "$del" "$absent" >"$WORKDIR/cleanup.last"
     fi
   else stop_run_proc; fi
-  if [[ "$VOL_SKIP_DOWN" == 1 ]]; then
-    IN_CLEANUP=0; CLEANUP_DEADLINE=0
-    [[ "$FINALIZING" == 1 ]] || trap 'REQUEST_CLEANUP=1' INT TERM HUP
-    return 0
-  fi
   volume_down
   IN_CLEANUP=0; CLEANUP_DEADLINE=0
   [[ "$FINALIZING" == 1 ]] || trap 'REQUEST_CLEANUP=1' INT TERM HUP
@@ -1954,11 +1948,14 @@ a_allowed() {
   img=mailbox.sparseimage
   mnt=${VOL_M##*/}
   vol_io 5 names "$VOL_A" "$VOL_A_DEV" "$VOL_A_INO" || return 1
+  local seen=" "
   while IFS= read -r name; do
-    [[ -n "$name" ]] || continue
+    [[ -n "$name" ]] || return 1
     n=$((n + 1))
     [[ "$n" -le 32 ]] || return 1
     [[ "$name" == "$img" || "$name" == "$mnt" ]] || return 1
+    [[ "$seen" != *" $name "* ]] || return 1
+    seen="$seen$name "
   done <"$WORKDIR/v.out"
   return 0
 }
@@ -1983,7 +1980,6 @@ unlink_barrier() {
   [[ "$st" -eq 0 ]]
 }
 unlink_image() {
-  if ! unlink_barrier; then return 1; fi
   if ! m0_count; then return 1; fi
   if [[ "$M0_N" != 0 ]]; then
     VOL_M0_DIRTY=1
@@ -1992,6 +1988,8 @@ unlink_image() {
     return 1
   fi
   if ! a_allowed; then return 1; fi
+  # Last, right before the removal: the M0/A workers above can take seconds.
+  if ! unlink_barrier; then return 1; fi
   id_remove file "$VOL_A" "$VOL_A_DEV" "$VOL_A_INO" "$VOL_I" "$VOL_DEV" "$VOL_INO" || return $?
   vol_fault F5
   id_remove dir "$VOL_A" "$VOL_A_DEV" "$VOL_A_INO" "$VOL_M" "$VOL_M_DEV" "$VOL_M_INO" || return $?
@@ -2004,7 +2002,7 @@ reset_vol() {
   VOL_A_DEV=""; VOL_A_INO=""; VOL_M_DEV=""; VOL_M_INO=""
   VOL_PHASE=none; VOL_MAYBE=0; VOL_ID_BROKEN=0; VOL_FORCE=0; VOL_OPT_REJECT=0; VOL_OVER=0
   VOL_IN_PREP=0; VOL_PREP_END=0
-  VOL_CREATE_SEC=-1; VOL_ATTACH_SEC=-1; VOL_DETACH_SEC=-1
+  VOL_CREATE_SEC=-1; VOL_ATTACH_SEC=-1; VOL_DETACH_SEC=-1; VOL_DETACH_RC=-
   VOL_FSTYPE=unknown; VOL_FSNAME=unknown; VOL_HINT=unknown; VOL_CAPACITY=unknown
   VOL_NOSUID=unknown; VOL_NOEXEC=unknown; VOL_NODEV=unknown; VOL_NOBROWSE=unknown
   VOL_OWNERS=unknown; VOL_CREATE_WARN=absent
@@ -2014,10 +2012,9 @@ reset_vol() {
   VOL_BASE_ALLOC=0; VOL_BASE_HOST=0; VOL_HAVE_BASE=0
   VOL_HOST_PRE=unknown; VOL_HOST_FILL=unknown
   EXPORT_DIR=""; EXPORT_STATE=absent; EXPORT_DONE=0
-  VOL_SKIP_DOWN=0; VOL_M0_DIRTY=0; VOL_FORCE_INTENT=0
-  C6_HELD=0; C6_NRC=-; C6_NSEC=-; C6_NCLASS=-; C6_FORCE=0; C6_FRC=-; C6_FSEC=-; C6_REAP=0; C6_OK=0; C6_HOLDER=""
-  C6_HOLD_UNTIL=0; C6_HOLDER_PID=0
-  C7_DRC=-; C7_DSEC=-; C7_DCLASS=-; C7_ALIVE=unknown; C7_M0=unknown; C7_GUEST=unknown; C7_OK=0; C7_MEASURED=0
+  VOL_M0_DIRTY=0; VOL_FORCE_INTENT=0
+  C6_HELD=0
+    C7_DRC=-; C7_DSEC=-; C7_DCLASS=-; C7_ALIVE=unknown; C7_M0=unknown; C7_GUEST=unknown; C7_OK=0; C7_MEASURED=0
   C10_HITS=unknown; C10_FS=unknown; C10_FUID=unknown; C10_FMODE=unknown; C10_DEST=unknown; C10_EXI=unknown; C10_EXM=unknown
 }
 volume_up() {
@@ -2144,10 +2141,12 @@ volume_down() {
     # the image unmounted but attached. detach_sec records the real time.
     vol_run 20 "$HDIUTIL" detach "$VOL_M"
     st=$?
+    VOL_DETACH_RC=$RB_STATUS
     VOL_DETACH_SEC=$((SECONDS - t0))
     if [[ "$st" -eq 2 ]]; then vol_quarantine; return 0; fi
     if [[ "$st" -ne 0 ]]; then
-      if vm_proven_stopped && info_holds && arm_force_intent; then
+      # Intent first (its IO can take seconds), then the final checks right before force.
+      if arm_force_intent && vm_proven_stopped && info_holds; then
         vol_run 10 "$HDIUTIL" detach -force "$VOL_M"
         st=$?
         if [[ "$st" -eq 2 ]]; then VOL_MAYBE=1; vol_quarantine; return 0; fi
@@ -2389,130 +2388,20 @@ detach_class() {
     *) printf other ;;
   esac
 }
-hold_secs() {
-  local s=30
-  if [[ "${S11_TEST_MODE:-}" == 1 ]]; then
-    case "${S11_HOLD_SEC:-}" in
-      ""|*[!0-9]*) ;;
-      *) s=$S11_HOLD_SEC; [[ "$s" -gt 30 ]] && s=30 ;;
-    esac
-  fi
-  printf '%s\n' "$s"
+# stop ok, delete ok and absence confirmed for this attempt's clone.
+vm_clean() {
+  local line
+  line=$(awk 'NR==1 { print; exit }' "$WORKDIR/cleanup.last" 2>/dev/null || true)
+  [[ "$line" == "ok ok yes" ]]
 }
 c6_record() {
-  M_RECORD="v=1 op=c6 kind=${M_BOUNDARY} guest_held=${C6_HELD} normal_rc=${C6_NRC} normal_sec=${C6_NSEC} normal_class=${C6_NCLASS} force=${C6_FORCE} force_rc=${C6_FRC} force_sec=${C6_FSEC} holder_reaped=${C6_REAP} holder_pid=${C6_HOLDER_PID}"
+  M_RECORD="v=1 op=c6 kind=${M_BOUNDARY} guest_held=${C6_HELD} detach_rc=${VOL_DETACH_RC} detach_sec=${VOL_DETACH_SEC} detach_class=$(detach_class "$VOL_DETACH_RC") force=${VOL_FORCE}"
 }
-c6_host_budget() {
-  local s=60
-  if [[ "${S11_TEST_MODE:-}" == 1 ]]; then
-    case "${S11_C6_HOST_BUDGET:-}" in
-      ""|*[!0-9]*) ;;
-      *) s=$S11_C6_HOST_BUDGET ;;
-    esac
-  fi
-  printf '%s\n' "$s"
-}
-c6_host_begin() {
-  local b
-  b=$(c6_host_budget)
-  IN_CLEANUP=1
-  CLEANUP_DEADLINE=$((SECONDS + b))
-  CLEANUP_LEFT=$b
-}
-c6_host_end() {
-  IN_CLEANUP=0
-  CLEANUP_DEADLINE=0
-}
-c6_note_pid() {
-  local p
-  p=$(awk 'NR==1 { print; exit }' "$WORKDIR/holder.pid" 2>/dev/null || true)
-  case "$p" in ""|*[!0-9]*) C6_HOLDER_PID=0 ;; *) C6_HOLDER_PID=$p ;; esac
-}
-# 0 = still alive and the remaining life covers the detach cap.
-# 2 = holder already gone. 3 = alive, but not long enough to cover detach.
-c6_span_ok() {
-  local need=20 left
-  if [[ "${S11_TEST_MODE:-}" == 1 ]]; then
-    need=0
-    case "${S11_HOLD_NEED:-}" in
-      ""|*[!0-9]*) ;;
-      *) need=$S11_HOLD_NEED ;;
-    esac
-  fi
-  job_running "$C6_HOLDER" || return 2
-  left=$((C6_HOLD_UNTIL - SECONDS))
-  [[ "$left" -ge "$need" ]] || return 3
-  return 0
-}
-c6_reap_holder() {
-  [[ -n "$C6_HOLDER" ]] || { C6_REAP=0; return 1; }
-  term_kill_reap "$C6_HOLDER"
-  C6_HOLDER=""
-  if [[ "$REAP_UNKNOWN" == 1 ]]; then C6_REAP=0; return 1; fi
-  C6_REAP=1
-  return 0
-}
-c6_holder_ready() {
-  local i=0
-  while [[ "$i" -lt 100 ]]; do
-    if [[ -f "$WORKDIR/holder.ready" ]] && grep -F -x -q -- 'held=1' "$WORKDIR/holder.ready" && job_running "$C6_HOLDER"; then
-      return 0
-    fi
-    job_running "$C6_HOLDER" || return 1
-    sleep 0.05
-    i=$((i + 1))
-  done
-  return 1
-}
-c6_detach_held() {
-  local t0 st span
-  if ! vm_proven_stopped; then M_REASON=vm-not-stopped; vol_quarantine; return 1; fi
-  if ! info_holds; then M_REASON=identity; vol_quarantine; return 1; fi
-  c6_span_ok
-  span=$?
-  if [[ "$span" -eq 2 ]]; then M_VERDICT=unknown; M_REASON=holder-expired; return 2; fi
-  if [[ "$span" -eq 3 ]]; then M_VERDICT=unknown; M_REASON=incomplete; return 2; fi
-  t0=$SECONDS
-  vol_run 20 "$HDIUTIL" detach "$VOL_M"
-  st=$?
-  C6_NRC=$RB_STATUS
-  C6_NSEC=$((SECONDS - t0))
-  C6_NCLASS=$(detach_class "$RB_STATUS")
-  if ! job_running "$C6_HOLDER"; then
-    M_VERDICT=unknown; M_REASON=holder-expired
-    if info_absent; then VOL_PHASE=detached; write_receipt || true; fi
-    return 2
-  fi
-  if [[ "$st" -eq 2 ]]; then VOL_MAYBE=1; vol_quarantine; return 1; fi
-  if [[ "$st" -ne 0 ]]; then
-    if vm_proven_stopped && info_holds && arm_force_intent; then
-      t0=$SECONDS
-      vol_run 10 "$HDIUTIL" detach -force "$VOL_M"
-      st=$?
-      C6_FORCE=1
-      C6_FRC=$RB_STATUS
-      C6_FSEC=$((SECONDS - t0))
-      if ! job_running "$C6_HOLDER"; then
-        M_VERDICT=unknown; M_REASON=holder-expired
-        if info_absent; then VOL_PHASE=detached; write_receipt || true; fi
-        return 2
-      fi
-      if [[ "$st" -eq 2 ]]; then VOL_MAYBE=1; vol_quarantine; return 1; fi
-      if [[ "$st" -ne 0 ]]; then vol_quarantine; return 1; fi
-    else
-      vol_quarantine
-      return 1
-    fi
-  fi
-  if ! job_running "$C6_HOLDER"; then
-    M_VERDICT=unknown; M_REASON=holder-expired
-    if info_absent; then VOL_PHASE=detached; write_receipt || true; fi
-    return 2
-  fi
-  return 0
-}
+# The guest holds a file or dir FD on the mailbox until the VM stops; the host
+# then tears down through the ordinary path. A host-side busy holder is not
+# exercised here: measured by hand on a scratch volume (ADR 0019 M2c-b facts).
 m_run_c6() {
-  local gpid want path hs ds
+  local gpid want
   clear_snaps
   arm_m_load
   ssh_bg "$ONCE_KEY" "run C6 $M_BOUNDARY" || { M_VERDICT=unknown; M_REASON=not-sole; ANY_COLLECTION_FAILED=1; return 1; }
@@ -2528,86 +2417,17 @@ m_run_c6() {
     M_VERDICT=unknown; M_REASON=guest-not-held; ANY_COLLECTION_FAILED=1
     return 1
   fi
-  VOL_SKIP_DOWN=1
-  cleanup_owned
-  VOL_SKIP_DOWN=0
-  c6_host_begin
-  if ! vm_proven_stopped; then
-    M_REASON=vm-not-stopped
-    c6_host_end
-    vol_quarantine
-    return 1
-  fi
-  if [[ "$M_BOUNDARY" == file ]]; then path=$EXPORT_DIR/mailbox/c6-held; else path=$EXPORT_DIR/mailbox; fi
-  export S11_HOLD_DIR=$WORKDIR
-  rm -f "$WORKDIR/holder.pid" "$WORKDIR/holder.ready"
-  hs=$(hold_secs)
-  C6_HOLD_UNTIL=$((SECONDS + hs))
-  bash "$0" __volio hold "$M_BOUNDARY" "$path" &
-  C6_HOLDER=$!
-  if ! c6_holder_ready; then
-    c6_reap_holder || true
-    c6_host_end
-    M_REASON=holder-not-ready
-    vol_quarantine
-    return 1
-  fi
-  c6_note_pid
-  if ! vm_proven_stopped || ! info_holds; then
-    c6_reap_holder || true
-    c6_host_end
-    M_REASON=vm-not-stopped
-    vol_quarantine
-    return 1
-  fi
-  c6_detach_held
-  ds=$?
-  if [[ "$ds" -eq 2 ]]; then
-    c6_reap_holder || true
-    c6_host_end
-    # Not enough life: do not detach at all. Holder gone mid-detach: outer cleanup finishes.
-    if [[ "$M_REASON" == incomplete ]]; then VOL_SKIP_DOWN=1; fi
-    HALT=1
-    return 0
-  fi
-  if [[ "$ds" -ne 0 ]]; then
-    c6_reap_holder || true
-    c6_host_end
-    return 1
-  fi
-  if ! c6_reap_holder; then
-    c6_host_end
-    M_REASON=holder-unreaped
-    vol_quarantine
-    return 1
-  fi
-  if ! info_absent; then
-    c6_host_end
-    M_REASON=still-attached
-    vol_quarantine
-    return 1
-  fi
-  VOL_PHASE=detached
-  write_receipt || true
-  if ! unlink_image; then c6_host_end; vol_quarantine; return 1; fi
-  c6_host_end
-  C6_OK=1
   return 0
 }
 finish_c6() {
   [[ "$M_CASE" == C6 ]] || return 0
   c6_record
-  if [[ "$M_REASON" == holder-expired || "$M_REASON" == incomplete ]]; then
-    M_VERDICT=unknown
-    ANY_COLLECTION_FAILED=1
-    return 0
-  fi
   if [[ "$M_QUARANTINE" == 1 || "$EXPORT_STATE" == quarantine ]]; then
     [[ "$M_VERDICT" == failed ]] || M_VERDICT=quarantine
     case "$M_REASON" in skipped|measured) M_REASON=quarantine ;; esac
     return 0
   fi
-  if [[ "$C6_OK" == 1 && "$VOL_PHASE" == gone && "$EXPORT_STATE" == removed ]]; then
+  if [[ "$C6_HELD" == 1 && "$VOL_PHASE" == gone && "$EXPORT_STATE" == removed ]] && vm_clean; then
     M_VERDICT=ok; M_REASON=measured
     return 0
   fi
@@ -2703,7 +2523,9 @@ c7_take_guest() {
   other=$C7F
   c7_field hang "$6" || return 1
   hang=$C7F
-  [[ "$ops" -le 8 ]] || return 1
+  # ops counts attempted operations: all 8, or up to and including the one hang.
+  [[ "$ops" -ge 1 && "$ops" -le 8 && "$hang" -le 1 ]] || return 1
+  [[ "$hang" -eq 1 || "$ops" -eq 8 ]] || return 1
   sum=$((ok + enoent + eio + other + hang))
   [[ "$sum" -eq "$ops" ]] || return 1
   C7_GUEST="ok:${ok},enoent:${enoent},eio:${eio},other:${other},hang:${hang}"
@@ -2787,7 +2609,6 @@ m_run_c7() {
   return 0
 }
 finish_c7() {
-  local abs
   [[ "$M_CASE" == C7 ]] || return 0
   c7_record
   if [[ "$M_VERDICT" == failed ]]; then M_QUARANTINE=1; ANY_CLEANUP_FAILED=1; return 0; fi
@@ -2796,8 +2617,7 @@ finish_c7() {
     case "$M_REASON" in skipped|measured) M_REASON=quarantine ;; esac
     return 0
   fi
-  abs=$(awk '{print $3; exit}' "$WORKDIR/cleanup.last" 2>/dev/null || true)
-  if [[ "$C7_MEASURED" == 1 && "$VOL_PHASE" == gone && "$EXPORT_STATE" == removed && "$abs" == yes ]]; then
+  if [[ "$C7_MEASURED" == 1 && "$VOL_PHASE" == gone && "$EXPORT_STATE" == removed ]] && vm_clean; then
     M_VERDICT=ok; M_REASON=measured
     return 0
   fi
@@ -2857,7 +2677,8 @@ c10_dest_count() {
   cat "$WORKDIR/v.out" "$WORKDIR/v.err" >"$WORKDIR/tm.all" 2>/dev/null || { printf unknown; return 0; }
   c10_dest_flush() {
     [[ "$in_rec" == 1 ]] || return 0
-    if [[ "$rec_bad" == 0 && "$have_name" == 1 && "$have_kind" == 1 && "$have_url" == 1 && "$have_id" == 1 ]]; then
+    # URL only exists for network destinations; a Local disk has Mount Point instead.
+    if [[ "$rec_bad" == 0 && "$have_name" == 1 && "$have_kind" == 1 && "$have_id" == 1 ]]; then
       n=$((n + 1))
     else
       bad=1
@@ -3154,31 +2975,13 @@ volio_names() {
     [[ -e "$pat" || -L "$pat" ]] || continue
     [[ -L "$pat" ]] && { set -f; exit 3; }
     base=${pat##*/}
+    # One name per line: a name with a line break would hide from the audit.
+    case "$base" in *$'\n'*|*$'\r'*) set -f; exit 3 ;; esac
     printf '%s\n' "$base"
     n=$((n + 1))
     [[ "$n" -ge 64 ]] && { set -f; exit 3; }
   done
   set -f
-}
-volio_hold() {
-  local kind=$1 path=$2 secs dir
-  secs=$(hold_secs)
-  dir=${S11_HOLD_DIR:-}
-  [[ -n "$dir" && ! -L "$dir" && -d "$dir" ]] || exit 1
-  printf '%s\n' "$$" >"$dir/holder.pid" || exit 1
-  case "$kind" in
-    file)
-      [[ ! -L "$path" && -f "$path" ]] || exit 1
-      exec 3<"$path" || exit 1
-      ;;
-    dir)
-      [[ ! -L "$path" && -d "$path" ]] || exit 1
-      cd -- "$path" || exit 1
-      ;;
-    *) exit 2 ;;
-  esac
-  printf '%s\n' held=1 >"$dir/holder.ready" || exit 1
-  exec /bin/sleep "$secs"
 }
 volio_main() {
   local cmd=${1:-} f d got
@@ -3223,10 +3026,6 @@ volio_main() {
     names)
       [[ $# -eq 3 ]] || exit 2
       volio_names "$1" "$2" "$3"
-      ;;
-    hold)
-      [[ $# -eq 2 ]] || exit 2
-      volio_hold "$1" "$2"
       ;;
     *) exit 2 ;;
   esac
@@ -3530,8 +3329,8 @@ rec_detach() {
   st=$?
   [[ "$st" -eq 0 ]] && return 0
   [[ "$st" -eq 2 ]] && return 2
-  rec_map_ok || return 4
   arm_force_intent || return 3
+  rec_map_ok || return 4
   vol_run 10 "$HDIUTIL" detach -force "$VOL_M"
   st=$?
   [[ "$st" -eq 0 ]] && return 0

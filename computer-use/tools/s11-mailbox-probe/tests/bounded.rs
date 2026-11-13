@@ -30,7 +30,7 @@ fn c7ops_blocks_one_op_and_exits() {
     assert!(out.status.success(), "status {:?} stderr {}", out.status, String::from_utf8_lossy(&out.stderr));
     assert!(elapsed < Duration::from_secs(3), "elapsed {elapsed:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.contains("ops=8"), "{stdout}");
+    assert!(stdout.contains("ops=1 "), "{stdout}");
     assert!(stdout.contains("ok=0"), "{stdout}");
     assert!(stdout.contains("hang=1"), "{stdout}");
     assert_eq!(fs::read(dir.join("c7-w0")).unwrap(), b"v=1 op=empty seq=0");

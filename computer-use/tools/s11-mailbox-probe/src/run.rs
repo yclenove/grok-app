@@ -448,7 +448,9 @@ fn c7ops_cmd(opt: &Opt) -> i32 {
             }
         }
     }
-    say(&format!("v=1 op=c7 role=guest ops=8 ok={ok} enoent={enoent} eio={eio} other={other} hang={hang}"));
+    // ops = operations attempted; the host parser requires 8, or a final hang.
+    let ops = ok + enoent + eio + other + hang;
+    say(&format!("v=1 op=c7 role=guest ops={ops} ok={ok} enoent={enoent} eio={eio} other={other} hang={hang}"));
     0
 }
 #[cfg(test)]
@@ -2633,7 +2635,7 @@ mod tests {
         let _ = take_said();
         assert_eq!(execute(&args_of(&dir, &["c7ops", "--dir", "DIR", "--role", "guest", "--ms", "40"])).unwrap(), 0);
         let line = take_said();
-        assert!(line.contains("v=1 op=c7 role=guest ops=8 ok=0 enoent=0 eio=0 other=0 hang=1\n"), "{line}");
+        assert!(line.contains("v=1 op=c7 role=guest ops=1 ok=0 enoent=0 eio=0 other=0 hang=1\n"), "{line}");
         assert!(started.elapsed() < Duration::from_secs(1), "elapsed {:?}", started.elapsed());
         let _ = fs::remove_dir_all(&dir);
     }
