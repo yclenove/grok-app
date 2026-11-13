@@ -24,6 +24,9 @@ pub enum MailboxError {
     /// This slot already failed. Stop the attempt.
     #[error("mailbox slot failed sticky; stop")]
     Sticky,
+    /// One bounded read, including discarded rereads, passed 128 KiB.
+    #[error("one mailbox read passed the byte budget")]
+    PollBudget,
 }
 
 /// Why a directory entry was refused.
@@ -198,4 +201,6 @@ pub struct FailedRead {
     pub retry_absent: u64,
     /// Reads discarded because the object changed, including this one.
     pub retry_replaced: u64,
+    /// Bytes this read contributed. Zero when the slot yielded no frame.
+    pub bytes: usize,
 }

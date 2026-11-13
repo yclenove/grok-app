@@ -974,6 +974,7 @@ enum ScanExempt {
 
 const MAILBOX_TEST_SOURCES: &[&str] = &[
     "mailbox/tests/codec.rs",
+    "mailbox/tests/guest_sim.rs",
     "mailbox/tests/mod.rs",
     "mailbox/tests/seq.rs",
     "mailbox/tests/slots.rs",
@@ -985,6 +986,7 @@ fn mailbox_scan_exemptions_are_exact() -> Result<(), String> {
     let cases = [
         ("mailbox/sys.rs", ScanExempt::Unsafe),
         ("mailbox/tests/codec.rs", ScanExempt::FsEnv),
+        ("mailbox/tests/guest_sim.rs", ScanExempt::FsEnv),
         ("mailbox/tests/mod.rs", ScanExempt::FsEnv),
         ("mailbox/tests/seq.rs", ScanExempt::FsEnv),
         ("mailbox/tests/slots.rs", ScanExempt::FsEnv),

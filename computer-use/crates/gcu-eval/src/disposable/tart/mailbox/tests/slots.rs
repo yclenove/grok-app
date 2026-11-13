@@ -5,6 +5,7 @@
 
 #![cfg(unix)]
 
+use std::cell::Cell;
 use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::Write;
@@ -253,7 +254,11 @@ fn replace_during_read_is_pending() {
     let dest = root.message(HOST_WRITE_DIR, Op::Probe.file_name());
     let hook_spare = spare.clone();
     let hook_dest = dest.clone();
+    let once = Cell::new(true);
     let _guard = arm(IoPoint::AfterRead, move || {
+        if !once.replace(false) {
+            return;
+        }
         if let Err(err) = fs::rename(&hook_spare, &hook_dest) {
             panic!("rename over slot: {err}");
         }
@@ -263,8 +268,14 @@ fn replace_during_read_is_pending() {
         &mut layout,
         SlotRef::Host(HostSlot::Op(Op::Probe)),
     ));
-    if read.body != SlotBody::Pending || read.retry_replaced != 1 || read.retry_absent != 0 {
+    let SlotBody::Frame(bytes) = read.body else {
         panic!("replaced read: {read:?}");
+    };
+    if bytes != b"replacement-object" || read.retry_replaced != 1 || read.retry_absent != 0 {
+        panic!(
+            "replaced read: bytes={bytes:?} retries={}",
+            read.retry_replaced
+        );
     }
 }
 
@@ -764,28 +775,32 @@ fn replaced_slot_then_stable_reply() {
     write_bytes(&login, &probe_terminal(1, Check::Failed));
     let hook_login = login.clone();
     let hook_probe = probe.clone();
+    let once = Cell::new(true);
     let guard = arm(IoPoint::AfterRead, move || {
+        if !once.replace(false) {
+            return;
+        }
         if let Err(err) = fs::rename(&hook_login, &hook_probe) {
             panic!("rename over probe: {err}");
         }
     });
     match poll_guest(root.raw(), &mut layout, Op::Probe, &mut tracker) {
-        Ok(GuestPoll::Pending {
-            request_seq: 1,
-            retry_replaced: 1,
-            retry_absent: 0,
-            ..
-        }) => {}
-        other => panic!("replaced poll: {other:?}"),
-    }
-    drop(guard);
-    match poll_guest(root.raw(), &mut layout, Op::Probe, &mut tracker) {
         Ok(GuestPoll::Ready {
             reply,
             retry_replaced: 1,
+            retry_absent: 0,
             ..
         }) if reply.result == ReplyResult::Probe(Check::Failed) && reply.request_seq == 1 => {}
         other => panic!("stable replacement: {other:?}"),
+    }
+    drop(guard);
+    match poll_guest(root.raw(), &mut layout, Op::Probe, &mut tracker) {
+        Ok(GuestPoll::Pending {
+            request_seq: 1,
+            retry_replaced: 1,
+            ..
+        }) => {}
+        other => panic!("replay of the replacement: {other:?}"),
     }
 }
 

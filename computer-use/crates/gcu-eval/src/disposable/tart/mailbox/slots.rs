@@ -174,6 +174,8 @@ pub enum GuestPoll {
         retry_absent: u64,
         /// Replaced retries so far.
         retry_replaced: u64,
+        /// Frame bytes read. Zero for an empty slot.
+        bytes: usize,
     },
     /// Old lease ACK. The deadline was not moved.
     DiscardedLease {
@@ -183,6 +185,8 @@ pub enum GuestPoll {
         retry_absent: u64,
         /// Replaced retries so far.
         retry_replaced: u64,
+        /// Frame bytes read.
+        bytes: usize,
     },
     /// New accepted or terminal reply.
     Ready {
@@ -192,6 +196,8 @@ pub enum GuestPoll {
         retry_absent: u64,
         /// Replaced retries so far.
         retry_replaced: u64,
+        /// Frame bytes read.
+        bytes: usize,
     },
 }
 
@@ -324,7 +330,7 @@ pub fn read_slot(root: i32, layout: &mut Layout, slot: SlotRef) -> Result<SlotRe
     #[cfg(not(unix))]
     {
         let _ = (root, layout, slot);
-        return Err(failed(MailboxError::Unsupported, &Watch::fresh()));
+        return Err(failed(MailboxError::Unsupported, &Watch::fresh(), 0));
     }
     #[cfg(unix)]
     {
@@ -332,11 +338,11 @@ pub fn read_slot(root: i32, layout: &mut Layout, slot: SlotRef) -> Result<SlotRe
         let (inner, watches) = parts(layout);
         let watch = &mut watches[index];
         if watch.stuck {
-            return Err(failed(MailboxError::Sticky, watch));
+            return Err(failed(MailboxError::Sticky, watch, 0));
         }
-        match read_body(root, inner, slot, watch) {
+        match read_body(root, inner, slot, watch, 0) {
             Ok(body) => Ok(finished(body, watch)),
-            Err(error) => Err(failed(error, watch)),
+            Err(error) => Err(failed(error, watch, 0)),
         }
     }
 }
@@ -374,7 +380,7 @@ pub fn read_checked(
             Err(error) => {
                 let watch = &mut layout.watches[slot_index(slot)];
                 watch.stuck = true;
-                Err(failed(error, watch))
+                Err(failed(error, watch, bytes.len()))
             }
         },
     }
@@ -394,6 +400,7 @@ pub fn poll_guest(
             request_seq: tracker.outstanding(op),
             retry_absent: read.retry_absent,
             retry_replaced: read.retry_replaced,
+            bytes: 0,
         }),
         SlotBody::Frame(bytes) => match tracker.observe(op, &bytes) {
             Ok(Observe::Pending { op, request_seq }) => Ok(GuestPoll::Pending {
@@ -401,21 +408,24 @@ pub fn poll_guest(
                 request_seq,
                 retry_absent: read.retry_absent,
                 retry_replaced: read.retry_replaced,
+                bytes: bytes.len(),
             }),
             Ok(Observe::DiscardedLease { seq }) => Ok(GuestPoll::DiscardedLease {
                 seq,
                 retry_absent: read.retry_absent,
                 retry_replaced: read.retry_replaced,
+                bytes: bytes.len(),
             }),
             Ok(Observe::Reply(reply)) => Ok(GuestPoll::Ready {
                 reply,
                 retry_absent: read.retry_absent,
                 retry_replaced: read.retry_replaced,
+                bytes: bytes.len(),
             }),
             Err(error) => {
                 let watch = &mut layout.watches[slot_index(SlotRef::Guest(op))];
                 watch.stuck = true;
-                Err(failed(error, watch))
+                Err(failed(error, watch, bytes.len()))
             }
         },
     }
@@ -430,11 +440,12 @@ fn finished(body: SlotBody, watch: &Watch) -> SlotRead {
     }
 }
 
-fn failed(error: MailboxError, watch: &Watch) -> FailedRead {
+fn failed(error: MailboxError, watch: &Watch, bytes: usize) -> FailedRead {
     FailedRead {
         error,
         retry_absent: watch.retry_absent,
         retry_replaced: watch.retry_replaced,
+        bytes,
     }
 }
 
@@ -577,6 +588,7 @@ fn read_body(
     layout: &Inner,
     slot: SlotRef,
     watch: &mut Watch,
+    charged: usize,
 ) -> Result<SlotBody, MailboxError> {
     check_root(root, layout)?;
     let mailbox = open_recorded(root, c"mailbox", layout.mailbox, layout)?;
@@ -631,7 +643,13 @@ fn read_body(
         hit(IoPoint::AfterRead);
     }
     if !stable(&chain, &fd, file_name, &opened, layout)? {
-        return replaced(watch);
+        replaced(watch)?;
+        let next = charged.saturating_add(bytes.len());
+        if next > super::super::schedule::POLL_BYTE_BUDGET {
+            watch.stuck = true;
+            return Err(MailboxError::PollBudget);
+        }
+        return read_body(root, layout, slot, watch, next);
     }
     let got = u64::try_from(bytes.len()).map_err(|_| MailboxError::Io)?;
     if got != opened.size {
