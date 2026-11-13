@@ -419,6 +419,57 @@ fn guest_publication_source_is_created_exclusively() {
     }
 }
 
+/// A guest renames its tmp over the slot between the listing and the entry
+/// lookup. That is the agreed publication, not a breach.
+#[test]
+fn tmp_renamed_after_listing_is_not_a_breach() {
+    let root = scratch();
+    let mut layout = need(prepare_slots(root.raw()));
+    let from = root.message(GUEST_WRITE_DIR, Op::Inventory.tmp_name());
+    let to = root.message(GUEST_WRITE_DIR, Op::Inventory.file_name());
+    let bytes = b"guest-inventory-v2".to_vec();
+    write_bytes(&from, &bytes);
+    let (src, dst) = (from.clone(), to.clone());
+    let _guard = arm(IoPoint::Listed, move || {
+        if src.exists() {
+            if let Err(err) = fs::rename(&src, &dst) {
+                panic!("guest rename: {err}");
+            }
+        }
+    });
+    match need(read_slot(
+        root.raw(),
+        &mut layout,
+        SlotRef::Guest(Op::Inventory),
+    )) {
+        read if read.body == SlotBody::Frame(bytes.clone()) || read.body == SlotBody::Pending => {}
+        other => panic!("renamed tmp during preflight: {other:?}"),
+    }
+}
+
+/// A listed selected message that vanishes before its lookup is counted
+/// Pending, not a breach.
+#[test]
+fn listed_message_gone_before_lookup_is_pending() {
+    let root = scratch();
+    let mut layout = need(prepare_slots(root.raw()));
+    let slot = root.message(GUEST_WRITE_DIR, Op::Probe.file_name());
+    let gone = slot.clone();
+    let _guard = arm(IoPoint::Listed, move || {
+        if gone.exists() {
+            remove_file(&gone);
+        }
+    });
+    let read = need(read_slot(
+        root.raw(),
+        &mut layout,
+        SlotRef::Guest(Op::Probe),
+    ));
+    if read.body != SlotBody::Pending || read.retry_absent != 1 || read.retry_replaced != 0 {
+        panic!("vanished listed message: {read:?}");
+    }
+}
+
 #[test]
 fn destination_swap_after_fsync_does_not_rename() {
     for kind in [

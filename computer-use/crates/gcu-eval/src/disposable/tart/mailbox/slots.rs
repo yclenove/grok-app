@@ -222,6 +222,8 @@ pub(super) enum IoPoint {
     AfterFsync,
     /// After a non-empty read, before the second `fstat`.
     AfterRead,
+    /// After a message directory is listed, before its entries are checked.
+    Listed,
 }
 
 #[cfg(test)]
@@ -1078,12 +1080,25 @@ fn preflight(dir: i32, allow: &[&CStr], expect_kind: Kind) -> Result<(), Mailbox
     if names.len() > allow.len() {
         return Err(Breach::Identity.into());
     }
+    if expect_kind == Kind::File {
+        hit(IoPoint::Listed);
+    }
     for name in names {
         if !allow.iter().any(|cand| cand.to_bytes() == name.as_slice()) {
             return Err(Breach::Identity.into());
         }
         let owned = CString::new(name).map_err(|_| MailboxError::Io)?;
-        let id = stat_name(dir, &owned)?;
+        let id = match sys::fstat_at(dir, &owned) {
+            Ok(id) => id,
+            // A listed message entry may go away before this lookup: a guest
+            // tmp renamed over its slot, or a transient virtiofs ENOENT. The
+            // selected slot's own lookup counts absence as Pending. A missing
+            // message directory stays a breach.
+            Err(SysErr::NoEnt) if expect_kind == Kind::File => continue,
+            Err(SysErr::NoEnt) => return Err(Breach::Identity.into()),
+            Err(SysErr::Loop) => return Err(Breach::Link.into()),
+            Err(err) => return Err(map_sys(err)),
+        };
         if id.kind == Kind::Link {
             return Err(Breach::Link.into());
         }

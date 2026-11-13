@@ -921,11 +921,10 @@ fn sources_have_no_process_launch_or_open_ended_wait() -> Result<(), String> {
         let rel = rel_under(&root, path)?;
         // Unsafe stays in mailbox/sys.rs. Filesystem and env access stay in the
         // known cfg(test) mailbox sources. Process launch and waits stay forbidden.
-        if production_path_reuses_exempt(&rel, &text) {
-            return Err(format!(
-                "{} imports an exempt mailbox test source",
-                path.display()
-            ));
+        // The only module path attribute is mailbox/mod.rs naming sys.rs, so no
+        // production module can re-root itself onto an exempt source.
+        if has_foreign_path_attr(&rel, &text) {
+            return Err(format!("{} has a module path attribute", path.display()));
         }
         let exempt = scan_exempt(&rel);
         for needle in forbidden {
@@ -994,10 +993,10 @@ fn mailbox_scan_exemptions_are_exact() -> Result<(), String> {
         ("tests/mailbox/ops.rs", ScanExempt::None),
     ];
     for (rel, expect) in cases {
-        if scan_exempt(rel) != expect {
+        if scan_exempt(Path::new(rel)) != expect {
             return Err(format!(
                 "{rel} classified as {:?}, want {expect:?}",
-                scan_exempt(rel)
+                scan_exempt(Path::new(rel))
             ));
         }
         let abs = scan_root.join(rel);
@@ -1014,29 +1013,52 @@ fn mailbox_scan_exemptions_are_exact() -> Result<(), String> {
     if classify(ancestor, &ancestor.join("mailbox/sys.rs")) != ScanExempt::Unsafe {
         return Err("stripping a tests ancestor dropped the sys.rs exemption".into());
     }
-    if !production_path_reuses_exempt(
-        "mailbox/ops.rs",
-        "#[path = \"tests/slots.rs\"]\nmod slots;\n",
-    ) {
-        return Err("production path import of slots.rs was allowed".into());
+    #[cfg(unix)]
+    for rel in ["mailbox\\sys.rs", "mailbox/tests\\support.rs"] {
+        if scan_exempt(Path::new(rel)) != ScanExempt::None {
+            return Err(format!("backslash name {rel:?} was exempted"));
+        }
     }
-    if !production_path_reuses_exempt(
-        "machine/live.rs",
-        "#[path = \"../mailbox/tests/codec.rs\"]\nmod codec;\n",
-    ) {
-        return Err("production path import of codec.rs was allowed".into());
+    let foreign = [
+        (
+            "mailbox/ops.rs",
+            "#[path = \"tests/slots.rs\"]\nmod slots;\n",
+        ),
+        (
+            "machine/live.rs",
+            "#[path = \"../mailbox/tests/codec.rs\"]\nmod codec;\n",
+        ),
+        (
+            "mailbox/mod.rs",
+            "#[path = \"tests\"]\nmod live {\n    mod support;\n}\n",
+        ),
+        (
+            "mailbox/mod.rs",
+            "#[path = r\"tests/mod.rs\"]\nmod live;\n#[path = \"tests/seq.rs\"]\nmod seq;\n",
+        ),
+        (
+            "mailbox/mod.rs",
+            "#[cfg_attr(test, path = \"tests/slots.rs\")]\nmod slots;\n",
+        ),
+        (
+            "mailbox/mod.rs",
+            "# [ path = \"tests/support.rs\" ]\nmod support;\n",
+        ),
+        (
+            "mailbox/ops.rs",
+            "#[cfg(unix)]\n#[path = \"sys.rs\"]\nmod sys;\n",
+        ),
+    ];
+    for (rel, text) in foreign {
+        if !has_foreign_path_attr(Path::new(rel), text) {
+            return Err(format!("{rel}: path attribute was allowed: {text:?}"));
+        }
     }
-    if production_path_reuses_exempt(
-        "mailbox/mod.rs",
-        "#[cfg(unix)]\n#[path = \"sys.rs\"]\nmod sys;\n",
+    if has_foreign_path_attr(
+        Path::new("mailbox/mod.rs"),
+        "#[cfg(unix)]\n#[path = \"sys.rs\"]\nmod sys;\nlet path = 1;\n",
     ) {
-        return Err("mailbox/sys.rs module path was treated as a test import".into());
-    }
-    if production_path_reuses_exempt(
-        "mailbox/tests/mod.rs",
-        "#[path = \"slots.rs\"]\nmod slots;\n",
-    ) {
-        return Err("the test module was treated as a production importer".into());
+        return Err("mailbox/mod.rs naming sys.rs was rejected".into());
     }
     if !tests_module_is_cfg_gated("#[cfg(test)]\nmod tests;\n") {
         return Err("cfg(test) mod tests was rejected".into());
@@ -1058,42 +1080,27 @@ fn mailbox_scan_exemptions_are_exact() -> Result<(), String> {
 
 fn classify(root: &Path, path: &Path) -> ScanExempt {
     match path.strip_prefix(root) {
-        Ok(rel) => scan_exempt(&normalize_rel(&rel.to_string_lossy())),
+        Ok(rel) => scan_exempt(rel),
         Err(_) => ScanExempt::None,
     }
 }
 
-fn rel_under(root: &Path, path: &Path) -> Result<String, String> {
-    let rel = path
-        .strip_prefix(root)
-        .map_err(|_| format!("{} is outside {}", path.display(), root.display()))?;
-    Ok(normalize_rel(&rel.to_string_lossy()))
+fn rel_under(root: &Path, path: &Path) -> Result<std::path::PathBuf, String> {
+    path.strip_prefix(root)
+        .map(Path::to_path_buf)
+        .map_err(|_| format!("{} is outside {}", path.display(), root.display()))
 }
 
-fn scan_exempt(rel: &str) -> ScanExempt {
-    let rel = normalize_rel(rel);
-    if rel == "mailbox/sys.rs" {
+// Path equality compares platform components. On Unix a backslash is part of
+// a file name, so `mailbox\sys.rs` is one component and is not exempt.
+fn scan_exempt(rel: &Path) -> ScanExempt {
+    if rel == Path::new("mailbox/sys.rs") {
         ScanExempt::Unsafe
-    } else if MAILBOX_TEST_SOURCES.contains(&rel.as_str()) {
+    } else if MAILBOX_TEST_SOURCES.iter().any(|src| rel == Path::new(src)) {
         ScanExempt::FsEnv
     } else {
         ScanExempt::None
     }
-}
-
-fn normalize_rel(path: &str) -> String {
-    let mut parts = Vec::new();
-    for part in path.split(['/', '\\']) {
-        if part.is_empty() || part == "." {
-            continue;
-        }
-        if part == ".." {
-            parts.pop();
-            continue;
-        }
-        parts.push(part);
-    }
-    parts.join("/")
 }
 
 fn tests_module_is_cfg_gated(text: &str) -> bool {
@@ -1114,64 +1121,27 @@ fn tests_module_is_cfg_gated(text: &str) -> bool {
     saw
 }
 
-fn production_path_reuses_exempt(rel: &str, text: &str) -> bool {
-    if scan_exempt(rel) == ScanExempt::FsEnv {
-        return false;
-    }
-    let base = parent_rel(rel);
-    path_attributes(text)
-        .iter()
-        .any(|attr| scan_exempt(&join_rel(base, attr)) == ScanExempt::FsEnv)
-}
-
-fn parent_rel(rel: &str) -> &str {
-    match rel.rsplit_once('/') {
-        Some((parent, _)) => parent,
-        None => "",
-    }
-}
-
-fn join_rel(base: &str, attr: &str) -> String {
-    let mut parts: Vec<String> = if base.is_empty() {
-        Vec::new()
-    } else {
-        base.split('/')
-            .filter(|part| !part.is_empty())
-            .map(str::to_string)
-            .collect()
-    };
-    for part in attr.split(['/', '\\']) {
-        if part.is_empty() || part == "." {
-            continue;
+// Any attribute that mentions `path=` (plain, raw string, cfg_attr, spaced
+// tokens, inner attribute) except the exact sys.rs declaration in mailbox/mod.rs.
+fn has_foreign_path_attr(rel: &Path, text: &str) -> bool {
+    let flat: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let allowed = rel == Path::new("mailbox/mod.rs");
+    let mut rest = flat.as_str();
+    while let Some(pos) = rest.find('#') {
+        let after = &rest[pos + 1..];
+        let body = after.strip_prefix('!').unwrap_or(after);
+        if let Some(inner) = body.strip_prefix('[') {
+            let attr = match inner.find(']') {
+                Some(end) => &inner[..end],
+                None => inner,
+            };
+            if attr.contains("path=") && !(allowed && attr == "path=\"sys.rs\"") {
+                return true;
+            }
         }
-        if part == ".." {
-            parts.pop();
-            continue;
-        }
-        parts.push(part.to_string());
+        rest = after;
     }
-    parts.join("/")
-}
-
-fn path_attributes(text: &str) -> Vec<String> {
-    let mut found = Vec::new();
-    let mut rest = text;
-    while let Some(pos) = rest.find("#[path") {
-        let after = &rest[pos + 6..];
-        let Some(eq) = after.find('=') else {
-            break;
-        };
-        let after_eq = after[eq + 1..].trim_start();
-        let Some(stripped) = after_eq.strip_prefix('"') else {
-            break;
-        };
-        let Some(end) = stripped.find('"') else {
-            break;
-        };
-        found.push(stripped[..end].to_string());
-        rest = &stripped[end + 1..];
-    }
-    found
+    false
 }
 
 fn permit_constructions(text: &str) -> usize {
