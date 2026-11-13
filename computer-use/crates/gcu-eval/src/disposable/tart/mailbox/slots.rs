@@ -11,11 +11,14 @@
 #[cfg(test)]
 use std::cell::RefCell;
 
+use super::super::deadline::{HostClock, MonoInstant};
 use super::codec::decode_frame;
 use super::ops::{Envelope, MailboxReply, Op};
 use super::seq::{Observe, SeqTracker};
 use super::{FailedRead, MailboxError};
 
+#[cfg(unix)]
+use super::super::schedule::POLL_BYTE_BUDGET;
 #[cfg(unix)]
 use super::ops::FRAME_MAX;
 #[cfg(unix)]
@@ -77,6 +80,8 @@ struct Watch {
     retry_absent: u64,
     retry_replaced: u64,
     stuck: bool,
+    /// Bytes of the call that stuck this slot. Later sticky reads report them.
+    bytes: usize,
 }
 
 impl Watch {
@@ -85,6 +90,7 @@ impl Watch {
             retry_absent: 0,
             retry_replaced: 0,
             stuck: false,
+            bytes: 0,
         }
     }
 }
@@ -129,6 +135,8 @@ pub struct SlotRead {
     pub retry_absent: u64,
     /// Replaced retries for this slot after the call.
     pub retry_replaced: u64,
+    /// Bytes read by this call, including replaced rereads and the stable frame.
+    pub bytes: usize,
 }
 
 /// A read that also decoded an operation frame.
@@ -174,7 +182,7 @@ pub enum GuestPoll {
         retry_absent: u64,
         /// Replaced retries so far.
         retry_replaced: u64,
-        /// Frame bytes read. Zero for an empty slot.
+        /// Bytes read by this poll, including replaced rereads.
         bytes: usize,
     },
     /// Old lease ACK. The deadline was not moved.
@@ -185,7 +193,7 @@ pub enum GuestPoll {
         retry_absent: u64,
         /// Replaced retries so far.
         retry_replaced: u64,
-        /// Frame bytes read.
+        /// Bytes read by this poll, including replaced rereads.
         bytes: usize,
     },
     /// New accepted or terminal reply.
@@ -196,7 +204,7 @@ pub enum GuestPoll {
         retry_absent: u64,
         /// Replaced retries so far.
         retry_replaced: u64,
-        /// Frame bytes read.
+        /// Bytes read by this poll, including replaced rereads and this frame.
         bytes: usize,
     },
 }
@@ -324,12 +332,30 @@ pub fn publish(
 
 /// Read one pre-created slot. Pending is `Ok`. A breach is [`FailedRead`].
 ///
-/// A sticky failure stays on `layout` for this `slot`.
+/// A sticky failure stays on `layout` for this `slot`. The read has no
+/// earlier deadline than the byte budget: see [`read_slot_until`].
 #[cfg_attr(not(unix), allow(clippy::needless_return))]
 pub fn read_slot(root: i32, layout: &mut Layout, slot: SlotRef) -> Result<SlotRead, FailedRead> {
+    read_slot_until(root, layout, slot, &OpenClock, open_end())
+}
+
+/// [`read_slot`] bounded by `end` on `clock`.
+///
+/// Replacement retries stop when the next read would pass the remaining byte
+/// budget or when `clock.now()` reaches `end`. Both limits are shared by
+/// every try in the call, including the stable frame. A deadline miss is not
+/// sticky. A byte-budget miss is.
+#[cfg_attr(not(unix), allow(clippy::needless_return))]
+pub fn read_slot_until<C: HostClock>(
+    root: i32,
+    layout: &mut Layout,
+    slot: SlotRef,
+    clock: &C,
+    end: MonoInstant,
+) -> Result<SlotRead, FailedRead> {
     #[cfg(not(unix))]
     {
-        let _ = (root, layout, slot);
+        let _ = (root, layout, slot, clock, end);
         return Err(failed(MailboxError::Unsupported, &Watch::fresh(), 0));
     }
     #[cfg(unix)]
@@ -338,13 +364,33 @@ pub fn read_slot(root: i32, layout: &mut Layout, slot: SlotRef) -> Result<SlotRe
         let (inner, watches) = parts(layout);
         let watch = &mut watches[index];
         if watch.stuck {
-            return Err(failed(MailboxError::Sticky, watch, 0));
+            return Err(failed(MailboxError::Sticky, watch, watch.bytes));
         }
-        match read_body(root, inner, slot, watch, 0) {
-            Ok(body) => Ok(finished(body, watch)),
-            Err(error) => Err(failed(error, watch, 0)),
+        match read_body(root, inner, slot, watch, clock, end) {
+            Ok((body, bytes)) => Ok(finished(body, watch, bytes)),
+            Err((error, bytes)) => {
+                if watch.stuck {
+                    watch.bytes = bytes;
+                }
+                Err(failed(error, watch, bytes))
+            }
         }
     }
+}
+
+/// Clock that never reaches [`open_end`]. Tests and callers without a
+/// deadline still share the byte budget.
+#[derive(Debug, Clone, Copy)]
+struct OpenClock;
+
+impl HostClock for OpenClock {
+    fn now(&self) -> MonoInstant {
+        MonoInstant::EPOCH
+    }
+}
+
+fn open_end() -> MonoInstant {
+    MonoInstant::from_nanos(u64::MAX)
 }
 
 #[cfg(unix)]
@@ -380,7 +426,8 @@ pub fn read_checked(
             Err(error) => {
                 let watch = &mut layout.watches[slot_index(slot)];
                 watch.stuck = true;
-                Err(failed(error, watch, bytes.len()))
+                watch.bytes = read.bytes;
+                Err(failed(error, watch, read.bytes))
             }
         },
     }
@@ -393,50 +440,65 @@ pub fn poll_guest(
     op: Op,
     tracker: &mut SeqTracker,
 ) -> Result<GuestPoll, FailedRead> {
-    let read = read_slot(root, layout, SlotRef::Guest(op))?;
+    poll_guest_until(root, layout, op, tracker, &OpenClock, open_end())
+}
+
+/// [`poll_guest`] bounded by `end` on `clock`. Replacement retries share that end.
+pub fn poll_guest_until<C: HostClock>(
+    root: i32,
+    layout: &mut Layout,
+    op: Op,
+    tracker: &mut SeqTracker,
+    clock: &C,
+    end: MonoInstant,
+) -> Result<GuestPoll, FailedRead> {
+    let read = read_slot_until(root, layout, SlotRef::Guest(op), clock, end)?;
+    let bytes = read.bytes;
     match read.body {
         SlotBody::Pending => Ok(GuestPoll::Pending {
             op,
             request_seq: tracker.outstanding(op),
             retry_absent: read.retry_absent,
             retry_replaced: read.retry_replaced,
-            bytes: 0,
+            bytes,
         }),
-        SlotBody::Frame(bytes) => match tracker.observe(op, &bytes) {
+        SlotBody::Frame(frame) => match tracker.observe(op, &frame) {
             Ok(Observe::Pending { op, request_seq }) => Ok(GuestPoll::Pending {
                 op,
                 request_seq,
                 retry_absent: read.retry_absent,
                 retry_replaced: read.retry_replaced,
-                bytes: bytes.len(),
+                bytes,
             }),
             Ok(Observe::DiscardedLease { seq }) => Ok(GuestPoll::DiscardedLease {
                 seq,
                 retry_absent: read.retry_absent,
                 retry_replaced: read.retry_replaced,
-                bytes: bytes.len(),
+                bytes,
             }),
             Ok(Observe::Reply(reply)) => Ok(GuestPoll::Ready {
                 reply,
                 retry_absent: read.retry_absent,
                 retry_replaced: read.retry_replaced,
-                bytes: bytes.len(),
+                bytes,
             }),
             Err(error) => {
                 let watch = &mut layout.watches[slot_index(SlotRef::Guest(op))];
                 watch.stuck = true;
-                Err(failed(error, watch, bytes.len()))
+                watch.bytes = bytes;
+                Err(failed(error, watch, bytes))
             }
         },
     }
 }
 
 #[cfg_attr(not(unix), allow(dead_code))]
-fn finished(body: SlotBody, watch: &Watch) -> SlotRead {
+fn finished(body: SlotBody, watch: &Watch, bytes: usize) -> SlotRead {
     SlotRead {
         body,
         retry_absent: watch.retry_absent,
         retry_replaced: watch.retry_replaced,
+        bytes,
     }
 }
 
@@ -583,80 +645,154 @@ fn publish_unix(
 }
 
 #[cfg(unix)]
-fn read_body(
+fn with_bytes<T>(
+    result: Result<T, MailboxError>,
+    charged: usize,
+) -> Result<T, (MailboxError, usize)> {
+    result.map_err(|err| (err, charged))
+}
+
+/// One bounded read. Every try, including the stable frame, shares `end` and
+/// the bytes still inside [`POLL_BYTE_BUDGET`]. The next try is refused before
+/// the read when the object's size would pass that remainder. `ENOENT` stays
+/// one pending result. A deadline miss is not sticky.
+#[cfg(unix)]
+fn read_body<C: HostClock>(
     root: i32,
     layout: &Inner,
     slot: SlotRef,
     watch: &mut Watch,
-    charged: usize,
-) -> Result<SlotBody, MailboxError> {
-    check_root(root, layout)?;
-    let mailbox = open_recorded(root, c"mailbox", layout.mailbox, layout)?;
-    preflight(sys::raw_fd(&mailbox), &mailbox_allow(), Kind::Dir)?;
-    let (dir_name, expect, file_name) = locate(slot, layout)?;
-    let dir = open_recorded(sys::raw_fd(&mailbox), dir_name, expect, layout)?;
-    match slot {
-        SlotRef::Host(_) => preflight(sys::raw_fd(&dir), &host_names(), Kind::File)?,
-        SlotRef::Guest(_) => preflight(sys::raw_fd(&dir), &guest_allow(), Kind::File)?,
-    }
-    let chain = ReadChain {
-        root,
-        mailbox: &mailbox,
-        dir: &dir,
-        dir_name,
-        dir_id: expect,
-    };
-    let pre = match sys::fstat_at(sys::raw_fd(&dir), file_name) {
-        Ok(id) => id,
-        Err(SysErr::NoEnt) => return absent(&chain, layout, watch),
-        Err(SysErr::Loop) => return Err(Breach::Link.into()),
-        Err(err) => return Err(map_sys(err)),
-    };
-    if pre.kind == Kind::Link {
-        return Err(Breach::Link.into());
-    }
-    let fd = match sys::open_read(sys::raw_fd(&dir), file_name) {
-        Ok(fd) => fd,
-        Err(SysErr::NoEnt) => return absent(&chain, layout, watch),
-        Err(SysErr::Loop) => return Err(Breach::Link.into()),
-        Err(SysErr::Special) => return Err(Breach::NotRegular.into()),
-        Err(err) => return Err(map_sys(err)),
-    };
-    let opened = checked_file(&fd, layout)?;
-    if opened.size == 0 {
-        return if stable(&chain, &fd, file_name, &opened, layout)? {
-            Ok(SlotBody::Pending)
-        } else {
-            replaced(watch)
-        };
-    }
-    let cap = u64::try_from(FRAME_MAX).map_err(|_| MailboxError::Breach(Breach::FrameSize))?;
-    if opened.size > cap {
-        if !stable(&chain, &fd, file_name, &opened, layout)? {
-            return replaced(watch);
+    clock: &C,
+    end: MonoInstant,
+) -> Result<(SlotBody, usize), (MailboxError, usize)> {
+    let mut charged = 0usize;
+    let mut turns = 0usize;
+    loop {
+        if clock.now() >= end {
+            return Err((MailboxError::Deadline, charged));
         }
-        watch.stuck = true;
-        return Err(Breach::Size.into());
-    }
-    let bytes = sys::read_capped(sys::raw_fd(&fd), FRAME_MAX.saturating_add(1)).map_err(map_sys)?;
-    if !bytes.is_empty() {
-        hit(IoPoint::AfterRead);
-    }
-    if !stable(&chain, &fd, file_name, &opened, layout)? {
-        replaced(watch)?;
-        let next = charged.saturating_add(bytes.len());
-        if next > super::super::schedule::POLL_BYTE_BUDGET {
+        turns = turns.saturating_add(1);
+        if turns > POLL_BYTE_BUDGET {
             watch.stuck = true;
-            return Err(MailboxError::PollBudget);
+            return Err((MailboxError::PollBudget, charged));
         }
-        return read_body(root, layout, slot, watch, next);
+        let remaining = POLL_BYTE_BUDGET.saturating_sub(charged);
+        if remaining == 0 {
+            watch.stuck = true;
+            return Err((MailboxError::PollBudget, charged));
+        }
+        with_bytes(check_root(root, layout), charged)?;
+        let mailbox = with_bytes(
+            open_recorded(root, c"mailbox", layout.mailbox, layout),
+            charged,
+        )?;
+        with_bytes(
+            preflight(sys::raw_fd(&mailbox), &mailbox_allow(), Kind::Dir),
+            charged,
+        )?;
+        let (dir_name, expect, file_name) = with_bytes(locate(slot, layout), charged)?;
+        let dir = with_bytes(
+            open_recorded(sys::raw_fd(&mailbox), dir_name, expect, layout),
+            charged,
+        )?;
+        match slot {
+            SlotRef::Host(_) => with_bytes(
+                preflight(sys::raw_fd(&dir), &host_names(), Kind::File),
+                charged,
+            )?,
+            SlotRef::Guest(_) => with_bytes(
+                preflight(sys::raw_fd(&dir), &guest_allow(), Kind::File),
+                charged,
+            )?,
+        }
+        let chain = ReadChain {
+            root,
+            mailbox: &mailbox,
+            dir: &dir,
+            dir_name,
+            dir_id: expect,
+        };
+        let pre = match sys::fstat_at(sys::raw_fd(&dir), file_name) {
+            Ok(id) => id,
+            Err(SysErr::NoEnt) => {
+                return match absent(&chain, layout, watch) {
+                    Ok(body) => Ok((body, charged)),
+                    Err(err) => Err((err, charged)),
+                };
+            }
+            Err(SysErr::Loop) => return Err((Breach::Link.into(), charged)),
+            Err(err) => return Err((map_sys(err), charged)),
+        };
+        if pre.kind == Kind::Link {
+            return Err((Breach::Link.into(), charged));
+        }
+        let fd = match sys::open_read(sys::raw_fd(&dir), file_name) {
+            Ok(fd) => fd,
+            Err(SysErr::NoEnt) => {
+                return match absent(&chain, layout, watch) {
+                    Ok(body) => Ok((body, charged)),
+                    Err(err) => Err((err, charged)),
+                };
+            }
+            Err(SysErr::Loop) => return Err((Breach::Link.into(), charged)),
+            Err(SysErr::Special) => return Err((Breach::NotRegular.into(), charged)),
+            Err(err) => return Err((map_sys(err), charged)),
+        };
+        let opened = with_bytes(checked_file(&fd, layout), charged)?;
+        if opened.size == 0 {
+            let held = with_bytes(stable(&chain, &fd, file_name, &opened, layout), charged)?;
+            if held {
+                return Ok((SlotBody::Pending, charged));
+            }
+            with_bytes(replaced(watch), charged)?;
+            continue;
+        }
+        let cap = with_bytes(
+            u64::try_from(FRAME_MAX).map_err(|_| MailboxError::Breach(Breach::FrameSize)),
+            charged,
+        )?;
+        if opened.size > cap {
+            let held = with_bytes(stable(&chain, &fd, file_name, &opened, layout), charged)?;
+            if !held {
+                with_bytes(replaced(watch), charged)?;
+                continue;
+            }
+            watch.stuck = true;
+            return Err((Breach::Size.into(), charged));
+        }
+        let remaining_u = u64::try_from(remaining).unwrap_or(u64::MAX);
+        if opened.size > remaining_u {
+            watch.stuck = true;
+            return Err((MailboxError::PollBudget, charged));
+        }
+        let read_cap = remaining.min(FRAME_MAX.saturating_add(1));
+        let mut bytes = with_bytes(
+            sys::read_capped(sys::raw_fd(&fd), read_cap).map_err(map_sys),
+            charged,
+        )?;
+        if bytes.len() > read_cap {
+            bytes.truncate(read_cap);
+        }
+        if !bytes.is_empty() {
+            hit(IoPoint::AfterRead);
+        }
+        let total = charged.saturating_add(bytes.len());
+        let held = with_bytes(stable(&chain, &fd, file_name, &opened, layout), total)?;
+        if !held {
+            with_bytes(replaced(watch), total)?;
+            charged = total;
+            continue;
+        }
+        let got = with_bytes(
+            u64::try_from(bytes.len()).map_err(|_| MailboxError::Io),
+            total,
+        )?;
+        if got != opened.size {
+            watch.stuck = true;
+            return Err((Breach::Torn.into(), total));
+        }
+        return Ok((SlotBody::Frame(bytes), total));
     }
-    let got = u64::try_from(bytes.len()).map_err(|_| MailboxError::Io)?;
-    if got != opened.size {
-        watch.stuck = true;
-        return Err(Breach::Torn.into());
-    }
-    Ok(SlotBody::Frame(bytes))
 }
 
 #[cfg(unix)]

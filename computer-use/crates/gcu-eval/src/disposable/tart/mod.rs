@@ -74,5 +74,6 @@ pub use receipt::{AttemptOutcome, AttemptReceipt, NotRunReason, Phase, TaskScore
 pub use runner::{FakeTartRunner, TartRunner};
 pub use schedule::{
     attempt_window_ms, due, prove, step_end, ScheduleError, ScheduleProof, ACCEPT_AGE_MS,
-    EXTRA_SAMPLES, POLL_BYTE_BUDGET, RENEW_MS, STEP_MS, VISIBILITY_MS,
+    EXTRA_SAMPLES, GRANT_GAP_MS, ONE_WAY_MS, POLL_BYTE_BUDGET, RENEW_MS, ROUND_TRIP_MAX_MS,
+    STEP_MS,
 };

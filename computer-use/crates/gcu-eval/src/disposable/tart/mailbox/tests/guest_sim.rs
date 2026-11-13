@@ -15,7 +15,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use std::ffi::CString;
 use std::num::NonZeroU64;
@@ -28,11 +28,15 @@ use super::super::super::guest::{ConsumeNote, GuestAccounting, GuestChannel};
 use super::super::super::mailbox_guest::MailboxGuestChannel;
 use super::super::super::manifest::Digest;
 use super::super::super::output::{BoundedOutput, CallError};
-use super::super::super::schedule::POLL_BYTE_BUDGET;
+use super::super::super::schedule::{
+    attempt_window_ms, prove, ScheduleError, ACCEPT_AGE_MS, EXTRA_SAMPLES, GRANT_GAP_MS,
+    ONE_WAY_MS, POLL_BYTE_BUDGET, RENEW_MS, ROUND_TRIP_MAX_MS, STEP_MS,
+};
 use super::super::codec::{decode_frame, decode_reply};
 use super::super::ops::{
-    InventoryConsume, InventorySnapshot, LeaseTerminal, MsgStatus, Op, Payload, ReplyResult,
-    ReplyState, SideOp, SnapStatus, LEASE_WINDOW_MS, MAX_POLLS,
+    InventoryConsume, InventorySnapshot, LeaseRequest, LeaseTerminal, LoginState, MsgStatus, Op,
+    Outcome, Payload, ReplyResult, ReplyState, SideOp, SideResult, SnapStatus, ValueOutcome,
+    LEASE_WINDOW_MS, MAX_POLLS,
 };
 use super::super::slots::{
     arm, prepare_slots, IoPoint, GUEST_WRITE_DIR, HOST_WRITE_DIR, MAILBOX_DIR,
@@ -148,7 +152,10 @@ fn mismatched_lease_ack_fails_closed() {
     let seq = seq_of(1);
     assert_pending(&ok(rig.lease(seq)), Op::Lease);
     let sample = 10;
-    rig.publish_guest(Op::Lease, &lease_frame(1, sample, sample + LEASE_WINDOW_MS));
+    rig.publish_guest(
+        Op::Lease,
+        &lease_frame(1, 1, sample, sample + LEASE_WINDOW_MS),
+    );
     let good = decode_reply_of(&ok(rig.lease(seq)));
     if good.state != ReplyState::Terminal || good.request_seq != 1 {
         panic!("matching lease was not accepted: {good:?}");
@@ -156,7 +163,7 @@ fn mismatched_lease_ack_fails_closed() {
     let next = seq_of(2);
     assert_pending(&ok(rig.lease(next)), Op::Lease);
     let host = rig.host(Op::Lease);
-    rig.publish_guest(Op::Lease, &lease_frame(2, sample, sample));
+    rig.publish_guest(Op::Lease, &lease_frame(2, 1, sample, sample));
     let err = err_of(rig.lease(next));
     assert_failed(&err, b"mailbox");
     if rig.host(Op::Lease) != host || err_of(rig.lease(next)) != err {
@@ -315,13 +322,15 @@ fn poll_byte_budget_fails_closed() {
     });
     let err = err_of(rig.inventory());
     assert_failed(&err, b"poll-budget");
-    if n.get() < 33 {
+    let charged = 32 * 4_000;
+    if n.get() != 32 || rig.channel.bytes_read() != charged {
         panic!(
-            "one read did not reread through the byte budget, hooks={}",
-            n.get()
+            "replaced 4000-byte frames were read past the remainder: hooks={} bytes={}",
+            n.get(),
+            rig.channel.bytes_read()
         );
     }
-    if err_of(rig.inventory()) != err {
+    if err_of(rig.inventory()) != err || rig.channel.bytes_read() != charged {
         panic!("byte budget was not sticky");
     }
 }
@@ -520,6 +529,824 @@ fn sync_guest_samples_expire_and_rejects_bad_consume() {
     }
     if guest.step().is_ok() {
         panic!("bad consume was accepted");
+    }
+}
+
+fn step(guest: &SyncGuest) {
+    if let Err(err) = guest.step() {
+        panic!("guest step: {err}");
+    }
+}
+
+fn advance_to(rig: &Rig, target: u64) {
+    let now = ms(&rig.clock);
+    if target < now {
+        panic!("clock is {now}, cannot reach {target}");
+    }
+    if target == now {
+        return;
+    }
+    if rig
+        .clock
+        .advance(Duration::from_millis(target - now))
+        .is_err()
+    {
+        panic!("advance to {target}");
+    }
+}
+
+fn inventory_snap(body: &BoundedOutput) -> InventorySnapshot {
+    match decode_reply_of(body).result {
+        ReplyResult::Inventory(snap) => snap,
+        other => panic!("inventory snap: {other:?}"),
+    }
+}
+
+fn lease_request_of(bytes: &[u8]) -> LeaseRequest {
+    match decode_host(bytes).payload {
+        Payload::LeaseRequest(req) => req,
+        other => panic!("lease request: {other:?}"),
+    }
+}
+
+#[test]
+fn asymmetric_900_100_records_age_and_stops_the_tree() {
+    let mut rig = Rig::open();
+    let guest = SyncGuest::new(&rig, 0);
+    guest.schedule();
+
+    advance_to(&rig, 0);
+    assert_pending(&ok(rig.inventory()), Op::Inventory);
+    if decode_host(&rig.host(Op::Inventory)).seq != 1 {
+        panic!("inventory 1 was not published");
+    }
+    advance_to(&rig, 900);
+    step(&guest);
+    advance_to(&rig, 1_000);
+    let first = inventory_snap(&ok(rig.inventory()));
+    if first.sample_ms != 900 {
+        panic!("first sample {}", first.sample_ms);
+    }
+
+    advance_to(&rig, 1_100);
+    rig.clear_guest(Op::Inventory);
+    assert_pending(&ok(rig.inventory()), Op::Inventory);
+    if decode_host(&rig.host(Op::Inventory)).seq != 2 {
+        panic!("inventory 2 was not published at the service step");
+    }
+    assert_pending(&ok(rig.lease(seq_of(1))), Op::Lease);
+
+    advance_to(&rig, 2_000);
+    step(&guest);
+    let samples = guest.samples();
+    let accepts = guest.accepts();
+    if samples.len() != 2
+        || samples.first().copied()
+            != Some(SampleSeen {
+                request_seq: 1,
+                sample_ms: 900,
+                host_ms: 900,
+            })
+        || samples.get(1).copied()
+            != Some(SampleSeen {
+                request_seq: 2,
+                sample_ms: 2_000,
+                host_ms: 2_000,
+            })
+    {
+        panic!("samples {samples:?}");
+    }
+    let Some(accept) = accepts.first().copied() else {
+        panic!("lease 1 was not accepted");
+    };
+    let age = accept.host_ms.saturating_sub(900);
+    if accepts.len() != 1 || accept.host_ms != 2_000 || age != 1_100 || accept.until_ms != 2_900 {
+        panic!("lease 1 age {age} accepts {accepts:?}");
+    }
+    if guest.stop_deadline() != Some(2_900) || guest.stopped() {
+        panic!(
+            "stop {:?} stopped {}",
+            guest.stop_deadline(),
+            guest.stopped()
+        );
+    }
+
+    advance_to(&rig, 2_100);
+    let second = inventory_snap(&ok(rig.inventory()));
+    if second.sample_ms != 2_000 {
+        panic!("inventory 2 reached the host as {}", second.sample_ms);
+    }
+    let acked = decode_reply_of(&ok(rig.lease(seq_of(1))));
+    let ReplyResult::Lease(term) = acked.result else {
+        panic!("lease 1 ack: {acked:?}");
+    };
+    if term.until_ms != 2_900 || term.sample_ms != 900 || term.inventory_request_seq != 1 {
+        panic!("host observed {term:?}");
+    }
+
+    advance_to(&rig, 2_200);
+    assert_pending(&ok(rig.lease(seq_of(2))), Op::Lease);
+    if decode_host(&rig.host(Op::Lease)).seq != 2 {
+        panic!("lease 2 was not published");
+    }
+
+    advance_to(&rig, 2_900);
+    step(&guest);
+    if !guest.stopped() || guest.acks() != 1 || guest.stop_deadline() != Some(2_900) {
+        panic!(
+            "tree did not stop at the first grant: stopped {} acks {} deadline {:?}",
+            guest.stopped(),
+            guest.acks(),
+            guest.stop_deadline()
+        );
+    }
+    advance_to(&rig, 3_100);
+    step(&guest);
+    if guest.acks() != 1 || guest.accepts().len() != 1 || guest.samples().len() != 2 {
+        panic!(
+            "late grant changed the trace: acks {} accepts {} samples {}",
+            guest.acks(),
+            guest.accepts().len(),
+            guest.samples().len()
+        );
+    }
+}
+
+#[test]
+fn observed_1023_misses_the_guest_deadline() {
+    let mut rig = Rig::open();
+    let guest = SyncGuest::new(&rig, 0);
+    guest.schedule();
+    guest.see_lease_after(2_146);
+
+    advance_to(&rig, 0);
+    assert_pending(&ok(rig.inventory()), Op::Inventory);
+    step(&guest);
+    if guest.samples().first().copied()
+        != Some(SampleSeen {
+            request_seq: 1,
+            sample_ms: 0,
+            host_ms: 0,
+        })
+    {
+        panic!("sample {:?}", guest.samples());
+    }
+    advance_to(&rig, 1_023);
+    let snap = inventory_snap(&ok(rig.inventory()));
+    if snap.sample_ms != 0 {
+        panic!("host read sample {}", snap.sample_ms);
+    }
+    advance_to(&rig, 1_123);
+    assert_pending(&ok(rig.lease(seq_of(1))), Op::Lease);
+    if lease_request_of(&rig.host(Op::Lease)).sample_ms != 0 {
+        panic!("grant did not use the observed sample");
+    }
+
+    advance_to(&rig, 1_999);
+    step(&guest);
+    if guest.stopped() || guest.acks() != 0 {
+        panic!("grant was treated as visible before 2146 ms");
+    }
+    advance_to(&rig, 2_000);
+    step(&guest);
+    if !guest.stopped() || guest.acks() != 0 || guest.stop_deadline() != Some(2_000) {
+        panic!(
+            "1023 ms legs: stopped {} acks {} deadline {:?}",
+            guest.stopped(),
+            guest.acks(),
+            guest.stop_deadline()
+        );
+    }
+    advance_to(&rig, 2_146);
+    step(&guest);
+    if guest.acks() != 0 || !guest.accepts().is_empty() {
+        panic!("grant visible at 2146 ms was accepted after the stop");
+    }
+}
+
+#[test]
+fn jitter_slips_accept_age_by_one_step() {
+    let mut rig = Rig::open();
+    let guest = SyncGuest::new(&rig, 0);
+    guest.schedule();
+    advance_to(&rig, 0);
+    assert_pending(&ok(rig.inventory()), Op::Inventory);
+    advance_to(&rig, 900);
+    step(&guest);
+    advance_to(&rig, 1_000);
+    let snap = inventory_snap(&ok(rig.inventory()));
+    if snap.sample_ms != 900 {
+        panic!("sample {}", snap.sample_ms);
+    }
+    advance_to(&rig, 1_200);
+    assert_pending(&ok(rig.lease(seq_of(1))), Op::Lease);
+    advance_to(&rig, 2_100);
+    step(&guest);
+    let Some(accept) = guest.accepts().first().copied() else {
+        panic!("jitter did not accept");
+    };
+    let age = accept.host_ms.saturating_sub(900);
+    if guest.accepts().len() != 1
+        || accept.host_ms != 2_100
+        || age != 1_200
+        || accept.until_ms != 2_900
+    {
+        panic!("jitter age {age} {:?}", guest.accepts());
+    }
+    if guest.stop_deadline() != Some(2_900) {
+        panic!("jitter moved the stop {:?}", guest.stop_deadline());
+    }
+}
+
+#[test]
+fn short_delay_window_keeps_grant_continuity() {
+    const CYCLES: u64 = 40;
+    const HG: u64 = 100;
+    const GH: u64 = 100;
+    const SERVICE: u64 = 100;
+    const PERIOD: u64 = 800;
+    const SKIP_K: u64 = 6;
+    const ENOENT_K: u64 = 3;
+
+    let mut rig = Rig::open();
+    let guest = SyncGuest::new(&rig, 0);
+    guest.schedule();
+    guest.skip_lease(SKIP_K + 1);
+
+    let mut prev_accept: Option<u64> = None;
+    for k in 0..CYCLES {
+        let base = k * PERIOD;
+        advance_to(&rig, base);
+        rig.clear_guest(Op::Inventory);
+        assert_pending(&ok(rig.inventory()), Op::Inventory);
+        let inv_seq = decode_host(&rig.host(Op::Inventory)).seq;
+        if inv_seq != k + 1 {
+            panic!("inventory seq {inv_seq} at cycle {k}");
+        }
+
+        advance_to(&rig, base + HG);
+        step(&guest);
+        if k == ENOENT_K {
+            rig.remove_guest(Op::Inventory);
+            assert_pending(&ok(rig.inventory()), Op::Inventory);
+            step(&guest);
+            if guest.enoent() < 1 {
+                panic!("enoent was not counted");
+            }
+        }
+        advance_to(&rig, base + HG + GH);
+        let snap = inventory_snap(&ok(rig.inventory()));
+        let sample_ms = base + HG;
+        if snap.sample_ms != sample_ms {
+            panic!("cycle {k} sample {} want {sample_ms}", snap.sample_ms);
+        }
+
+        advance_to(&rig, base + HG + GH + SERVICE);
+        let lease_seq = k + 1;
+        assert_pending(&ok(rig.lease(seq_of(lease_seq))), Op::Lease);
+        let req = lease_request_of(&rig.host(Op::Lease));
+        if req.inventory_request_seq != inv_seq || req.sample_ms != sample_ms {
+            panic!("cycle {k} grant {req:?}");
+        }
+        if rig.channel.host_grant_end_ms() != Some(sample_ms + LEASE_WINDOW_MS) {
+            panic!("cycle {k} host end {:?}", rig.channel.host_grant_end_ms());
+        }
+
+        let accept_at = base + HG + GH + SERVICE + HG;
+        advance_to(&rig, accept_at);
+        step(&guest);
+        if k == SKIP_K {
+            if guest.accepts().iter().any(|row| row.lease_seq == lease_seq) {
+                panic!("skipped lease {lease_seq} was accepted");
+            }
+            assert_pending(&ok(rig.lease(seq_of(lease_seq))), Op::Lease);
+            continue;
+        }
+        assert_terminal_op(&ok(rig.lease(seq_of(lease_seq))), Op::Lease);
+        let Some(accept) = guest
+            .accepts()
+            .iter()
+            .copied()
+            .find(|row| row.lease_seq == lease_seq)
+        else {
+            panic!("missing accept {lease_seq}");
+        };
+        let age = accept.host_ms.saturating_sub(sample_ms);
+        if accept.host_ms != accept_at
+            || age != GH + SERVICE + HG
+            || accept.until_ms != sample_ms + LEASE_WINDOW_MS
+        {
+            panic!("cycle {k} age {age} {accept:?}");
+        }
+        if let Some(prev) = prev_accept {
+            let gap = accept.host_ms.saturating_sub(prev);
+            let want = if k == SKIP_K + 1 { PERIOD * 2 } else { PERIOD };
+            if gap != want {
+                panic!("cycle {k} gap {gap} want {want}");
+            }
+        }
+        prev_accept = Some(accept.host_ms);
+    }
+
+    if guest.samples().len() != usize::try_from(CYCLES).unwrap_or(usize::MAX)
+        || guest.accepts().len() != usize::try_from(CYCLES - 1).unwrap_or(usize::MAX)
+    {
+        panic!(
+            "requests {} accepts {}",
+            guest.samples().len(),
+            guest.accepts().len()
+        );
+    }
+    if guest.enoent() < 1
+        || guest
+            .accepts()
+            .iter()
+            .any(|row| row.lease_seq == SKIP_K + 1)
+    {
+        panic!("enoent {} or skipped lease was recorded", guest.enoent());
+    }
+    let last_sample = (CYCLES - 1) * PERIOD + HG;
+    if guest.stop_deadline() != Some(last_sample + LEASE_WINDOW_MS) || guest.stopped() {
+        panic!(
+            "stop {:?} stopped {}",
+            guest.stop_deadline(),
+            guest.stopped()
+        );
+    }
+    if rig.channel.host_grant_end_ms() != Some(last_sample + LEASE_WINDOW_MS) {
+        panic!("host end {:?}", rig.channel.host_grant_end_ms());
+    }
+
+    // Forty filesystem cycles stand in for the attempt. The closed form is the
+    // full 1_560_000 ms window. Short 100 ms legs fit inside 2000 ms. The
+    // measured 1023 ms one-way bound, counted in each direction, does not.
+    let window = attempt_window_ms();
+    let periodic = window / RENEW_MS + 1;
+    let count = periodic + EXTRA_SAMPLES;
+    if window != 1_560_000 || periodic != 1_951 || count != 1_959 || count > MAX_POLLS {
+        panic!("count formula window {window} periodic {periodic} count {count}");
+    }
+    let age = ONE_WAY_MS + STEP_MS + ONE_WAY_MS;
+    let gap = RENEW_MS + STEP_MS + ONE_WAY_MS;
+    if ACCEPT_AGE_MS != 2_146
+        || age != ACCEPT_AGE_MS
+        || GRANT_GAP_MS != 1_923
+        || gap != GRANT_GAP_MS
+    {
+        panic!("measured age {ACCEPT_AGE_MS} gap {GRANT_GAP_MS}");
+    }
+    let single = ROUND_TRIP_MAX_MS + STEP_MS + RENEW_MS + STEP_MS;
+    if single != 2_023 || single <= LEASE_WINDOW_MS || age + gap < LEASE_WINDOW_MS {
+        panic!("measured cycle fits: single {single} sum {}", age + gap);
+    }
+    if HG + SERVICE + GH + PERIOD >= LEASE_WINDOW_MS {
+        panic!("representative delays do not fit inside the grant");
+    }
+    match prove(window) {
+        Err(ScheduleError::Infeasible {
+            window_ms,
+            count: got,
+        }) if window_ms == window && got == count => {}
+        other => panic!("full window returned a proof: {other:?}"),
+    }
+    match prove(1) {
+        Err(ScheduleError::Infeasible { .. }) => {}
+        other => panic!("short window returned a proof: {other:?}"),
+    }
+}
+
+#[test]
+fn repeated_sample_timestamp_pins_grant_request() {
+    let mut rig = Rig::open();
+    bind(&mut rig);
+    let seq = next_inventory(&mut rig);
+    if seq != 2 {
+        panic!("seq {seq}");
+    }
+    rig.publish_guest(Op::Inventory, &plain_terminal(seq, "boot1", 5_000));
+    assert_terminal_op(&ok(rig.inventory()), Op::Inventory);
+    let Some(pin) = rig.channel.pinned_grant() else {
+        panic!("sample 5000 was not pinned");
+    };
+    if pin
+        != (LeaseRequest {
+            inventory_request_seq: seq,
+            sample_ms: 5_000,
+        })
+    {
+        panic!("pin {pin:?}");
+    }
+
+    let again = next_inventory(&mut rig);
+    rig.publish_guest(Op::Inventory, &plain_terminal(again, "boot1", 5_000));
+    assert_terminal_op(&ok(rig.inventory()), Op::Inventory);
+    if rig.channel.pinned_grant() != Some(pin) {
+        panic!(
+            "repeated sample moved the pin to {:?}",
+            rig.channel.pinned_grant()
+        );
+    }
+
+    assert_pending(&ok(rig.lease(seq_of(1))), Op::Lease);
+    let published = lease_request_of(&rig.host(Op::Lease));
+    if published != pin || rig.channel.host_grant_end_ms() != Some(7_000) {
+        panic!(
+            "published {published:?} end {:?}",
+            rig.channel.host_grant_end_ms()
+        );
+    }
+    rig.publish_guest(
+        Op::Lease,
+        &lease_frame(1, pin.inventory_request_seq, pin.sample_ms, 7_000),
+    );
+    let acked = decode_reply_of(&ok(rig.lease(seq_of(1))));
+    let ReplyResult::Lease(term) = acked.result else {
+        panic!("ack {acked:?}");
+    };
+    if term.inventory_request_seq != pin.inventory_request_seq
+        || term.sample_ms != pin.sample_ms
+        || term.until_ms != 7_000
+        || rig.channel.host_grant_end_ms() != Some(7_000)
+        || rig.channel.pinned_grant() != Some(pin)
+    {
+        panic!(
+            "ack moved the grant: {term:?} pin {:?}",
+            rig.channel.pinned_grant()
+        );
+    }
+
+    assert_pending(&ok(rig.lease(seq_of(2))), Op::Lease);
+    let second = lease_request_of(&rig.host(Op::Lease));
+    if second != pin || rig.channel.host_grant_end_ms() != Some(7_000) {
+        panic!(
+            "second grant {second:?} end {:?}",
+            rig.channel.host_grant_end_ms()
+        );
+    }
+
+    let lower = next_inventory(&mut rig);
+    rig.publish_guest(Op::Inventory, &plain_terminal(lower, "boot1", 4_999));
+    let err = err_of(rig.inventory());
+    assert_failed(&err, b"sample");
+    if rig.channel.pinned_grant() != Some(pin) || rig.channel.host_grant_end_ms() != Some(7_000) {
+        panic!("lower sample moved the pin or the host end");
+    }
+}
+
+fn reject_note(rig: &mut Rig, note: ConsumeNote) {
+    let before = rig.host(Op::Inventory);
+    let err = match rig.channel.note_consumed(note) {
+        Err(err) => err,
+        Ok(()) => panic!("note was accepted"),
+    };
+    assert_failed(&err, b"consume");
+    if err_of(rig.inventory()) != err || rig.host(Op::Inventory) != before {
+        panic!("rejected consume was published or was not sticky");
+    }
+}
+
+fn boot_outcome(outcome: Outcome) -> SideResult {
+    match ValueOutcome::new(outcome, None) {
+        Ok(value) => SideResult::Bootstrap(value),
+        Err(err) => panic!("outcome: {err:?}"),
+    }
+}
+
+fn revoke_outcome(outcome: Outcome) -> super::super::ops::RevokeOutcome {
+    match super::super::ops::RevokeOutcome::new(outcome, None) {
+        Ok(value) => value,
+        Err(err) => panic!("revoke outcome: {err:?}"),
+    }
+}
+
+#[test]
+fn note_consumed_rejects_until_successful_terminal() {
+    let mut accepted = Rig::open();
+    bind(&mut accepted);
+    accept_bootstrap(&mut accepted);
+    reject_note(
+        &mut accepted,
+        ConsumeNote {
+            active_kind: 1,
+            active_seq: 1,
+            revoke_seq: 0,
+        },
+    );
+
+    let mut pending = Rig::open();
+    bind(&mut pending);
+    let _ = ok(pending.bootstrap());
+    let seq = next_inventory(&mut pending);
+    pending.publish_guest(
+        Op::Inventory,
+        &snapshot_frame(
+            seq,
+            "boot1",
+            10,
+            "desk1",
+            "cfg1",
+            activity(SnapStatus::Pending, Some(SideOp::Bootstrap), 1, None),
+            revoke_row(SnapStatus::None, 0, None),
+        ),
+    );
+    assert_terminal_op(&ok(pending.inventory()), Op::Inventory);
+    reject_note(
+        &mut pending,
+        ConsumeNote {
+            active_kind: 1,
+            active_seq: 1,
+            revoke_seq: 0,
+        },
+    );
+
+    for outcome in [Outcome::Failed, Outcome::Unknown, Outcome::Cancelled] {
+        let mut rig = Rig::open();
+        bind(&mut rig);
+        let _ = ok(rig.bootstrap());
+        let seq = next_inventory(&mut rig);
+        rig.publish_guest(
+            Op::Inventory,
+            &snapshot_frame(
+                seq,
+                "boot1",
+                10,
+                "desk1",
+                "cfg1",
+                activity(
+                    SnapStatus::Terminal,
+                    Some(SideOp::Bootstrap),
+                    1,
+                    Some(boot_outcome(outcome)),
+                ),
+                revoke_row(SnapStatus::None, 0, None),
+            ),
+        );
+        assert_terminal_op(&ok(rig.inventory()), Op::Inventory);
+        reject_note(
+            &mut rig,
+            ConsumeNote {
+                active_kind: 1,
+                active_seq: 1,
+                revoke_seq: 0,
+            },
+        );
+    }
+
+    let mut unissued = Rig::open();
+    bind(&mut unissued);
+    reject_note(
+        &mut unissued,
+        ConsumeNote {
+            active_kind: 1,
+            active_seq: 1,
+            revoke_seq: 0,
+        },
+    );
+
+    let mut mismatch = Rig::open();
+    bind(&mut mismatch);
+    accept_bootstrap(&mut mismatch);
+    report_bootstrap(&mut mismatch, 1);
+    reject_note(
+        &mut mismatch,
+        ConsumeNote {
+            active_kind: 2,
+            active_seq: 1,
+            revoke_seq: 0,
+        },
+    );
+    let mut other_seq = Rig::open();
+    bind(&mut other_seq);
+    accept_bootstrap(&mut other_seq);
+    report_bootstrap(&mut other_seq, 1);
+    reject_note(
+        &mut other_seq,
+        ConsumeNote {
+            active_kind: 1,
+            active_seq: 2,
+            revoke_seq: 0,
+        },
+    );
+
+    let mut mixed = Rig::open();
+    bind(&mut mixed);
+    accept_bootstrap(&mut mixed);
+    report_bootstrap(&mut mixed, 1);
+    let before = mixed.host(Op::Inventory);
+    reject_note(
+        &mut mixed,
+        ConsumeNote {
+            active_kind: 1,
+            active_seq: 1,
+            revoke_seq: 9,
+        },
+    );
+    if mixed.host(Op::Inventory) != before {
+        panic!("a bad revoke queued the good bootstrap row");
+    }
+
+    let mut empty = Rig::open();
+    bind(&mut empty);
+    reject_note(
+        &mut empty,
+        ConsumeNote {
+            active_kind: 0,
+            active_seq: 0,
+            revoke_seq: 0,
+        },
+    );
+
+    let mut revoke_bad = Rig::open();
+    bind(&mut revoke_bad);
+    let _ = ok(revoke_bad.revoke());
+    let seq = next_inventory(&mut revoke_bad);
+    revoke_bad.publish_guest(
+        Op::Inventory,
+        &snapshot_frame(
+            seq,
+            "boot1",
+            10,
+            "desk1",
+            "cfg1",
+            activity(SnapStatus::None, None, 0, None),
+            revoke_row(
+                SnapStatus::Terminal,
+                1,
+                Some(revoke_outcome(Outcome::Failed)),
+            ),
+        ),
+    );
+    assert_terminal_op(&ok(revoke_bad.inventory()), Op::Inventory);
+    reject_note(
+        &mut revoke_bad,
+        ConsumeNote {
+            active_kind: 0,
+            active_seq: 0,
+            revoke_seq: 1,
+        },
+    );
+
+    let mut login_missing = Rig::open();
+    bind(&mut login_missing);
+    assert_pending(&ok(login_missing.login()), Op::Login);
+    let seq = next_inventory(&mut login_missing);
+    let missing = match ValueOutcome::new(Outcome::Ok, Some(LoginState::Missing)) {
+        Ok(value) => SideResult::Login(value),
+        Err(err) => panic!("missing: {err:?}"),
+    };
+    login_missing.publish_guest(
+        Op::Inventory,
+        &snapshot_frame(
+            seq,
+            "boot1",
+            10,
+            "desk1",
+            "cfg1",
+            activity(SnapStatus::Terminal, Some(SideOp::Login), 1, Some(missing)),
+            revoke_row(SnapStatus::None, 0, None),
+        ),
+    );
+    assert_terminal_op(&ok(login_missing.inventory()), Op::Inventory);
+    if let Err(err) = login_missing.channel.note_consumed(ConsumeNote {
+        active_kind: 2,
+        active_seq: 1,
+        revoke_seq: 0,
+    }) {
+        panic!("login missing is outcome ok: {err:?}");
+    }
+    let seq = next_inventory(&mut login_missing);
+    assert_consume(
+        &decode_host(&login_missing.host(Op::Inventory)),
+        Some(SideOp::Login),
+        1,
+    );
+    login_missing.publish_guest(Op::Inventory, &plain_terminal(seq, "boot1", 10));
+    assert_terminal_op(&ok(login_missing.inventory()), Op::Inventory);
+
+    let mut revoke_ok_row = Rig::open();
+    bind(&mut revoke_ok_row);
+    let _ = ok(revoke_ok_row.revoke());
+    let seq = next_inventory(&mut revoke_ok_row);
+    revoke_ok_row.publish_guest(
+        Op::Inventory,
+        &snapshot_frame(
+            seq,
+            "boot1",
+            10,
+            "desk1",
+            "cfg1",
+            activity(SnapStatus::None, None, 0, None),
+            revoke_row(SnapStatus::Terminal, 1, Some(revoke_ok())),
+        ),
+    );
+    assert_terminal_op(&ok(revoke_ok_row.inventory()), Op::Inventory);
+    if let Err(err) = revoke_ok_row.channel.note_consumed(ConsumeNote {
+        active_kind: 0,
+        active_seq: 0,
+        revoke_seq: 1,
+    }) {
+        panic!("revoke ok: {err:?}");
+    }
+    let _ = next_inventory(&mut revoke_ok_row);
+    match decode_host(&revoke_ok_row.host(Op::Inventory)).payload {
+        Payload::InventoryRequest(consume)
+            if consume.op.is_none() && consume.request_seq == 0 && consume.revoke_seq == 1 => {}
+        other => panic!("revoke consume: {other:?}"),
+    }
+}
+
+#[test]
+fn exact_128_kib_boundary_does_not_read_the_stable_frame() {
+    let mut rig = Rig::open();
+    assert_pending(&ok(rig.inventory()), Op::Inventory);
+    let dest = rig.root.message(GUEST_WRITE_DIR, Op::Inventory.file_name());
+    let legal = inv_terminal(1, Some("boot1"));
+    if let Err(err) = fs::write(&dest, vec![b'a'; 4_096]) {
+        panic!("seed: {err}");
+    }
+    let n = Rc::new(Cell::new(0u32));
+    let counter = Rc::clone(&n);
+    let hook_dest = dest.clone();
+    let legal_hook = legal.clone();
+    let dir = rig.root.path().to_path_buf();
+    let _guard = arm(IoPoint::AfterRead, move || {
+        let i = counter.get();
+        counter.set(i.saturating_add(1));
+        let spare = dir.join(format!("edge-{i}"));
+        let bytes = if i == 31 {
+            legal_hook.clone()
+        } else {
+            let mut body = vec![b'b'; 4_096];
+            body[0] = u8::try_from(i % 200).unwrap_or(1);
+            body
+        };
+        if let Err(err) = fs::write(&spare, bytes) {
+            panic!("spare: {err}");
+        }
+        if let Err(err) = fs::rename(&spare, &hook_dest) {
+            panic!("rename: {err}");
+        }
+    });
+    let err = err_of(rig.inventory());
+    assert_failed(&err, b"poll-budget");
+    if n.get() != 32 || rig.channel.bytes_read() != POLL_BYTE_BUDGET {
+        panic!(
+            "boundary hooks {} bytes {}",
+            n.get(),
+            rig.channel.bytes_read()
+        );
+    }
+    match fs::read(&dest) {
+        Ok(bytes) if bytes == legal => {}
+        other => panic!("stable frame was read or replaced: {other:?}"),
+    }
+    if err_of(rig.inventory()) != err || rig.channel.bytes_read() != POLL_BYTE_BUDGET {
+        panic!("boundary was not sticky");
+    }
+}
+
+#[test]
+fn shared_read_deadline_expires_without_sticking() {
+    let mut rig = Rig::open();
+    assert_pending(&ok(rig.inventory()), Op::Inventory);
+    let dest = rig.root.message(GUEST_WRITE_DIR, Op::Inventory.file_name());
+    let first = vec![b'x'; 50];
+    if let Err(err) = fs::write(&dest, &first) {
+        panic!("seed: {err}");
+    }
+    let legal = inv_terminal(1, Some("boot1"));
+    let legal_len = legal.len();
+    let clock = rig.clock.clone();
+    let once = Rc::new(Cell::new(true));
+    let flag = Rc::clone(&once);
+    let hook_dest = dest.clone();
+    let dir = rig.root.path().to_path_buf();
+    let _guard = arm(IoPoint::AfterRead, move || {
+        if !flag.replace(false) {
+            return;
+        }
+        if clock.advance(QueryDeadline::CAP).is_err() {
+            panic!("advance");
+        }
+        let spare = dir.join("deadline-spare");
+        if let Err(err) = fs::write(&spare, &legal) {
+            panic!("spare: {err}");
+        }
+        if let Err(err) = fs::rename(&spare, &hook_dest) {
+            panic!("rename: {err}");
+        }
+    });
+    let err = err_of(rig.inventory());
+    if err != CallError::Expired || rig.channel.bytes_read() != first.len() {
+        panic!("deadline {err:?} bytes {}", rig.channel.bytes_read());
+    }
+    assert_terminal_op(&ok(rig.inventory()), Op::Inventory);
+    if rig.channel.bytes_read() != first.len() + legal_len {
+        panic!(
+            "deadline retry bytes {} want {}",
+            rig.channel.bytes_read(),
+            first.len() + legal_len
+        );
     }
 }
 
@@ -758,6 +1585,22 @@ fn ms(clock: &FakeClock) -> u64 {
 ///
 /// The guest epoch is not the host epoch. Lease expiry is sticky. An existing
 /// tmp is a failure and is left in place. No thread and no sleep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SampleSeen {
+    request_seq: u64,
+    sample_ms: u64,
+    host_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GrantSeen {
+    lease_seq: u64,
+    inventory_seq: u64,
+    sample_ms: u64,
+    until_ms: u64,
+    host_ms: u64,
+}
+
 struct SyncGuest {
     root: PathBuf,
     clock: FakeClock,
@@ -771,6 +1614,16 @@ struct SyncGuest {
     acked_seqs: RefCell<Vec<u64>>,
     active_done: RefCell<Vec<(SideOp, u64)>>,
     revoke_done: RefCell<Vec<u64>>,
+    schedule: Cell<bool>,
+    samples: RefCell<Vec<SampleSeen>>,
+    accepts: RefCell<Vec<GrantSeen>>,
+    answered: RefCell<Vec<u64>>,
+    last_frame: RefCell<Option<Vec<u8>>>,
+    stop_at: Cell<Option<u64>>,
+    stopped: Cell<bool>,
+    enoent_count: Cell<u32>,
+    skip: RefCell<Vec<u64>>,
+    lease_not_before: Cell<u64>,
 }
 
 impl SyncGuest {
@@ -788,7 +1641,50 @@ impl SyncGuest {
             acked_seqs: RefCell::new(Vec::new()),
             active_done: RefCell::new(Vec::new()),
             revoke_done: RefCell::new(Vec::new()),
+            schedule: Cell::new(false),
+            samples: RefCell::new(Vec::new()),
+            accepts: RefCell::new(Vec::new()),
+            answered: RefCell::new(Vec::new()),
+            last_frame: RefCell::new(None),
+            stop_at: Cell::new(None),
+            stopped: Cell::new(false),
+            enoent_count: Cell::new(0),
+            skip: RefCell::new(Vec::new()),
+            lease_not_before: Cell::new(0),
         }
+    }
+
+    fn schedule(&self) {
+        self.schedule.set(true);
+    }
+
+    fn skip_lease(&self, seq: u64) {
+        self.skip.borrow_mut().push(seq);
+    }
+
+    /// Host milliseconds before which a lease file on disk is not visible.
+    fn see_lease_after(&self, host_ms: u64) {
+        self.lease_not_before.set(host_ms);
+    }
+
+    fn samples(&self) -> Vec<SampleSeen> {
+        self.samples.borrow().clone()
+    }
+
+    fn accepts(&self) -> Vec<GrantSeen> {
+        self.accepts.borrow().clone()
+    }
+
+    fn stop_deadline(&self) -> Option<u64> {
+        self.stop_at.get()
+    }
+
+    fn stopped(&self) -> bool {
+        self.stopped.get()
+    }
+
+    fn enoent(&self) -> u32 {
+        self.enoent_count.get()
     }
 
     fn hold_inventory(&self, until_host_ms: u64) {
@@ -813,9 +1709,29 @@ impl SyncGuest {
         if tmp.exists() {
             return Err("guest tmp already exists".to_owned());
         }
+        if self.schedule.get() {
+            self.consider_stop();
+            if !self.stopped.get() {
+                self.serve_inventory_scheduled()?;
+                self.serve_lease_scheduled()?;
+            }
+            self.consider_stop();
+            return Ok(());
+        }
         self.serve_inventory()?;
         self.serve_lease()?;
         Ok(())
+    }
+
+    fn consider_stop(&self) {
+        let Some(deadline) = self.stop_at.get() else {
+            return;
+        };
+        let guest_now = self.epoch.saturating_add(self.host_ms());
+        if guest_now >= deadline {
+            self.stopped.set(true);
+            self.expired_flag.set(true);
+        }
     }
 
     fn serve_inventory(&self) -> Result<(), String> {
@@ -879,10 +1795,121 @@ impl SyncGuest {
             .sample_ms
             .checked_add(LEASE_WINDOW_MS)
             .ok_or("lease until overflow")?;
-        let frame = lease_frame(env.seq, req.sample_ms, until);
+        let frame = lease_frame(env.seq, req.inventory_request_seq, req.sample_ms, until);
         self.publish(Op::Lease, &frame)?;
         self.acked_seqs.borrow_mut().push(env.seq);
         self.ack_count.set(self.ack_count.get().saturating_add(1));
+        Ok(())
+    }
+
+    fn serve_inventory_scheduled(&self) -> Result<(), String> {
+        let bytes = self.read_host(Op::Inventory);
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let env = decode_frame(&bytes).map_err(|err| format!("inventory host: {err:?}"))?;
+        let Payload::InventoryRequest(consume) = env.payload else {
+            return Ok(());
+        };
+        if !self.consume_ok(&consume) {
+            return Err("consume names a row this guest has not retained".to_owned());
+        }
+        if self.answered.borrow().contains(&env.seq) {
+            let dest = self.guest_path(Op::Inventory.file_name());
+            if !dest.exists() {
+                self.enoent_count
+                    .set(self.enoent_count.get().saturating_add(1));
+                let frame = self
+                    .last_frame
+                    .borrow()
+                    .clone()
+                    .ok_or("missing inventory frame")?;
+                self.publish(Op::Inventory, &frame)?;
+            }
+            return Ok(());
+        }
+        let host_ms = self.host_ms();
+        let sample = self.epoch.saturating_add(host_ms);
+        self.samples.borrow_mut().push(SampleSeen {
+            request_seq: env.seq,
+            sample_ms: sample,
+            host_ms,
+        });
+        if self.stop_at.get().is_none() {
+            self.stop_at
+                .set(Some(sample.saturating_add(LEASE_WINDOW_MS)));
+        }
+        if self.generated.get().is_none() {
+            self.generated.set(Some(host_ms));
+            self.sample.set(Some(sample));
+        }
+        let frame = snapshot_frame(
+            env.seq,
+            "boot1",
+            sample,
+            "desk1",
+            "cfg1",
+            activity(SnapStatus::None, None, 0, None),
+            revoke_row(SnapStatus::None, 0, None),
+        );
+        self.last_frame.replace(Some(frame.clone()));
+        self.answered.borrow_mut().push(env.seq);
+        self.publish(Op::Inventory, &frame)
+    }
+
+    fn serve_lease_scheduled(&self) -> Result<(), String> {
+        if self.stopped.get() || self.expired_flag.get() {
+            return Ok(());
+        }
+        let bytes = self.read_host(Op::Lease);
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let env = decode_frame(&bytes).map_err(|err| format!("lease host: {err:?}"))?;
+        let Payload::LeaseRequest(req) = env.payload else {
+            return Ok(());
+        };
+        if self.skip.borrow().contains(&env.seq) {
+            return Ok(());
+        }
+        if self.host_ms() < self.lease_not_before.get() {
+            return Ok(());
+        }
+        let known = self.samples.borrow().iter().any(|row| {
+            row.request_seq == req.inventory_request_seq && row.sample_ms == req.sample_ms
+        });
+        if !known {
+            return Ok(());
+        }
+        let guest_now = self.epoch.saturating_add(self.host_ms());
+        let deadline = req.sample_ms.saturating_add(LEASE_WINDOW_MS);
+        if guest_now >= deadline {
+            self.expired_flag.set(true);
+            self.stopped.set(true);
+            self.stop_at.set(Some(deadline));
+            return Ok(());
+        }
+        if self.acked_seqs.borrow().contains(&env.seq) {
+            return Ok(());
+        }
+        let until = req
+            .sample_ms
+            .checked_add(LEASE_WINDOW_MS)
+            .ok_or("lease until overflow")?;
+        let frame = lease_frame(env.seq, req.inventory_request_seq, req.sample_ms, until);
+        self.publish(Op::Lease, &frame)?;
+        self.acked_seqs.borrow_mut().push(env.seq);
+        self.ack_count.set(self.ack_count.get().saturating_add(1));
+        self.accepts.borrow_mut().push(GrantSeen {
+            lease_seq: env.seq,
+            inventory_seq: req.inventory_request_seq,
+            sample_ms: req.sample_ms,
+            until_ms: until,
+            host_ms: self.host_ms(),
+        });
+        if until >= self.stop_at.get().unwrap_or(0) {
+            self.stop_at.set(Some(until));
+        }
         Ok(())
     }
 
@@ -1066,14 +2093,14 @@ fn accepted_frame(op: Op, seq: u64) -> Vec<u8> {
     ))
 }
 
-fn lease_frame(seq: u64, sample_ms: u64, until_ms: u64) -> Vec<u8> {
+fn lease_frame(seq: u64, inventory_seq: u64, sample_ms: u64, until_ms: u64) -> Vec<u8> {
     encoded(&envelope(
         Op::Lease,
         seq,
         Some("boot1"),
         MsgStatus::Terminal,
         Payload::LeaseTerminal(LeaseTerminal {
-            inventory_request_seq: 1,
+            inventory_request_seq: inventory_seq,
             sample_ms,
             until_ms,
         }),

@@ -9,15 +9,15 @@ use std::num::NonZeroU64;
 
 use super::super::Probe;
 use super::deadline::{
-    HostClock, LeaseDeadline, LoginDeadline, ProbeDeadline, QueryDeadline, RevokeDeadline,
-    RunDeadline, StageDeadline,
+    HostClock, LeaseDeadline, LoginDeadline, MonoInstant, ProbeDeadline, QueryDeadline,
+    RevokeDeadline, RunDeadline, StageDeadline,
 };
 use super::guest::{ConsumeNote, GuestAccounting, GuestChannel, GUEST_CHANNEL_VERSION};
 use super::mailbox::{
-    encode_frame, encode_reply, poll_guest, publish, Activity, AttemptBinding, Envelope,
+    encode_frame, encode_reply, poll_guest_until, publish, Activity, AttemptBinding, Envelope,
     FailedRead, GuestPoll, HostSlot, InventoryConsume, InventorySnapshot, Layout, LeaseRequest,
-    MailboxError, MailboxReply, MsgStatus, Op, Payload, ReplyResult, ReplyState, RevokeSlot,
-    SeqFault, SeqTracker, SideOp, SnapStatus,
+    MailboxError, MailboxReply, MsgStatus, Op, Outcome, Payload, ReplyResult, ReplyState,
+    RevokeSlot, SeqFault, SeqTracker, SideOp, SideResult, SnapStatus,
 };
 use super::output::{BoundedOutput, CallError};
 
@@ -34,8 +34,11 @@ pub struct MailboxGuestChannel<C: HostClock> {
     bytes_read: usize,
     stuck: Option<CallError>,
     open: [bool; 7],
-    sample_ms: u64,
-    sample_seq: u64,
+    /// Grant reference fixed to the first inventory that reported this sample.
+    ///
+    /// A later inventory with the same `sample_ms` keeps this value. The host
+    /// validity is `sample_ms + 2000` and does not move when the timestamp repeats.
+    pinned: Option<LeaseRequest>,
     effect: Option<SideOp>,
     /// Side rows this attempt actually published.
     issued_active: Vec<(SideOp, u64)>,
@@ -66,8 +69,7 @@ impl<C: HostClock> MailboxGuestChannel<C> {
             bytes_read: 0,
             stuck: None,
             open: [false; 7],
-            sample_ms: 0,
-            sample_seq: 0,
+            pinned: None,
             effect: None,
             issued_active: Vec::new(),
             issued_revoke: Vec::new(),
@@ -86,6 +88,18 @@ impl<C: HostClock> MailboxGuestChannel<C> {
     #[must_use]
     pub fn bytes_read(&self) -> usize {
         self.bytes_read
+    }
+
+    /// Lease request saved for the current sample. Repeated timestamps keep it.
+    #[must_use]
+    pub fn pinned_grant(&self) -> Option<LeaseRequest> {
+        self.pinned
+    }
+
+    /// Host end of the latest published grant. An ACK does not move it.
+    #[must_use]
+    pub fn host_grant_end_ms(&self) -> Option<u64> {
+        self.tracker.lease_deadline_ms()
     }
 
     fn pre(&mut self, at: super::deadline::MonoInstant) -> Result<(), CallError> {
@@ -109,6 +123,7 @@ impl<C: HostClock> MailboxGuestChannel<C> {
 
     fn map_err(&mut self, err: MailboxError) -> CallError {
         let msg: &[u8] = match err {
+            MailboxError::Deadline => return CallError::Expired,
             MailboxError::Sequence(SeqFault::Boot) => b"boot-changed",
             MailboxError::Sequence(SeqFault::TooMany) => b"poll-cap",
             MailboxError::Sequence(SeqFault::Overflow) => b"lease-overflow",
@@ -170,27 +185,36 @@ impl<C: HostClock> MailboxGuestChannel<C> {
         Ok(())
     }
 
-    fn poll_only(&mut self, op: Op) -> Result<BoundedOutput, CallError> {
+    fn poll_only(&mut self, op: Op, end: MonoInstant) -> Result<BoundedOutput, CallError> {
         if let Some(err) = self.stuck.clone() {
             return Err(err);
         }
-        let poll = match poll_guest(self.root, &mut self.layout, op, &mut self.tracker) {
-            Ok(poll) => poll,
-            Err(fail) => return Err(self.account_failed(fail)),
-        };
-        self.finish_poll(op, poll)
+        let root = self.root;
+        let poll = poll_guest_until(
+            root,
+            &mut self.layout,
+            op,
+            &mut self.tracker,
+            &self.clock,
+            end,
+        );
+        match poll {
+            Ok(poll) => self.finish_poll(op, poll),
+            Err(fail) => Err(self.account_failed(fail)),
+        }
     }
 
     fn exchange(
         &mut self,
         op: Op,
+        end: MonoInstant,
         payload: impl FnOnce(&mut Self) -> Payload,
     ) -> Result<BoundedOutput, CallError> {
         if !self.open[index(op)] {
             let payload = payload(self);
             self.publish_new(op, payload)?;
         }
-        self.poll_only(op)
+        self.poll_only(op, end)
     }
 
     fn finish_poll(&mut self, op: Op, poll: GuestPoll) -> Result<BoundedOutput, CallError> {
@@ -224,9 +248,16 @@ impl<C: HostClock> MailboxGuestChannel<C> {
         let ReplyResult::Inventory(snap) = &reply.result else {
             return Err(self.fail(b"mailbox"));
         };
-        self.sample_ms = snap.sample_ms;
-        if reply.request_seq >= 1 {
-            self.sample_seq = reply.request_seq;
+        let pinned_ms = self.pinned.map(|pin| pin.sample_ms);
+        match pinned_ms {
+            Some(ms) if snap.sample_ms == ms => {}
+            Some(ms) if snap.sample_ms < ms => return Err(self.fail(b"sample")),
+            _ => {
+                self.pinned = Some(LeaseRequest {
+                    inventory_request_seq: reply.request_seq,
+                    sample_ms: snap.sample_ms,
+                });
+            }
         }
         self.confirm(snap)?;
         self.absorb(snap)?;
@@ -409,11 +440,47 @@ impl<C: HostClock> MailboxGuestChannel<C> {
         }
     }
 
-    fn side(&mut self, op: Op, side: SideOp) -> Result<BoundedOutput, CallError> {
+    fn side(&mut self, op: Op, side: SideOp, end: MonoInstant) -> Result<BoundedOutput, CallError> {
         if !self.open[index(op)] {
             self.begin_side(side)?;
         }
-        self.exchange(op, |_| Payload::Empty)
+        self.exchange(op, end, |_| Payload::Empty)
+    }
+
+    fn active_success(&self, op: SideOp, seq: u64) -> bool {
+        if !self.issued_active(op, seq) {
+            return false;
+        }
+        let Some(row) = &self.held_active else {
+            return false;
+        };
+        if row.status != SnapStatus::Terminal || row.op != Some(op) || row.request_seq != seq {
+            return false;
+        }
+        match &row.result {
+            Some(SideResult::Bootstrap(value)) if op == SideOp::Bootstrap => {
+                value.outcome == Outcome::Ok && value.value.is_some()
+            }
+            Some(SideResult::Login(value)) if op == SideOp::Login => {
+                value.outcome == Outcome::Ok && value.value.is_some()
+            }
+            Some(SideResult::Run(value)) if op == SideOp::Run => {
+                value.outcome == Outcome::Ok && value.value.is_some()
+            }
+            _ => false,
+        }
+    }
+
+    fn revoke_success(&self, seq: u64) -> bool {
+        if !self.issued_revoke.contains(&seq) {
+            return false;
+        }
+        let Some(row) = self.held_revoke else {
+            return false;
+        };
+        row.status == SnapStatus::Terminal
+            && row.request_seq == seq
+            && matches!(row.result, Some(value) if value.outcome == Outcome::Ok && value.done)
     }
 }
 
@@ -423,32 +490,37 @@ impl<C: HostClock> GuestChannel for MailboxGuestChannel<C> {
     }
 
     fn inventory(&mut self, deadline: QueryDeadline) -> Result<BoundedOutput, CallError> {
-        self.pre(deadline.at())?;
+        let end = deadline.at();
+        self.pre(end)?;
         let queued = self.queued;
-        self.exchange(Op::Inventory, move |channel| {
+        self.exchange(Op::Inventory, end, move |channel| {
             channel.sent_consume = Some(queued);
             Payload::InventoryRequest(queued)
         })
     }
 
     fn probe(&mut self, probe: Probe, deadline: ProbeDeadline) -> Result<BoundedOutput, CallError> {
-        self.pre(deadline.at())?;
-        self.exchange(Op::Probe, move |_| Payload::ProbeRequest(probe))
+        let end = deadline.at();
+        self.pre(end)?;
+        self.exchange(Op::Probe, end, move |_| Payload::ProbeRequest(probe))
     }
 
     fn bootstrap(&mut self, deadline: StageDeadline) -> Result<BoundedOutput, CallError> {
-        self.pre(deadline.at())?;
-        self.side(Op::Bootstrap, SideOp::Bootstrap)
+        let end = deadline.at();
+        self.pre(end)?;
+        self.side(Op::Bootstrap, SideOp::Bootstrap, end)
     }
 
     fn login(&mut self, deadline: LoginDeadline) -> Result<BoundedOutput, CallError> {
-        self.pre(deadline.at())?;
-        self.side(Op::Login, SideOp::Login)
+        let end = deadline.at();
+        self.pre(end)?;
+        self.side(Op::Login, SideOp::Login, end)
     }
 
     fn run(&mut self, deadline: RunDeadline) -> Result<BoundedOutput, CallError> {
-        self.pre(deadline.at())?;
-        self.side(Op::Run, SideOp::Run)
+        let end = deadline.at();
+        self.pre(end)?;
+        self.side(Op::Run, SideOp::Run, end)
     }
 
     fn lease(
@@ -456,32 +528,26 @@ impl<C: HostClock> GuestChannel for MailboxGuestChannel<C> {
         seq: NonZeroU64,
         deadline: LeaseDeadline,
     ) -> Result<BoundedOutput, CallError> {
-        self.pre(deadline.at())?;
+        let end = deadline.at();
+        self.pre(end)?;
         let open = self.open[index(Op::Lease)];
         let outstanding = self.tracker.outstanding(Op::Lease);
         if !open || seq.get() != outstanding {
-            if self.sample_seq == 0 {
+            let Some(pin) = self.pinned else {
                 return Err(self.fail(b"lease-unsampled"));
-            }
+            };
             if seq.get() != self.next_seq(Op::Lease) {
                 return Err(self.fail(b"lease-seq"));
             }
-            let sample_ms = self.sample_ms;
-            let sample_seq = self.sample_seq;
-            self.publish_new(
-                Op::Lease,
-                Payload::LeaseRequest(LeaseRequest {
-                    inventory_request_seq: sample_seq,
-                    sample_ms,
-                }),
-            )?;
+            self.publish_new(Op::Lease, Payload::LeaseRequest(pin))?;
         }
-        self.poll_only(Op::Lease)
+        self.poll_only(Op::Lease, end)
     }
 
     fn revoke(&mut self, deadline: RevokeDeadline) -> Result<BoundedOutput, CallError> {
-        self.pre(deadline.at())?;
-        self.exchange(Op::Revoke, |_| Payload::Empty)
+        let end = deadline.at();
+        self.pre(end)?;
+        self.exchange(Op::Revoke, end, |_| Payload::Empty)
     }
 }
 
@@ -494,38 +560,45 @@ impl<C: HostClock> GuestAccounting for MailboxGuestChannel<C> {
         if let Some(err) = self.stuck.clone() {
             return Err(err);
         }
-        if note.active_seq >= 1 {
+        let active = if note.active_seq >= 1 {
             let op = match note.active_kind {
                 1 => SideOp::Bootstrap,
                 2 => SideOp::Login,
                 3 => SideOp::Run,
                 _ => return Err(self.fail(b"consume")),
             };
-            let matches = self.held_active.as_ref().is_some_and(|row| {
-                row.status == SnapStatus::Terminal
-                    && row.op == Some(op)
-                    && row.request_seq == note.active_seq
-            });
-            if !matches || !self.issued_active(op, note.active_seq) {
+            if !self.active_success(op, note.active_seq) {
                 return Err(self.fail(b"consume"));
             }
-            if !self.consumed_active(op, note.active_seq) {
-                self.consumed_active.push((op, note.active_seq));
+            Some((op, note.active_seq))
+        } else if note.active_kind != 0 {
+            return Err(self.fail(b"consume"));
+        } else {
+            None
+        };
+        let revoke = if note.revoke_seq >= 1 {
+            if !self.revoke_success(note.revoke_seq) {
+                return Err(self.fail(b"consume"));
+            }
+            Some(note.revoke_seq)
+        } else {
+            None
+        };
+        if active.is_none() && revoke.is_none() {
+            return Err(self.fail(b"consume"));
+        }
+        if let Some((op, seq)) = active {
+            if !self.consumed_active(op, seq) {
+                self.consumed_active.push((op, seq));
             }
             self.queued.op = Some(op);
-            self.queued.request_seq = note.active_seq;
+            self.queued.request_seq = seq;
         }
-        if note.revoke_seq >= 1 {
-            let matches = self.held_revoke.is_some_and(|row| {
-                row.status == SnapStatus::Terminal && row.request_seq == note.revoke_seq
-            });
-            if !matches || !self.issued_revoke.contains(&note.revoke_seq) {
-                return Err(self.fail(b"consume"));
+        if let Some(seq) = revoke {
+            if !self.consumed_revoke.contains(&seq) {
+                self.consumed_revoke.push(seq);
             }
-            if !self.consumed_revoke.contains(&note.revoke_seq) {
-                self.consumed_revoke.push(note.revoke_seq);
-            }
-            self.queued.revoke_seq = note.revoke_seq;
+            self.queued.revoke_seq = seq;
         }
         Ok(())
     }

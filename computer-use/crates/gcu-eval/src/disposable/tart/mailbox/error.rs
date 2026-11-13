@@ -27,6 +27,11 @@ pub enum MailboxError {
     /// One bounded read, including discarded rereads, passed 128 KiB.
     #[error("one mailbox read passed the byte budget")]
     PollBudget,
+    /// The shared read deadline passed before a stable frame.
+    ///
+    /// Not sticky. A later call with a later deadline may read again.
+    #[error("mailbox read reached its deadline")]
+    Deadline,
 }
 
 /// Why a directory entry was refused.
@@ -201,6 +206,9 @@ pub struct FailedRead {
     pub retry_absent: u64,
     /// Reads discarded because the object changed, including this one.
     pub retry_replaced: u64,
-    /// Bytes this read contributed. Zero when the slot yielded no frame.
+    /// Bytes read by this call, including replaced rereads and a stable frame.
+    ///
+    /// A refused read that would have passed the remaining budget contributes
+    /// nothing. Zero only when this call read no bytes.
     pub bytes: usize,
 }

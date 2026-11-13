@@ -13,18 +13,21 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use super::super::super::deadline::{FakeClock, MonoInstant};
+use super::super::super::schedule::POLL_BYTE_BUDGET;
 use super::super::ids::AttemptNonce;
 use super::super::ops::{
     MsgStatus, Op, Payload, ReplyResult, ReplyState, SideOp, SnapStatus, FRAME_MAX,
 };
 use super::super::seq::SeqTracker;
 use super::super::slots::{
-    arm, poll_guest, prepare_slots, publish, read_checked, read_slot, CheckedRead, GuestPoll,
-    HostSlot, IoPoint, SlotBody, SlotRef, GUEST_WRITE_DIR, HOST_STAGE_DIR, HOST_WRITE_DIR,
-    MAILBOX_DIR,
+    arm, poll_guest, prepare_slots, publish, read_checked, read_slot, read_slot_until, CheckedRead,
+    GuestPoll, HostSlot, IoPoint, SlotBody, SlotRef, GUEST_WRITE_DIR, HOST_STAGE_DIR,
+    HOST_WRITE_DIR, MAILBOX_DIR,
 };
 use super::super::sys;
 use super::super::{Breach, FailedRead, MailboxError, SeqFault};
@@ -271,11 +274,155 @@ fn replace_during_read_is_pending() {
     let SlotBody::Frame(bytes) = read.body else {
         panic!("replaced read: {read:?}");
     };
-    if bytes != b"replacement-object" || read.retry_replaced != 1 || read.retry_absent != 0 {
+    if bytes != b"replacement-object"
+        || read.retry_replaced != 1
+        || read.retry_absent != 0
+        || read.bytes != frame.len() + b"replacement-object".len()
+    {
         panic!(
-            "replaced read: bytes={bytes:?} retries={}",
-            read.retry_replaced
+            "replaced read: bytes={bytes:?} charged={} retries={}",
+            read.bytes, read.retry_replaced
         );
+    }
+}
+
+#[test]
+fn exact_budget_leaves_the_next_frame_unread() {
+    let root = scratch();
+    let mut layout = need(prepare_slots(root.raw()));
+    let dest = root.message(GUEST_WRITE_DIR, Op::Probe.file_name());
+    let legal = probe_terminal(1, Check::Passed);
+    write_bytes(&dest, &vec![b'a'; 4_096]);
+    let n = Rc::new(Cell::new(0u32));
+    let counter = Rc::clone(&n);
+    let hook_dest = dest.clone();
+    let legal_hook = legal.clone();
+    let dir = root.path().to_path_buf();
+    let _guard = arm(IoPoint::AfterRead, move || {
+        let i = counter.get();
+        counter.set(i.saturating_add(1));
+        let spare = dir.join(format!("edge-{i}"));
+        let bytes = if i == 31 {
+            legal_hook.clone()
+        } else {
+            let mut body = vec![b'c'; 4_096];
+            body[0] = u8::try_from(i % 200).unwrap_or(1);
+            body
+        };
+        write_bytes(&spare, &bytes);
+        if let Err(err) = fs::rename(&spare, &hook_dest) {
+            panic!("rename: {err}");
+        }
+    });
+    match read_slot(root.raw(), &mut layout, SlotRef::Guest(Op::Probe)) {
+        Err(err)
+            if err.error == MailboxError::PollBudget
+                && err.bytes == POLL_BYTE_BUDGET
+                && err.retry_replaced == 32 => {}
+        other => panic!("exact boundary: {other:?}"),
+    }
+    if n.get() != 32 {
+        panic!("reads {}", n.get());
+    }
+    match fs::read(&dest) {
+        Ok(bytes) if bytes == legal => {}
+        other => panic!("legal frame: {other:?}"),
+    }
+    match read_slot(root.raw(), &mut layout, SlotRef::Guest(Op::Probe)) {
+        Err(err) if err.error == MailboxError::Sticky && err.bytes == POLL_BYTE_BUDGET => {}
+        other => panic!("sticky boundary: {other:?}"),
+    }
+}
+
+#[test]
+fn replaced_frame_past_the_remainder_is_not_read() {
+    let root = scratch();
+    let mut layout = need(prepare_slots(root.raw()));
+    let dest = root.message(GUEST_WRITE_DIR, Op::Probe.file_name());
+    write_bytes(&dest, &vec![b'a'; 4_000]);
+    let n = Rc::new(Cell::new(0u32));
+    let counter = Rc::clone(&n);
+    let hook_dest = dest.clone();
+    let dir = root.path().to_path_buf();
+    let _guard = arm(IoPoint::AfterRead, move || {
+        let i = counter.get();
+        counter.set(i.saturating_add(1));
+        let spare = dir.join(format!("over-{i}"));
+        let mut body = vec![b'd'; 4_000];
+        body[0] = u8::try_from(i % 200).unwrap_or(1);
+        write_bytes(&spare, &body);
+        if let Err(err) = fs::rename(&spare, &hook_dest) {
+            panic!("rename: {err}");
+        }
+    });
+    let charged = 32 * 4_000;
+    match read_slot(root.raw(), &mut layout, SlotRef::Guest(Op::Probe)) {
+        Err(err)
+            if err.error == MailboxError::PollBudget
+                && err.bytes == charged
+                && err.retry_replaced == 32 => {}
+        other => panic!("over-remainder: {other:?}"),
+    }
+    if n.get() != 32 || charged >= POLL_BYTE_BUDGET {
+        panic!("hooks {} charged {charged}", n.get());
+    }
+}
+
+#[test]
+fn read_stops_at_the_shared_deadline() {
+    let root = scratch();
+    let mut layout = need(prepare_slots(root.raw()));
+    let dest = root.message(GUEST_WRITE_DIR, Op::Probe.file_name());
+    let first = vec![b'e'; 80];
+    write_bytes(&dest, &first);
+    let clock = FakeClock::new();
+    let end = MonoInstant::from_nanos(1_000_000);
+    let clock_hook = clock.clone();
+    let hook_dest = dest.clone();
+    let dir = root.path().to_path_buf();
+    let once = Cell::new(true);
+    let n = Rc::new(Cell::new(0u32));
+    let counter = Rc::clone(&n);
+    let _guard = arm(IoPoint::AfterRead, move || {
+        counter.set(counter.get().saturating_add(1));
+        if !once.replace(false) {
+            return;
+        }
+        if clock_hook.advance(Duration::from_millis(1)).is_err() {
+            panic!("advance");
+        }
+        let spare = dir.join("deadline-spare");
+        write_bytes(&spare, b"later-frame");
+        if let Err(err) = fs::rename(&spare, &hook_dest) {
+            panic!("rename: {err}");
+        }
+    });
+    match read_slot_until(
+        root.raw(),
+        &mut layout,
+        SlotRef::Guest(Op::Probe),
+        &clock,
+        end,
+    ) {
+        Err(err) if err.error == MailboxError::Deadline && err.bytes == first.len() => {}
+        other => panic!("deadline: {other:?}"),
+    }
+    if n.get() != 1 {
+        panic!("deadline reads {}", n.get());
+    }
+    let later = MonoInstant::from_nanos(2_000_000);
+    let read = need(read_slot_until(
+        root.raw(),
+        &mut layout,
+        SlotRef::Guest(Op::Probe),
+        &clock,
+        later,
+    ));
+    let SlotBody::Frame(bytes) = read.body else {
+        panic!("resumed read: {read:?}");
+    };
+    if bytes != b"later-frame" || read.bytes != b"later-frame".len() {
+        panic!("resumed bytes {} {:?}", read.bytes, bytes);
     }
 }
 
