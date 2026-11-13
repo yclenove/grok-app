@@ -91,6 +91,7 @@ pub fn execute(args: &[String]) -> Result<i32, &'static str> {
         "fill" => c9_fill(&opt),
         "hold" => hold_cmd(&opt),
         "c7ops" => c7ops_cmd(&opt),
+        "c11" => c11::run(&opt),
         _ => return Err("usage"),
     };
     Ok(code)
@@ -106,6 +107,7 @@ fn parse(args: &[String]) -> Result<Opt, &'static str> {
         "fill" => ("fill", "-", &args[1..]),
         "hold" => ("hold", "-", &args[1..]),
         "c7ops" => ("c7ops", "-", &args[1..]),
+        "c11" => ("c11", "-", &args[1..]),
         "c2" => {
             let boundary = match args.get(1).map(String::as_str).unwrap_or("") {
                 "file-sync" => "file-sync",
@@ -142,6 +144,8 @@ fn parse(args: &[String]) -> Result<Opt, &'static str> {
                 mode_flag = Some(match val.as_str() {
                     "data" => "data",
                     "small" => "small",
+                    "fd" if cmd == "c11" => "fd",
+                    "reopen" if cmd == "c11" => "reopen",
                     _ => return Err("usage"),
                 });
             }
@@ -184,6 +188,18 @@ fn parse(args: &[String]) -> Result<Opt, &'static str> {
             let mode = mode_flag.ok_or("usage")?;
             let timeout = u64::from(timeout.ok_or("usage")?);
             ("-", mode, 1, 0, timeout.saturating_mul(1000))
+        }
+        "c11" => {
+            if kind.is_some() || secs.is_some() || per_ms.is_some() {
+                return Err("usage");
+            }
+            let mode = match mode_flag {
+                Some("fd") => "fd",
+                Some("reopen") => "reopen",
+                _ => return Err("usage"),
+            };
+            let timeout = u64::from(timeout.ok_or("usage")?);
+            ("-", mode, count.ok_or("usage")?, 0, timeout.saturating_mul(1000))
         }
         _ => {
             if kind.is_some() || secs.is_some() || per_ms.is_some() {
@@ -521,6 +537,7 @@ fn bare_unknown(opt: &Opt, reason: &str) -> String {
         "c2" => c2_unknown(opt, reason, &opt.count.to_string(), "-", "-", "-", "absent"),
         "c8" => c8_line(opt.role, "unknown", reason, "0"),
         "fill" => c9_line(opt, &crate::fill::Report { bytes: 0, files: 0, batches: 0, enospc: false }),
+        "c11" => c11::unknown_line(opt, reason),
         _ => c1_unknown(opt, reason, 0, 0, "-", &Clock::new()),
     }
 }
@@ -632,6 +649,8 @@ enum Stop {
     Bad,
     Io,
 }
+#[path = "c11.rs"]
+mod c11;
 #[rustfmt::skip]
 mod c1 {
     use super::{c1_line, child_dir, decode, digest_of, field, finish, leaf, numeric, open_root, peer_role, rec_text, slot, store, unk, wait_more, C1_KEYS, Clock, Exch, Fail, Opt, ROUND_WAIT, Retry, SLOW_US, Stop};
@@ -651,6 +670,9 @@ mod c1 {
         let n = sorted.len();
         let p99 = (n >= 20).then(|| sorted[rank_of(n, 99, 100)]);
         Part { n: n as u64, min: sorted[0], p50: sorted[rank_of(n, 1, 2)], max: sorted[n - 1], p99 }
+    }
+    pub(super) fn samples_text(samples: &[u64]) -> String {
+        part_of(samples).text()
     }
     #[derive(Clone, Copy)]
     pub(super) struct Part { n: u64, min: u64, p50: u64, max: u64, p99: Option<u64> }
