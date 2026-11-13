@@ -171,6 +171,17 @@ C5 不起 VM。`--case C5 --fault F1|F2|F3|F4|F5` 在凭据写到一半时用 `k
 
 阶段 R 拒绝 `--dry-run`、`--case`、`--fault`、`--probe` 和 `--pinned-host-key`。凭据解析失败则拒绝，不做任何卸载或删除。
 
+## C8 双主体：owner 一次性准备
+
+C8 要第二个**标准（非管理员）**账号，才能测两个主体在邮箱上的 UID/权限映射。golden `macos-s2-eval` 不动；总控已从它克隆出准备副本 `macos-s2-eval-c8`，并在 Mini 的 `~/cu2-ci/s11-0/c8/` 生成了只给该账号用的 ed25519 密钥（私钥不离开 Mini）。下列步骤由 owner 完成，所有密码由 owner 输入，总控不经手：
+
+1. 在 Mini 上启动副本：`TART_HOME="/Volumes/Mini扩展/VMs/tart" tart run macos-s2-eval-c8`。
+2. 以 `eval` 登录客机，在终端执行：`sudo sysadminctl -addUser gcuprobe -fullName "GCU probe" -password -`（不加 `-admin`，即标准账号；新账号密码自定、不必告知）；建 `/Users/gcuprobe/.ssh`，把总控给出的公钥写入 `authorized_keys`，属主 `gcuprobe:staff`，目录 0700、文件 0600；如有远程登录用户限制，执行 `sudo dseditgroup -o edit -a gcuprobe -t user com.apple.access_ssh`。
+3. `dscl . -read /Groups/admin GroupMembership` 的输出里不应有 `gcuprobe`。
+4. `sudo shutdown -h now` 关机，告诉总控。
+
+之后总控以 headless 启动该副本，核对 `gcuprobe` 非管理员、能用该密钥登录，再实现并评审 C8 的双主体映射，最后按阶段 M 的规则运行（每次用一次性 clone，准备副本本身不运行实验）。
+
 ## 桩测试
 
 ```bash

@@ -369,7 +369,22 @@ C7 自主终止及所有 transport/liveness 验收移到 M7/M9，在 block-all �
 
 **推论**：(a) 运行中的 VM 共享卷时，normal detach 会被系统拒绝，所以提前拆卷只能靠 force，而 force 仍只允许在证明停机之后。(b) 被占用时 hdiutil 会自行重试约 10 s，写入后服务短暂占用也会触发（C10 的 11 s）；§2 预算表“normal detach 5s”不可行，M5 至少按 20 s 份额重定，并且不能在重试中途 kill（会留下已卸载但仍 attached 的镜像，见 M2c-a）。(c) 恢复只对 receipt 能正向对应的状态生效；“create 已成、身份未记”这类状态只能隔离，生产实现应在 create 前把预期路径与排他窗口写入账本，并在 create 返回后立即记下身份。(d) `.fseventsd` 由系统在挂载时创建且本用户不可写，`-srcfolder` 预置 marker 能否生效仍待验证；C10 只能给观察，不能给保证。
 
-**仍未测**：C8 真正的双主体映射（需 owner 在准备副本中另建非管理员账号，S11e 本来也需要）、`-srcfolder` 预置 marker 与内部挂载 gate、block-all 下的自主运行与存活（M7/M9）。
+### 预置 marker 与内部挂载实测（2026-11-13）
+
+同一台 Mac mini，一次性 64 MiB 临时镜像，不起 VM，用完即删。
+
+| 实验 | 结果（只记事实） |
+| --- | --- |
+| §2 候选 argv `create … -type SPARSE … -srcfolder S I` | 被拒：`-type cannot be specified with -srcfolder or -srcdevice`。改用 `-format UDSP`（稀疏）可用，镜像大小与普通 create 相同（7,344,128 字节） |
+| `-srcfolder` 的内部挂载 | create 期间卷被挂到 **`/Volumes/GCU-MAILBOX`**（hfs、nodev、nosuid、nobrowse，**无 noexec**），由当前用户挂载，系统全局可见、路径由卷名决定 |
+| 普通 create（现用配方，无 `-srcfolder`） | 3 次均未出现任何挂载；只有短暂的设备 attach 用于格式化 |
+| 预置 `.fseventsd/no_log` | 卷上 `.fseventsd` 保持为当前用户所有、0700；受控挂载后写 4 个文件、等 20 s，目录里仍只有 `no_log`（未生成事件日志）。不预置时系统在首次挂载时以 root、0700 创建 `.fseventsd`，本用户无法再放 `no_log` |
+| 预置 `.metadata_never_index` | `mdutil -s` 为 Indexing and searching disabled（不预置、挂载后再写时为 Indexing disabled）；`mdfind -onlyin` 命中 0 |
+| 种子树 | 目录/文件的属主与权限按 `S` 原样保留（`owners` 开启） |
+
+**推论与建议**：`-srcfolder` 能让两个 marker 在首次受控挂载前就生效，但代价是一次全局可见、无 noexec 的内部挂载；依 §2“必须限制所有内部挂载而此配方做不到就拒绝配方”，**建议保留普通 create**：不出现内部挂载；受控 attach 后写 `.metadata_never_index`（实测不被索引）；系统创建的 `.fseventsd` 日志只在一次性卷上、随镜像删除，记录的只是固定槽位名。最终由 M6 定。
+
+**仍未测**：C8 真正的双主体映射（准备副本 `macos-s2-eval-c8` 已克隆，等 owner 建标准账号，步骤见 runbook）、block-all 下的自主运行与存活（M7/M9）。
 
 ## 6. 残余风险、not_run 与分步交付
 
