@@ -10,12 +10,11 @@ use std::time::Duration;
 
 use super::super::Probe;
 use super::deadline::{
-    FakeClock, HostClock, LeaseDeadline, LoginDeadline, MonoInstant, ProbeDeadline, QueryDeadline,
-    RevokeDeadline, RunDeadline, StageDeadline,
+    charge_quantum, FakeClock, HostClock, LeaseDeadline, LoginDeadline, MonoInstant, ProbeDeadline,
+    QueryDeadline, RevokeDeadline, RunDeadline, StageDeadline,
 };
-use super::output::{
-    dispatch_script, script_outcome, BoundedOutput, CallError, ScriptedReply, TraceEntry,
-};
+use super::mailbox::{encode_reply, MailboxReply, Op, ReplyResult, ReplyState};
+use super::output::{script_outcome, BoundedOutput, CallError, ScriptedReply, TraceEntry};
 
 /// The only guest operation version this interface speaks.
 ///
@@ -119,12 +118,29 @@ pub trait GuestAccounting {
 }
 
 /// Fake channel. It records operations and does not bind a transport.
+enum Piece {
+    State(ReplyState),
+    Reply(ScriptedReply),
+}
+
+struct OpenSlot {
+    command: GuestCommand,
+    deadline: MonoInstant,
+    remaining: Duration,
+    seq: u64,
+    traced: bool,
+}
+
+/// Scripted guest channel. Replies are queued. Nothing here opens a transport.
 pub struct FakeGuestChannel {
     clock: FakeClock,
-    script: VecDeque<ScriptedReply>,
+    script: VecDeque<Piece>,
     trace: Vec<TraceEntry<GuestCommand>>,
-    io_cost: Option<Duration>,
+    io_cost: Duration,
     envelope: Option<String>,
+    open: Option<OpenSlot>,
+    next_seq: u64,
+    consumes: u64,
 }
 
 impl FakeGuestChannel {
@@ -135,8 +151,11 @@ impl FakeGuestChannel {
             clock,
             script: VecDeque::new(),
             trace: Vec::new(),
-            io_cost: None,
+            io_cost: Duration::ZERO,
             envelope: None,
+            open: None,
+            next_seq: 1,
+            consumes: 0,
         }
     }
 
@@ -145,17 +164,28 @@ impl FakeGuestChannel {
         self.envelope = Some(boot.into());
     }
 
-    /// Charge `cost` on the next calls that fit in their deadline.
+    /// Charge `cost` before each scripted piece of the open command.
     ///
-    /// A cost that would pass the deadline returns [`CallError::Expired`]
-    /// without moving the clock and without taking a script. Does not sleep.
+    /// Cost left after one poll is paid by the next poll of the same command.
+    /// Does not sleep. Zero keeps the one-shot path.
     pub fn set_io_cost(&mut self, cost: Duration) {
-        self.io_cost = Some(cost);
+        self.io_cost = cost;
+    }
+
+    /// How many times [`GuestAccounting::note_consumed`] ran.
+    #[must_use]
+    pub fn consume_count(&self) -> u64 {
+        self.consumes
+    }
+
+    /// Queue a normalized pending or accepted observation. It is not a trace row.
+    pub fn push_state(&mut self, state: ReplyState) {
+        self.script.push_back(Piece::State(state));
     }
 
     /// Queue one reply.
     pub fn push(&mut self, reply: ScriptedReply) {
-        self.script.push_back(reply);
+        self.script.push_back(Piece::Reply(reply));
     }
 
     /// Recorded operations, in call order.
@@ -164,15 +194,20 @@ impl FakeGuestChannel {
         &self.trace
     }
 
-    fn record(
+    fn exchange(
         &mut self,
         command: GuestCommand,
         deadline: MonoInstant,
     ) -> Result<BoundedOutput, CallError> {
-        if let Some(cost) = self.io_cost.filter(|cost| !cost.is_zero()) {
-            let now = self.clock.now();
-            let fits = now < deadline && now.checked_add(cost).is_ok_and(|next| next <= deadline);
-            if !fits {
+        let same = self
+            .open
+            .as_ref()
+            .is_some_and(|slot| slot.command == command);
+        if !same {
+            // A new operation abandons the open slot. Cleanup must be able to
+            // revoke after a guest call that already returned pending.
+            self.open = None;
+            if self.clock.now() >= deadline {
                 let result = Err(CallError::Expired);
                 self.trace.push(TraceEntry {
                     command,
@@ -181,24 +216,119 @@ impl FakeGuestChannel {
                 });
                 return result;
             }
-            let result = dispatch_script(&mut self.script, now, deadline);
-            self.trace.push(TraceEntry {
-                command,
+            let seq = self.next_seq;
+            self.next_seq = self.next_seq.saturating_add(1);
+            self.open = Some(OpenSlot {
+                command: command.clone(),
                 deadline,
-                outcome: script_outcome(&result),
+                remaining: self.io_cost,
+                seq,
+                traced: false,
             });
-            if result.is_ok() {
-                let _ = self.clock.advance(cost);
-            }
-            return result;
         }
-        let result = dispatch_script(&mut self.script, self.clock.now(), deadline);
-        self.trace.push(TraceEntry {
-            command,
-            deadline,
-            outcome: script_outcome(&result),
-        });
-        result
+        let (deadline, seq, remaining) = {
+            let slot = self.open.as_mut().ok_or(CallError::ScriptExhausted)?;
+            if !slot.remaining.is_zero() {
+                let paid = charge_quantum(&self.clock, slot.remaining, slot.deadline);
+                slot.remaining = slot.remaining.saturating_sub(paid);
+            }
+            (slot.deadline, slot.seq, slot.remaining)
+        };
+        if !remaining.is_zero() {
+            if self.clock.now() >= deadline {
+                return self.fail_open(CallError::TimedOut);
+            }
+            return pending_body(op_of(&command), seq);
+        }
+        if self.clock.now() >= deadline {
+            return self.fail_open(CallError::TimedOut);
+        }
+        let piece = self.script.pop_front();
+        match piece {
+            Some(Piece::State(ReplyState::Pending)) => {
+                if let Some(slot) = self.open.as_mut() {
+                    slot.remaining = self.io_cost;
+                }
+                pending_body(op_of(&command), seq)
+            }
+            Some(Piece::State(ReplyState::Accepted)) => {
+                if let Some(slot) = self.open.as_mut() {
+                    slot.remaining = self.io_cost;
+                }
+                accepted_body(op_of(&command), seq)
+            }
+            Some(Piece::State(ReplyState::Terminal)) | None => {
+                self.fail_open(CallError::ScriptExhausted)
+            }
+            Some(Piece::Reply(reply)) => {
+                let result = reply.into_result();
+                let outcome = script_outcome(&result);
+                if let Some(slot) = self.open.as_mut() {
+                    slot.traced = true;
+                }
+                let command = self
+                    .open
+                    .as_ref()
+                    .map(|slot| slot.command.clone())
+                    .unwrap_or(command);
+                self.trace.push(TraceEntry {
+                    command,
+                    deadline,
+                    outcome,
+                });
+                self.open = None;
+                result
+            }
+        }
+    }
+
+    fn fail_open(&mut self, err: CallError) -> Result<BoundedOutput, CallError> {
+        if let Some(slot) = self.open.take() {
+            if !slot.traced {
+                self.trace.push(TraceEntry {
+                    command: slot.command,
+                    deadline: slot.deadline,
+                    outcome: script_outcome(&Err(err.clone())),
+                });
+            }
+        }
+        Err(err)
+    }
+}
+
+fn op_of(command: &GuestCommand) -> Op {
+    match command {
+        GuestCommand::Inventory => Op::Inventory,
+        GuestCommand::Probe(_) => Op::Probe,
+        GuestCommand::Bootstrap => Op::Bootstrap,
+        GuestCommand::Login => Op::Login,
+        GuestCommand::Run => Op::Run,
+        GuestCommand::Lease { .. } => Op::Lease,
+        GuestCommand::Revoke => Op::Revoke,
+    }
+}
+
+fn pending_body(op: Op, seq: u64) -> Result<BoundedOutput, CallError> {
+    encode_reply(&MailboxReply::pending(op, seq)).map_err(|_| CallError::Malformed(empty_body()))
+}
+
+fn accepted_body(op: Op, seq: u64) -> Result<BoundedOutput, CallError> {
+    let reply = MailboxReply {
+        state: ReplyState::Accepted,
+        op,
+        request_seq: seq,
+        result: ReplyResult::Empty,
+    };
+    encode_reply(&reply).map_err(|_| CallError::Malformed(empty_body()))
+}
+
+fn empty_body() -> BoundedOutput {
+    match BoundedOutput::try_new(Vec::new()) {
+        Ok(body) => body,
+        Err(_) => match BoundedOutput::try_new(vec![b'x']) {
+            Ok(body) => body,
+            Err(_) => empty_body(),
+        },
     }
 }
 
@@ -208,23 +338,23 @@ impl GuestChannel for FakeGuestChannel {
     }
 
     fn inventory(&mut self, deadline: QueryDeadline) -> Result<BoundedOutput, CallError> {
-        self.record(GuestCommand::Inventory, deadline.at())
+        self.exchange(GuestCommand::Inventory, deadline.at())
     }
 
     fn probe(&mut self, probe: Probe, deadline: ProbeDeadline) -> Result<BoundedOutput, CallError> {
-        self.record(GuestCommand::Probe(probe), deadline.at())
+        self.exchange(GuestCommand::Probe(probe), deadline.at())
     }
 
     fn bootstrap(&mut self, deadline: StageDeadline) -> Result<BoundedOutput, CallError> {
-        self.record(GuestCommand::Bootstrap, deadline.at())
+        self.exchange(GuestCommand::Bootstrap, deadline.at())
     }
 
     fn login(&mut self, deadline: LoginDeadline) -> Result<BoundedOutput, CallError> {
-        self.record(GuestCommand::Login, deadline.at())
+        self.exchange(GuestCommand::Login, deadline.at())
     }
 
     fn run(&mut self, deadline: RunDeadline) -> Result<BoundedOutput, CallError> {
-        self.record(GuestCommand::Run, deadline.at())
+        self.exchange(GuestCommand::Run, deadline.at())
     }
 
     fn lease(
@@ -232,11 +362,11 @@ impl GuestChannel for FakeGuestChannel {
         seq: NonZeroU64,
         deadline: LeaseDeadline,
     ) -> Result<BoundedOutput, CallError> {
-        self.record(GuestCommand::Lease { seq }, deadline.at())
+        self.exchange(GuestCommand::Lease { seq }, deadline.at())
     }
 
     fn revoke(&mut self, deadline: RevokeDeadline) -> Result<BoundedOutput, CallError> {
-        self.record(GuestCommand::Revoke, deadline.at())
+        self.exchange(GuestCommand::Revoke, deadline.at())
     }
 }
 
@@ -253,5 +383,11 @@ impl fmt::Debug for FakeGuestChannel {
 impl GuestAccounting for FakeGuestChannel {
     fn envelope_boot(&self) -> Option<String> {
         self.envelope.clone()
+    }
+
+    fn note_consumed(&mut self, note: ConsumeNote) -> Result<(), CallError> {
+        let _ = note;
+        self.consumes = self.consumes.saturating_add(1);
+        Ok(())
     }
 }

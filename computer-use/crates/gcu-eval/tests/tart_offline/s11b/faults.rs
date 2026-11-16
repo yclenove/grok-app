@@ -1,7 +1,7 @@
 //! Fault table and evidence prefixes. Fake clock only.
 
 use gcu_eval::disposable::tart::{
-    AttemptLedger, AttemptOutcome, AttemptReceipt, GroupDeadline, GuestCommand, HostClock,
+    AttemptOutcome, AttemptReceipt, CompletedStep, GroupDeadline, GuestCommand, HostClock,
     LedgerFact, NotRunReason, Phase, PhaseBudgets, RevokeDeadline, RuntimeLoss, SealDeadline,
     StartDeadline, StepError, TartCommand, TaskScore,
 };
@@ -9,7 +9,7 @@ use gcu_eval::disposable::{CleanupDisposition, Probe};
 
 use super::harness::{
     self, assert_ids, cleanup_deadlines, drive_to, finish, guest_commands, id_clone, ok_body,
-    push_guest, push_isolate, query, run_count, runner_commands, scripts_to_reach, start_ids,
+    push_guest, push_isolate, query, run_count, runner_commands, scripts_to_reach, start_ids, Pump,
     CLONE, RUN,
 };
 
@@ -272,14 +272,17 @@ fn success_trace_keeps_pass_and_rejects_later_events() -> Result<(), String> {
         gcu_eval::disposable::tart::RunDeadline::CAP,
     )
     .unwrap();
-    if !matches!(attempt.run(run), Err(StepError::Terminal))
-        || !matches!(attempt.cancel(query(&io.clock)), Err(StepError::Terminal))
+    if !matches!(attempt.run_wait(run), Err(StepError::Terminal))
         || !matches!(
-            attempt.seal(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap()),
+            attempt.cancel_wait(query(&io.clock)),
             Err(StepError::Terminal)
         )
         || !matches!(
-            attempt.destroy(&cleanup_deadlines(&io.clock)),
+            attempt.seal_wait(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap()),
+            Err(StepError::Terminal)
+        )
+        || !matches!(
+            attempt.destroy_wait(&cleanup_deadlines(&io.clock)),
             Err(StepError::Terminal)
         )
     {
@@ -297,7 +300,7 @@ fn unexpected_start_from_idle_does_not_clone() -> Result<(), String> {
     let mut attempt = world.attempt();
     let deadline = StartDeadline::after(io.clock.now(), StartDeadline::CAP).unwrap();
     if !matches!(
-        attempt.start(&harness::flags(), deadline),
+        attempt.start_wait(&harness::flags(), deadline),
         Err(StepError::Unexpected)
     ) {
         return Err("start was accepted".into());
@@ -319,7 +322,7 @@ fn second_run_stays_not_run_after_seal() -> Result<(), String> {
         gcu_eval::disposable::tart::RunDeadline::CAP,
     )
     .unwrap();
-    if attempt.run(deadline).is_ok() || run_count(&io) != 1 {
+    if attempt.run_wait(deadline).is_ok() || run_count(&io) != 1 {
         return Err(format!("runs {}", run_count(&io)));
     }
     let receipt = finish(&mut attempt, &io, true)?;
@@ -335,11 +338,11 @@ fn second_revoke_does_not_send_again() -> Result<(), String> {
     drive_to(&mut attempt, &io, Phase::Running)?;
     let deadline = RevokeDeadline::after(io.clock.now(), RevokeDeadline::CAP).unwrap();
     attempt
-        .revoke(deadline)
+        .revoke_wait(deadline)
         .map_err(|err| format!("revoke: {err:?}"))?;
     let again = RevokeDeadline::after(io.clock.now(), RevokeDeadline::CAP).unwrap();
     attempt
-        .revoke(again)
+        .revoke_wait(again)
         .map_err(|err| format!("second: {err:?}"))?;
     let revokes = guest_commands(&io)
         .iter()
@@ -363,7 +366,7 @@ fn failed_probe_is_not_run_without_a_client() -> Result<(), String> {
     let mut attempt = world.attempt();
     drive_to(&mut attempt, &io, Phase::Booting)?;
     let deadline = GroupDeadline::after(io.clock.now(), GroupDeadline::CAP).unwrap();
-    if !matches!(attempt.isolate(deadline), Err(StepError::Breach)) {
+    if !matches!(attempt.isolate_wait(deadline), Err(StepError::Breach)) {
         return Err("probe failure was not a breach".into());
     }
     let receipt = finish(&mut attempt, &io, true)?;
@@ -389,7 +392,7 @@ fn unknown_probes_block_ready_without_a_client() -> Result<(), String> {
     drive_to(&mut attempt, &io, Phase::Booting)?;
     let deadline = GroupDeadline::after(io.clock.now(), GroupDeadline::CAP).unwrap();
     attempt
-        .isolate(deadline)
+        .isolate_wait(deadline)
         .map_err(|err| format!("isolate: {err:?}"))?;
     let stage = gcu_eval::disposable::tart::StageDeadline::after(
         io.clock.now(),
@@ -397,7 +400,7 @@ fn unknown_probes_block_ready_without_a_client() -> Result<(), String> {
     )
     .unwrap();
     attempt
-        .bootstrap(stage)
+        .bootstrap_wait(stage)
         .map_err(|err| format!("bootstrap: {err:?}"))?;
     let login = gcu_eval::disposable::tart::LoginDeadline::after(
         io.clock.now(),
@@ -405,10 +408,10 @@ fn unknown_probes_block_ready_without_a_client() -> Result<(), String> {
     )
     .unwrap();
     attempt
-        .login(login)
+        .login_wait(login)
         .map_err(|err| format!("login: {err:?}"))?;
     if !matches!(
-        attempt.ready(query(&io.clock)),
+        attempt.ready_wait(query(&io.clock)),
         Err(StepError::MalformedBody)
     ) {
         return Err("unknown probes became ready".into());
@@ -430,7 +433,7 @@ fn foreign_ack_is_missing_proof() -> Result<(), String> {
         gcu_eval::disposable::tart::StageDeadline::CAP,
     )
     .unwrap();
-    if attempt.bootstrap(deadline).is_ok() {
+    if attempt.bootstrap_wait(deadline).is_ok() {
         return Err("foreign ack accepted".into());
     }
     expect_not_run(
@@ -453,7 +456,7 @@ fn missing_login_is_missing_proof() -> Result<(), String> {
         gcu_eval::disposable::tart::LoginDeadline::CAP,
     )
     .unwrap();
-    if attempt.login(deadline).is_ok() {
+    if attempt.login_wait(deadline).is_ok() {
         return Err("missing login accepted".into());
     }
     expect_not_run(
@@ -474,7 +477,7 @@ fn boot_change_is_not_adopted() -> Result<(), String> {
     );
     let mut attempt = world.attempt();
     drive_to(&mut attempt, &io, Phase::CredentialReady)?;
-    if !matches!(attempt.ready(query(&io.clock)), Err(StepError::Breach)) {
+    if !matches!(attempt.ready_wait(query(&io.clock)), Err(StepError::Breach)) {
         return Err("boot change was adopted".into());
     }
     let receipt = finish(&mut attempt, &io, true)?;
@@ -505,8 +508,8 @@ fn loss_after_run(
 
 fn provider_crash_stays_not_run_after_cleanup() -> Result<(), String> {
     loss_after_run(
-        |attempt, io| match attempt.note_provider_crash(query(&io.clock)) {
-            Err(StepError::Lost(NotRunReason::ProviderCrash)) => Ok(()),
+        |attempt, io| match attempt.provider_wait(query(&io.clock)) {
+            Ok(CompletedStep::ProviderCrashNoted) => Ok(()),
             other => Err(format!("{other:?}")),
         },
         NotRunReason::ProviderCrash,
@@ -515,8 +518,8 @@ fn provider_crash_stays_not_run_after_cleanup() -> Result<(), String> {
 
 fn guest_crash_does_not_restart() -> Result<(), String> {
     loss_after_run(
-        |attempt, io| match attempt.note_runtime_loss(RuntimeLoss::GuestCrash, query(&io.clock)) {
-            Err(StepError::Lost(NotRunReason::GuestCrash)) => Ok(()),
+        |attempt, io| match attempt.runtime_wait(RuntimeLoss::GuestCrash, query(&io.clock)) {
+            Ok(CompletedStep::RuntimeLossNoted) => Ok(()),
             other => Err(format!("{other:?}")),
         },
         NotRunReason::GuestCrash,
@@ -525,8 +528,8 @@ fn guest_crash_does_not_restart() -> Result<(), String> {
 
 fn tart_exit_does_not_restart() -> Result<(), String> {
     loss_after_run(
-        |attempt, io| match attempt.note_runtime_loss(RuntimeLoss::TartExited, query(&io.clock)) {
-            Err(StepError::Lost(NotRunReason::TartExited)) => Ok(()),
+        |attempt, io| match attempt.runtime_wait(RuntimeLoss::TartExited, query(&io.clock)) {
+            Ok(CompletedStep::RuntimeLossNoted) => Ok(()),
             other => Err(format!("{other:?}")),
         },
         NotRunReason::TartExited,
@@ -535,9 +538,8 @@ fn tart_exit_does_not_restart() -> Result<(), String> {
 
 fn softnet_exit_does_not_restart() -> Result<(), String> {
     loss_after_run(
-        |attempt, io| match attempt.note_runtime_loss(RuntimeLoss::SoftnetExited, query(&io.clock))
-        {
-            Err(StepError::Lost(NotRunReason::SoftnetExited)) => Ok(()),
+        |attempt, io| match attempt.runtime_wait(RuntimeLoss::SoftnetExited, query(&io.clock)) {
+            Ok(CompletedStep::RuntimeLossNoted) => Ok(()),
             other => Err(format!("{other:?}")),
         },
         NotRunReason::SoftnetExited,

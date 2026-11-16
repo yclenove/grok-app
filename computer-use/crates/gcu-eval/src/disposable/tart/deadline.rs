@@ -36,6 +36,20 @@ impl MonoInstant {
             None => Err(DeadlineError::Overflow),
         }
     }
+
+    pub(super) fn checked_sub(self, limit: Duration) -> Result<Self, DeadlineError> {
+        let nanos = u64::try_from(limit.as_nanos()).map_err(|_| DeadlineError::Overflow)?;
+        match self.nanos.checked_sub(nanos) {
+            Some(diff) => Ok(Self { nanos: diff }),
+            None => Err(DeadlineError::Overflow),
+        }
+    }
+
+    /// Time from `earlier` to `self`. Zero when `self` is not later.
+    #[must_use]
+    pub fn saturating_duration_since(self, earlier: Self) -> Duration {
+        Duration::from_nanos(self.nanos.saturating_sub(earlier.nanos))
+    }
 }
 
 /// Why a deadline could not be built.
@@ -188,6 +202,19 @@ pub trait HostClock {
     /// Successive calls on the same clock are non-decreasing. This does not
     /// read the wall clock and it does not wait.
     fn now(&self) -> MonoInstant;
+
+    /// Optional slice cap for the next fake charge.
+    ///
+    /// `None` means the call's own deadline is the only cap. The machine sets
+    /// this to the time left in the current 100ms step. A real clock ignores it.
+    fn charge_room(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Replace the slice cap. `None` clears it. Does not move the clock.
+    fn set_charge_room(&self, room: Option<Duration>) {
+        let _ = room;
+    }
 }
 
 /// In-memory monotonic clock. Cloning shares the same instant.
@@ -197,6 +224,7 @@ pub trait HostClock {
 #[derive(Debug, Clone)]
 pub struct FakeClock {
     nanos: Rc<Cell<u64>>,
+    room: Rc<Cell<Option<u64>>>,
 }
 
 impl FakeClock {
@@ -205,6 +233,7 @@ impl FakeClock {
     pub fn new() -> Self {
         Self {
             nanos: Rc::new(Cell::new(0)),
+            room: Rc::new(Cell::new(None)),
         }
     }
 
@@ -236,6 +265,42 @@ impl Default for FakeClock {
 impl HostClock for FakeClock {
     fn now(&self) -> MonoInstant {
         MonoInstant::from_nanos(self.nanos.get())
+    }
+
+    fn charge_room(&self) -> Option<Duration> {
+        self.room.get().map(Duration::from_nanos)
+    }
+
+    fn set_charge_room(&self, room: Option<Duration>) {
+        let stored = match room {
+            Some(limit) => u64::try_from(limit.as_nanos()).ok(),
+            None => None,
+        };
+        self.room.set(stored);
+    }
+}
+
+/// Charge at most `want`, the slice room, and the time left until `deadline`.
+///
+/// Does not sleep. A zero result means this call made no progress. The clock
+/// does not pass `deadline`.
+pub(super) fn charge_quantum(clock: &FakeClock, want: Duration, deadline: MonoInstant) -> Duration {
+    if want.is_zero() {
+        return Duration::ZERO;
+    }
+    let now = clock.now();
+    if now >= deadline {
+        return Duration::ZERO;
+    }
+    let until = deadline.saturating_duration_since(now);
+    let cap = clock.charge_room().unwrap_or(want);
+    let quantum = want.min(cap).min(until);
+    if quantum.is_zero() {
+        return Duration::ZERO;
+    }
+    match clock.advance(quantum) {
+        Ok(()) => quantum,
+        Err(_) => Duration::ZERO,
     }
 }
 

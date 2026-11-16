@@ -4,14 +4,15 @@
 //! uses a new id.
 
 use gcu_eval::disposable::tart::{
-    AttemptDeadline, AttemptOutcome, AttemptReceipt, CloneDeadline, GroupDeadline, HostClock,
-    LedgerFault, LoginDeadline, NotRunReason, Phase, RevokeDeadline, RunDeadline, ScriptedReply,
-    SealDeadline, StageDeadline, StartDeadline, StepError,
+    AttemptDeadline, AttemptOutcome, AttemptReceipt, CloneDeadline, CompletedStep, GroupDeadline,
+    HostClock, LedgerFault, LoginDeadline, NotRunReason, Phase, RevokeDeadline, RunDeadline,
+    ScriptedReply, SealDeadline, StageDeadline, StartDeadline, StepError,
 };
 
 use super::harness::{
     self, assert_ids, cleanup_deadlines, drive_to, fail_body, finish, push_runner, query,
-    reserve_named, run_count, runner_commands, scripts_to_reach, start_ids, CLONE, CLONE_2, RUN_2,
+    reserve_named, run_count, runner_commands, scripts_to_reach, start_ids, Pump, CLONE, CLONE_2,
+    RUN_2,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -272,8 +273,8 @@ fn apply(
     inject: Inject,
 ) -> Result<AttemptReceipt, String> {
     if matches!(inject, Inject::Cancel) && !matches!(step, Step::Destroy | Step::Seal) {
-        match attempt.cancel(query(&io.clock)) {
-            Err(StepError::Lost(NotRunReason::Cancelled)) => {}
+        match attempt.cancel_wait(query(&io.clock)) {
+            Ok(CompletedStep::Cancelled) => {}
             other => return Err(format!("cancel: {other:?}")),
         }
         return if matches!(step, Step::Reserve) {
@@ -286,7 +287,7 @@ fn apply(
         Step::Reserve => {
             let err = reserve_named(
                 attempt,
-                &io.clock,
+                io,
                 harness::RUN,
                 CLONE,
                 AttemptDeadline::after(io.clock.now(), AttemptDeadline::CAP).unwrap(),
@@ -301,7 +302,7 @@ fn apply(
         }
         Step::Clone => {
             let deadline = CloneDeadline::after(io.clock.now(), CloneDeadline::CAP).unwrap();
-            expect_err(attempt.clone_vm(
+            expect_err(attempt.clone_wait(
                 gcu_eval::disposable::tart::GoldenImage::MacosS2Eval,
                 deadline,
             ))?;
@@ -309,45 +310,45 @@ fn apply(
         }
         Step::Start => {
             let deadline = StartDeadline::after(io.clock.now(), StartDeadline::CAP).unwrap();
-            expect_err(attempt.start(&harness::flags(), deadline))?;
+            expect_err(attempt.start_wait(&harness::flags(), deadline))?;
             finish(attempt, io, true)
         }
         Step::Isolate => {
             let deadline = GroupDeadline::after(io.clock.now(), GroupDeadline::CAP).unwrap();
-            expect_err(attempt.isolate(deadline))?;
+            expect_err(attempt.isolate_wait(deadline))?;
             finish(attempt, io, true)
         }
         Step::Bootstrap => {
             let deadline = StageDeadline::after(io.clock.now(), StageDeadline::CAP).unwrap();
-            expect_err(attempt.bootstrap(deadline))?;
+            expect_err(attempt.bootstrap_wait(deadline))?;
             finish(attempt, io, true)
         }
         Step::Login => {
             let deadline = LoginDeadline::after(io.clock.now(), LoginDeadline::CAP).unwrap();
-            expect_err(attempt.login(deadline))?;
+            expect_err(attempt.login_wait(deadline))?;
             finish(attempt, io, true)
         }
         Step::Ready => {
-            expect_err(attempt.ready(query(&io.clock)))?;
+            expect_err(attempt.ready_wait(query(&io.clock)))?;
             finish(attempt, io, true)
         }
         Step::Run => {
             let deadline = RunDeadline::after(io.clock.now(), RunDeadline::CAP).unwrap();
-            expect_err(attempt.run(deadline))?;
+            expect_err(attempt.run_wait(deadline))?;
             finish(attempt, io, true)
         }
         Step::Revoke => {
             let deadline = RevokeDeadline::after(io.clock.now(), RevokeDeadline::CAP).unwrap();
-            expect_err(attempt.revoke(deadline))?;
+            expect_err(attempt.revoke_wait(deadline))?;
             finish(attempt, io, true)
         }
         Step::Destroy => {
             if matches!(inject, Inject::Cancel) {
                 let deadlines = cleanup_deadlines(&io.clock);
-                harness::advance(&io.clock, gcu_eval::disposable::tart::QueryDeadline::CAP)?;
-                expect_err(attempt.destroy(&deadlines))?;
+                harness::advance_live(attempt, io, gcu_eval::disposable::tart::QueryDeadline::CAP)?;
+                expect_err(attempt.destroy_wait(&deadlines))?;
             } else {
-                expect_err(attempt.destroy(&cleanup_deadlines(&io.clock)))?;
+                expect_err(attempt.destroy_wait(&cleanup_deadlines(&io.clock)))?;
             }
             just_seal(attempt, io)
         }
@@ -368,7 +369,7 @@ fn just_seal(
 ) -> Result<AttemptReceipt, String> {
     let deadline = SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap();
     attempt
-        .seal(deadline)
+        .seal_wait(deadline)
         .map_err(|err| format!("seal: {err:?}"))
 }
 
@@ -378,15 +379,15 @@ fn seal_fault(
     inject: Inject,
 ) -> Result<AttemptReceipt, String> {
     if matches!(inject, Inject::Cancel) {
-        match attempt.cancel(query(&io.clock)) {
-            Err(StepError::Lost(NotRunReason::Cancelled)) => {}
+        match attempt.cancel_wait(query(&io.clock)) {
+            Ok(CompletedStep::Cancelled) => {}
             other => return Err(format!("seal cancel: {other:?}")),
         }
         return just_seal(attempt, io);
     }
     io.ledger.borrow_mut().push_fault(ledger_fault(inject));
     let deadline = SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap();
-    if attempt.seal(deadline).is_ok() {
+    if attempt.seal_wait(deadline).is_ok() {
         return Err("seal fault succeeded".into());
     }
     attempt
@@ -413,7 +414,7 @@ fn follow_up(
         push_runner(io, harness::ok_body("ok"));
         reserve_named(
             &mut attempt,
-            &io.clock,
+            io,
             RUN_2,
             CLONE_2,
             absolute,
@@ -424,14 +425,14 @@ fn follow_up(
         .map_err(|err| format!("new reserve: {err:?}"))?;
         let deadline = CloneDeadline::after(io.clock.now(), CloneDeadline::CAP).unwrap();
         attempt
-            .clone_vm(
+            .clone_wait(
                 gcu_eval::disposable::tart::GoldenImage::MacosS2Eval,
                 deadline,
             )
             .map_err(|err| format!("new clone: {err:?}"))?;
         let deadline = StartDeadline::after(io.clock.now(), StartDeadline::CAP).unwrap();
         attempt
-            .start(&harness::flags(), deadline)
+            .start_wait(&harness::flags(), deadline)
             .map_err(|err| format!("new start: {err:?}"))?;
         let starts = start_ids(io);
         if starts.iter().filter(|id| id.as_str() == CLONE).count() != old_starts.len() {
@@ -445,7 +446,7 @@ fn follow_up(
     } else {
         let err = reserve_named(
             &mut attempt,
-            &io.clock,
+            io,
             RUN_2,
             CLONE_2,
             absolute,

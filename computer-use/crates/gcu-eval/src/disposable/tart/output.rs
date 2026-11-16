@@ -159,7 +159,7 @@ impl ScriptedReply {
         Self::Overlong
     }
 
-    fn into_result(self) -> Result<BoundedOutput, CallError> {
+    pub(super) fn into_result(self) -> Result<BoundedOutput, CallError> {
         match self {
             Self::Success(body) => Ok(body),
             Self::Failed(body) => Err(CallError::Failed(body)),

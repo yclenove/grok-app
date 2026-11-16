@@ -1,20 +1,23 @@
 //! Caller-driven attempt machine (ADR 0018 §2).
 //!
-//! Each method is one synchronous step. The caller holds the runner, the guest
-//! channel, the ledger, and the lock. Drop does not stop, delete, or seal.
-//! There is no worker, no shared owner, and no asynchronous task.
+//! Each public entry or [`Attempt::poll`] is one 100ms step. The caller holds
+//! the runner, the guest channel, the ledger, the lock, and the owner source.
+//! Drop does not stop, delete, or seal. There is no worker, no observer, and
+//! no automatic renew.
 //!
 //! An already-due deadline fails before dispatch. That is not cancellation of
 //! work the fake has already started. Runner, guest, and ledger calls go
-//! through one dispatch: the earlier of the caller deadline, that call's phase
-//! budget, the attempt absolute deadline, and the aggregate that encloses the
-//! phase. Prep encloses reserve through ready and starts at the reserve entry,
-//! including the reads before reserve returns. Run and the owner lease are not
-//! shortened by a finished prep. Cleanup encloses revoke, destroy, and seal.
-//! Recovery uses only the new call's deadlines.
+//! through one clip: the earlier of the first caller, that call's phase budget,
+//! the attempt absolute deadline, and the aggregate that encloses the phase.
+//! Prep encloses reserve through ready and starts at the reserve entry.
+//! Run and the owner lease are not shortened by a finished prep. Cleanup
+//! encloses revoke, destroy, and seal. Recovery uses only the new call's
+//! deadlines.
 
 mod cleanup;
+mod drive;
 mod io;
+mod progress;
 mod recover;
 mod steps;
 
@@ -27,10 +30,14 @@ use super::identity::{CloneId, RunId};
 use super::ledger::{AttemptLedger, ClonePermit, LedgerError, VmIdentity};
 use super::lock::{CleanupLock, LockError};
 use super::output::CallError;
+use super::owner::OwnerSource;
 use super::receipt::{AttemptReceipt, Evidence, NotRunReason, Phase, TaskScore};
-use super::runner::TartRunner;
+use super::runner::{CommandHandle, TartRunner};
 
 pub use cleanup::CleanupDeadlines;
+pub use progress::{
+    ActiveCommand, CompletedStep, DispatchState, EffectRecord, RowKey, StepProgress, StepSpan,
+};
 pub use steps::ReserveInput;
 
 /// Which aggregate, if any, encloses a dispatch.
@@ -38,7 +45,7 @@ pub use steps::ReserveInput;
 /// Prep covers reserve through ready. Task is run and the owner lease.
 /// Cleanup covers revoke, destroy, and seal. Recovery uses only the caller's
 /// deadlines.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Scope {
     Prep,
     Task,
@@ -118,6 +125,9 @@ pub enum StepError {
     /// The ledger returned an error. The row was not given a success seal.
     #[error(transparent)]
     Ledger(LedgerError),
+    /// [`Attempt::poll`] found no cursor and no held result.
+    #[error("no step is active")]
+    NoActiveStep,
 }
 
 /// Loss of the guest, Tart, or Softnet. The machine does not restart the VM.
@@ -134,7 +144,7 @@ pub enum RuntimeLoss {
 }
 
 impl RuntimeLoss {
-    fn reason(self) -> NotRunReason {
+    pub(super) fn reason(self) -> NotRunReason {
         match self {
             Self::GuestCrash => NotRunReason::GuestCrash,
             Self::BootChanged => NotRunReason::BootChanged,
@@ -148,11 +158,12 @@ impl RuntimeLoss {
 ///
 /// `Drop` does not stop, delete, seal, or spawn. Phase names are not launch
 /// capabilities. This type does not mint an admission token.
-pub struct Attempt<'a, R, G, L, K, C> {
+pub struct Attempt<'a, R, G, L, K, O, C> {
     pub(super) runner: &'a mut R,
     pub(super) guest: &'a mut G,
     pub(super) ledger: &'a mut L,
     pub(super) lock: &'a mut K,
+    pub(super) owner: &'a mut O,
     pub(super) clock: &'a C,
     pub(super) budgets: PhaseBudgets,
     pub(super) phase: Phase,
@@ -179,26 +190,58 @@ pub struct Attempt<'a, R, G, L, K, C> {
     /// The ledger row was observed sealed. An allocated unsealed row needs recovery.
     pub(super) sealed: bool,
     pub(super) receipt: Option<AttemptReceipt>,
+    cursor: Option<drive::Cursor>,
+    pub(super) held: Option<CompletedStep>,
+    pub(super) spans: Vec<StepSpan>,
+    pub(super) owner_proof: Option<super::owner::OwnerProof>,
+    pub(super) owner_until: Option<MonoInstant>,
+    pub(super) owner_dead: bool,
+    pub(super) stop_latched_flag: bool,
+    pub(super) stop_fresh: bool,
+    pub(super) allow_rebind: bool,
+    pub(super) effect_unknown_flag: bool,
+    pub(super) effects_log: Vec<EffectRecord>,
+    pub(super) active_command: Option<CommandHandle>,
+    pub(super) ledger_handle: Option<super::ledger::LedgerHandle>,
+    pub(super) op_end: Option<MonoInstant>,
+    pub(super) work_end: Option<MonoInstant>,
+    pub(super) issued_seen: bool,
+    /// The previous step finished a body after the clock jumped past 100ms.
+    /// The next adopt treats that body as late.
+    pub(super) carry_jump: bool,
+    pub(super) guest_open: bool,
+    pub(super) priority_seq: u64,
+    pub(super) run_counted: bool,
+    pub(super) cancel_end: Option<MonoInstant>,
+    pub(super) kill_started: bool,
+    pub(super) priority_lease: bool,
+    pub(super) yield_used: bool,
+    pub(super) reclaim_key: Option<RowKey>,
+    pub(super) reclaim_stage_name: Option<&'static str>,
+    pub(super) step_start: Option<MonoInstant>,
 }
 
-impl<'a, R, G, L, K, C> Attempt<'a, R, G, L, K, C>
+impl<'a, R, G, L, K, O, C> Attempt<'a, R, G, L, K, O, C>
 where
     R: TartRunner,
     G: GuestChannel,
     L: AttemptLedger,
     K: CleanupLock,
+    O: OwnerSource,
     C: HostClock,
 {
     /// Idle machine. Does not reserve, clone, or take the lock.
     ///
     /// `budgets` can be [`PhaseBudgets::adr`] or a test shrink. The fakes are
     /// borrowed for the life of this value. Drop does not clean them up.
+    /// `owner` is polled. This constructor does not mint a proof.
     #[must_use]
     pub fn new(
         runner: &'a mut R,
         guest: &'a mut G,
         ledger: &'a mut L,
         lock: &'a mut K,
+        owner: &'a mut O,
         clock: &'a C,
         budgets: PhaseBudgets,
     ) -> Self {
@@ -207,6 +250,7 @@ where
             guest,
             ledger,
             lock,
+            owner,
             clock,
             budgets,
             phase: Phase::Idle,
@@ -231,6 +275,33 @@ where
             vm_started: false,
             sealed: false,
             receipt: None,
+            cursor: None,
+            held: None,
+            spans: Vec::new(),
+            owner_proof: None,
+            owner_until: None,
+            owner_dead: false,
+            stop_latched_flag: false,
+            stop_fresh: false,
+            allow_rebind: false,
+            effect_unknown_flag: false,
+            effects_log: Vec::new(),
+            active_command: None,
+            ledger_handle: None,
+            op_end: None,
+            work_end: None,
+            issued_seen: false,
+            carry_jump: false,
+            guest_open: false,
+            priority_seq: 0,
+            run_counted: false,
+            cancel_end: None,
+            kill_started: false,
+            priority_lease: false,
+            yield_used: false,
+            reclaim_key: None,
+            reclaim_stage_name: None,
+            step_start: None,
         }
     }
 
@@ -252,66 +323,46 @@ where
         self.client_starts
     }
 
-    pub(super) fn ensure_phase(
-        &mut self,
-        expected: &[Phase],
-        caller: Option<MonoInstant>,
-        scope: Scope,
-    ) -> Result<(), StepError> {
-        if self.phase.closed() {
-            return Err(StepError::Terminal);
-        }
-        if self.lease_expired() {
-            self.expire_owner(caller, scope);
-            return Err(StepError::OwnerDead);
-        }
-        if expected.contains(&self.phase) {
-            return Ok(());
-        }
-        self.fail(NotRunReason::Unexpected);
-        Err(StepError::Unexpected)
+    /// Sticky unknown. Later cleanup success does not clear it.
+    #[must_use]
+    pub fn effect_unknown(&self) -> bool {
+        self.effect_unknown_flag
     }
 
-    /// Phase budget, the dispatch clip, and one try-lock.
-    ///
-    /// Does not sleep. `AboveBudget` does not change the phase. Expiry and a
-    /// busy lock do. The returned instant is the same clip later IO uses.
-    pub(super) fn admit(
-        &mut self,
-        requested: MonoInstant,
-        budget: Duration,
-        scope: Scope,
-        absolute: Option<MonoInstant>,
-    ) -> Result<MonoInstant, StepError> {
-        let now = self.clock.now();
-        if self.lease_expired() {
-            self.expire_owner(Some(requested), scope);
-            return Err(StepError::OwnerDead);
-        }
-        let budget_end = now.checked_add(budget).map_err(|_| StepError::Overflow)?;
-        if requested > budget_end {
-            return Err(StepError::AboveBudget);
-        }
-        let at = match self.bound(requested, budget, scope, absolute) {
-            Ok(at) => at,
-            Err(err) => return Err(self.map_trip(err)),
-        };
-        if let Err(err) = self.lock.try_acquire(at) {
-            return Err(self.on_lock(err));
-        }
-        Ok(at)
+    /// Effect records in order.
+    #[must_use]
+    pub fn effects(&self) -> &[EffectRecord] {
+        &self.effects_log
     }
 
-    pub(super) fn gate(
-        &mut self,
-        expected: &[Phase],
-        requested: MonoInstant,
-        budget: Duration,
-        scope: Scope,
-        absolute: Option<MonoInstant>,
-    ) -> Result<MonoInstant, StepError> {
-        self.ensure_phase(expected, Some(requested), scope)?;
-        self.admit(requested, budget, scope, absolute)
+    /// Spans of public entries and polls, including a poll with no cursor.
+    #[must_use]
+    pub fn step_spans(&self) -> &[StepSpan] {
+        &self.spans
+    }
+
+    /// Reclaim stage name, when a row reclaim is open.
+    #[must_use]
+    pub fn reclaim_stage(&self) -> Option<&'static str> {
+        self.reclaim_stage_name
+    }
+
+    /// Row key fixed for the open reclaim.
+    #[must_use]
+    pub fn reclaim_row_key(&self) -> Option<&RowKey> {
+        self.reclaim_key.as_ref()
+    }
+
+    /// Stop has been seen. It stays set.
+    #[must_use]
+    pub fn stop_latched(&self) -> bool {
+        self.stop_latched_flag
+    }
+
+    /// Command handle still open, when one was begun and not finished.
+    #[must_use]
+    pub fn active_command(&self) -> Option<ActiveCommand> {
+        self.active_command.map(|handle| ActiveCommand { handle })
     }
 
     pub(super) fn lease_expired(&self) -> bool {
@@ -351,6 +402,7 @@ where
 
     pub(super) fn on_lock(&mut self, err: LockError) -> StepError {
         match err {
+            LockError::Pending => StepError::LockBusy,
             LockError::Expired => {
                 self.fail(NotRunReason::Deadline);
                 StepError::Expired
@@ -373,20 +425,6 @@ where
         let receipt = self.make_receipt(false, Some(reason));
         self.phase = Phase::Quarantined;
         self.receipt = Some(receipt);
-    }
-
-    pub(super) fn note_loss(
-        &mut self,
-        reason: NotRunReason,
-        requested: MonoInstant,
-        budget: Duration,
-    ) -> Result<(), StepError> {
-        if self.phase.closed() {
-            return Err(StepError::Terminal);
-        }
-        self.admit(requested, budget, self.scope_for_phase(), None)?;
-        self.fail(reason);
-        Err(StepError::Lost(reason))
     }
 }
 
@@ -428,4 +466,8 @@ pub(super) fn score_of(mark: super::parse::ScoreMark) -> TaskScore {
         super::parse::ScoreMark::Timeout => TaskScore::Timeout,
         super::parse::ScoreMark::Crash => TaskScore::Crash,
     }
+}
+
+pub(super) fn step_budget() -> Duration {
+    Duration::from_millis(super::schedule::STEP_MS)
 }

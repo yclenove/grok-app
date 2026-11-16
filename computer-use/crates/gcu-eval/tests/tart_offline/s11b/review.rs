@@ -3,17 +3,17 @@
 use std::time::Duration;
 
 use gcu_eval::disposable::tart::{
-    AttemptDeadline, AttemptLedger, AttemptOutcome, AttemptReceipt, BudgetField, CleanupDeadlines,
-    CloneDeadline, DeleteDeadline, GuestCommand, HostClock, LeaseDeadline, LedgerFact, LedgerFault,
-    NotRunReason, Phase, PhaseBudgets, QueryDeadline, RevokeDeadline, RunDeadline, SealDeadline,
-    StartDeadline, StepError, StopDeadline, TartCommand,
+    AttemptDeadline, AttemptOutcome, AttemptReceipt, BudgetField, CleanupDeadlines, CloneDeadline,
+    DeleteDeadline, GuestCommand, HostClock, LeaseDeadline, LedgerFact, LedgerFault, NotRunReason,
+    Phase, PhaseBudgets, QueryDeadline, RevokeDeadline, RunDeadline, SealDeadline, StartDeadline,
+    StepError, StopDeadline, TartCommand,
 };
 
 use super::faults::{expect_not_run, expect_quarantine, stopped};
 use super::harness::{
     self, cleanup_deadlines, drive_to, finish, id_clone, ok_body, push_clear, push_clone_ok,
     push_guest, push_named, push_runner, push_status, query, reserve_default, reserve_named,
-    runner_commands, scripts_to_reach, start_ids, CFG, CLONE, INC, RUN, RUN_2,
+    runner_commands, scripts_to_reach, start_ids, Pump, CFG, CLONE, INC, RUN, RUN_2,
 };
 
 #[path = "review_fix.rs"]
@@ -310,7 +310,7 @@ fn seal_of(
 ) -> Result<AttemptReceipt, String> {
     let deadline = SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap();
     attempt
-        .seal(deadline)
+        .seal_wait(deadline)
         .map_err(|err| format!("seal: {err:?}"))
 }
 
@@ -328,7 +328,7 @@ fn same_name_destination_blocks_reserve() -> Result<(), String> {
     let absolute = AttemptDeadline::after(io.clock.now(), AttemptDeadline::CAP).unwrap();
     let err = reserve_named(
         &mut attempt,
-        &io.clock,
+        &io,
         RUN,
         CLONE,
         absolute,
@@ -349,10 +349,10 @@ fn same_name_destination_blocks_clone() -> Result<(), String> {
     let (mut world, io) = opened(PhaseBudgets::adr());
     push_clear(&io);
     let mut attempt = world.attempt();
-    reserve_default(&mut attempt, &io.clock)?;
+    reserve_default(&mut attempt, &io)?;
     push_named(&io, CLONE);
     let deadline = CloneDeadline::after(io.clock.now(), CloneDeadline::CAP).unwrap();
-    let err = attempt.clone_vm(
+    let err = attempt.clone_wait(
         gcu_eval::disposable::tart::GoldenImage::MacosS2Eval,
         deadline,
     );
@@ -372,7 +372,7 @@ fn replacement_incarnation_is_not_stopped() -> Result<(), String> {
         ok_body(&status_text("running", "boot1", "inc2", "up", "up")),
     );
     push_runner(&io, ok_body("ok"));
-    if attempt.destroy(&cleanup_deadlines(&io.clock)).is_ok() || saw(&io, is_stop) {
+    if attempt.destroy_wait(&cleanup_deadlines(&io.clock)).is_ok() || saw(&io, is_stop) {
         return Err("replacement vm was stopped".into());
     }
     Ok(())
@@ -388,7 +388,7 @@ fn start_rejects_replacement_incarnation() -> Result<(), String> {
     );
     push_runner(&io, ok_body("ok"));
     let deadline = StartDeadline::after(io.clock.now(), StartDeadline::CAP).unwrap();
-    let err = attempt.start(&harness::flags(), deadline);
+    let err = attempt.start_wait(&harness::flags(), deadline);
     if !matches!(err, Err(StepError::Cleanup(NotRunReason::IdentityConflict))) || saw(&io, is_start)
     {
         return Err(format!("start {err:?} ids {:?}", start_ids(&io)));
@@ -412,7 +412,7 @@ fn boot_change_during_cleanup_is_not_scored() -> Result<(), String> {
     push_runner(&io, ok_body("ok"));
     push_clear(&io);
     attempt
-        .destroy(&cleanup_deadlines(&io.clock))
+        .destroy_wait(&cleanup_deadlines(&io.clock))
         .map_err(|err| format!("destroy: {err:?}"))?;
     if !saw(&io, is_delete) {
         return Err("owned vm was not destroyed".into());
@@ -428,7 +428,7 @@ fn contradictory_absent_status_is_malformed() -> Result<(), String> {
     push_until_stop(&io);
     push_runner(&io, ok_body("status v1 state=absent tart=up softnet=up"));
     push_runner(&io, ok_body("ok"));
-    let err = attempt.destroy(&cleanup_deadlines(&io.clock));
+    let err = attempt.destroy_wait(&cleanup_deadlines(&io.clock));
     if !matches!(err, Err(StepError::Cleanup(NotRunReason::Malformed))) || saw(&io, is_delete) {
         return Err(format!("contradictory absent: {err:?}"));
     }
@@ -446,7 +446,7 @@ fn stopped_without_exit_proof_does_not_delete() -> Result<(), String> {
         )),
     );
     push_runner(&io, ok_body("ok"));
-    let err = attempt.destroy(&cleanup_deadlines(&io.clock));
+    let err = attempt.destroy_wait(&cleanup_deadlines(&io.clock));
     if !matches!(err, Err(StepError::Cleanup(NotRunReason::Malformed))) || saw(&io, is_delete) {
         return Err(format!("missing exit proof: {err:?}"));
     }
@@ -459,7 +459,7 @@ fn fieldless_absent_status_does_not_prove_stop() -> Result<(), String> {
     push_until_stop(&io);
     push_runner(&io, ok_body("status v1 state=absent"));
     push_runner(&io, ok_body("ok"));
-    let err = attempt.destroy(&cleanup_deadlines(&io.clock));
+    let err = attempt.destroy_wait(&cleanup_deadlines(&io.clock));
     if !matches!(err, Err(StepError::Cleanup(NotRunReason::CleanupFailed))) || saw(&io, is_delete) {
         return Err(format!("fieldless absent: {err:?}"));
     }
@@ -470,7 +470,7 @@ fn illegal_run_while_revoking_stays_not_run() -> Result<(), String> {
     let (mut world, io) = opened(PhaseBudgets::adr());
     let mut attempt = drive(&mut world, &io, Phase::Revoking)?;
     let deadline = RunDeadline::after(io.clock.now(), RunDeadline::CAP).unwrap();
-    if !matches!(attempt.run(deadline), Err(StepError::Unexpected)) {
+    if !matches!(attempt.run_wait(deadline), Err(StepError::Unexpected)) {
         return Err("run during revoke was accepted".into());
     }
     let receipt = finish(&mut attempt, &io, true)?;
@@ -483,7 +483,7 @@ fn illegal_start_while_destroying_stays_not_run() -> Result<(), String> {
     let mut attempt = drive(&mut world, &io, Phase::Destroying)?;
     let deadline = StartDeadline::after(io.clock.now(), StartDeadline::CAP).unwrap();
     if !matches!(
-        attempt.start(&harness::flags(), deadline),
+        attempt.start_wait(&harness::flags(), deadline),
         Err(StepError::Unexpected)
     ) {
         return Err("start during destroy was accepted".into());
@@ -496,7 +496,7 @@ fn illegal_start_while_destroying_stays_not_run() -> Result<(), String> {
 fn arm_and_expire(attempt: &mut harness::Machine<'_>, io: &harness::Handles) -> Result<(), String> {
     push_guest(io, ok_body("ok"));
     attempt
-        .arm_owner_lease(LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap())
+        .arm_wait(LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap())
         .map_err(|err| format!("arm: {err:?}"))?;
     harness::advance(&io.clock, Duration::from_secs(3))
 }
@@ -513,7 +513,7 @@ fn late_renew_blocks_revoke_destroy_and_seal() -> Result<(), String> {
     let mut attempt = drive(&mut world, &io, Phase::Running)?;
     arm_and_expire(&mut attempt, &io)?;
     if !matches!(
-        attempt.arm_owner_lease(LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap()),
+        attempt.arm_wait(LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap()),
         Err(StepError::LeaseExpired)
     ) || attempt.phase() != Phase::Suspended
         || lease_count(&io) != 1
@@ -521,7 +521,7 @@ fn late_renew_blocks_revoke_destroy_and_seal() -> Result<(), String> {
         return Err(format!("renew phase {:?}", attempt.phase()));
     }
     if !matches!(
-        attempt.arm_owner_lease(LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap()),
+        attempt.arm_wait(LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap()),
         Err(StepError::Terminal)
     ) || lease_count(&io) != 1
         || attempt.phase() != Phase::Suspended
@@ -532,18 +532,18 @@ fn late_renew_blocks_revoke_destroy_and_seal() -> Result<(), String> {
     push_guest(&io, ok_body("score pass"));
     let run = RunDeadline::after(io.clock.now(), RunDeadline::CAP).unwrap();
     let revoke = RevokeDeadline::after(io.clock.now(), RevokeDeadline::CAP).unwrap();
-    if !matches!(attempt.run(run), Err(StepError::Terminal))
+    if !matches!(attempt.run_wait(run), Err(StepError::Terminal))
         || !matches!(
             attempt.observe_owner_lease(query(&io.clock)),
             Err(StepError::Terminal)
         )
-        || !matches!(attempt.revoke(revoke), Err(StepError::Terminal))
+        || !matches!(attempt.revoke_wait(revoke), Err(StepError::Terminal))
         || !matches!(
-            attempt.destroy(&cleanup_deadlines(&io.clock)),
+            attempt.destroy_wait(&cleanup_deadlines(&io.clock)),
             Err(StepError::DeleteForbidden)
         )
         || !matches!(
-            attempt.seal(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap()),
+            attempt.seal_wait(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap()),
             Err(StepError::Terminal)
         )
         || attempt.phase() != Phase::Suspended
@@ -561,13 +561,13 @@ fn skipped_observe_suspends_on_the_next_entry() -> Result<(), String> {
     arm_and_expire(&mut attempt, &io)?;
     harness::push_present(&io);
     let revoke = RevokeDeadline::after(io.clock.now(), RevokeDeadline::CAP).unwrap();
-    if !matches!(attempt.revoke(revoke), Err(StepError::OwnerDead))
+    if !matches!(attempt.revoke_wait(revoke), Err(StepError::OwnerDead))
         || attempt.phase() != Phase::Suspended
     {
         return Err(format!("observe skip phase {:?}", attempt.phase()));
     }
     if !matches!(
-        attempt.destroy(&cleanup_deadlines(&io.clock)),
+        attempt.destroy_wait(&cleanup_deadlines(&io.clock)),
         Err(StepError::DeleteForbidden)
     ) || saw(&io, is_stop)
     {
@@ -581,7 +581,7 @@ fn expired_observe_deadline_still_suspends() -> Result<(), String> {
     let mut attempt = drive(&mut world, &io, Phase::Running)?;
     push_guest(&io, ok_body("ok"));
     attempt
-        .arm_owner_lease(LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap())
+        .arm_wait(LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap())
         .map_err(|err| format!("arm: {err:?}"))?;
     let deadline = QueryDeadline::after(io.clock.now(), Duration::from_secs(1)).unwrap();
     harness::advance(&io.clock, Duration::from_secs(3))?;
@@ -603,14 +603,14 @@ fn prep_end_clips_the_clone_deadline() -> Result<(), String> {
     let (mut world, io) = opened(budgets);
     push_clear(&io);
     let mut attempt = world.attempt();
-    reserve_default(&mut attempt, &io.clock)?;
+    reserve_default(&mut attempt, &io)?;
     let origin = io.clock.now();
     harness::advance(&io.clock, Duration::from_millis(500))?;
     push_clear(&io);
     push_clone_ok(&io);
     let requested = CloneDeadline::after(io.clock.now(), Duration::from_secs(60)).unwrap();
     attempt
-        .clone_vm(
+        .clone_wait(
             gcu_eval::disposable::tart::GoldenImage::MacosS2Eval,
             requested,
         )
@@ -640,7 +640,7 @@ fn cleanup_end_clips_the_stop_deadline() -> Result<(), String> {
     let started = io.clock.now();
     push_guest(&io, ok_body("ok"));
     attempt
-        .revoke(RevokeDeadline::after(io.clock.now(), RevokeDeadline::CAP).unwrap())
+        .revoke_wait(RevokeDeadline::after(io.clock.now(), RevokeDeadline::CAP).unwrap())
         .map_err(|err| format!("revoke: {err:?}"))?;
     let revoke_at = RevokeDeadline::after(started, Duration::from_secs(2))
         .unwrap()
@@ -655,10 +655,10 @@ fn cleanup_end_clips_the_stop_deadline() -> Result<(), String> {
     if revoke != Some(revoke_at) {
         return Err(format!("revoke deadline {revoke:?} expected {revoke_at:?}"));
     }
-    harness::advance(&io.clock, Duration::from_millis(1500))?;
+    harness::advance_live(&mut attempt, &io, Duration::from_millis(1500))?;
     harness::push_present(&io);
     attempt
-        .destroy(&cleanup_deadlines(&io.clock))
+        .destroy_wait(&cleanup_deadlines(&io.clock))
         .map_err(|err| format!("destroy: {err:?}"))?;
     let expected = StopDeadline::after(started, Duration::from_secs(2))
         .unwrap()
@@ -691,7 +691,7 @@ fn post_stop_status_uses_the_stop_deadline() -> Result<(), String> {
         seal: SealDeadline::after(now, SealDeadline::CAP).unwrap(),
         revoke: RevokeDeadline::after(now, RevokeDeadline::CAP).unwrap(),
     };
-    if attempt.destroy(&deadlines).is_ok() || saw(&io, is_delete) {
+    if attempt.destroy_wait(&deadlines).is_ok() || saw(&io, is_delete) {
         return Err("status ran past the stop deadline".into());
     }
     Ok(())
@@ -712,7 +712,7 @@ fn post_delete_list_uses_the_delete_deadline() -> Result<(), String> {
         seal: SealDeadline::after(now, SealDeadline::CAP).unwrap(),
         revoke: RevokeDeadline::after(now, RevokeDeadline::CAP).unwrap(),
     };
-    if attempt.destroy(&deadlines).is_ok() {
+    if attempt.destroy_wait(&deadlines).is_ok() {
         return Err("absence check ran past the delete deadline".into());
     }
     if !saw(&io, is_delete) {
@@ -728,7 +728,8 @@ fn lock_busy_after_running_stays_quarantined() -> Result<(), String> {
         .borrow_mut()
         .hold_forever()
         .map_err(|err| format!("hold: {err:?}"))?;
-    let err = attempt.revoke(RevokeDeadline::after(io.clock.now(), RevokeDeadline::CAP).unwrap());
+    let err =
+        attempt.revoke_wait(RevokeDeadline::after(io.clock.now(), RevokeDeadline::CAP).unwrap());
     if !matches!(err, Err(StepError::LockBusy)) || attempt.phase() != Phase::Quarantined {
         return Err(format!("lock {err:?} phase {:?}", attempt.phase()));
     }
@@ -745,7 +746,7 @@ fn lock_busy_after_revoking_stays_quarantined() -> Result<(), String> {
         .borrow_mut()
         .hold_forever()
         .map_err(|err| format!("hold: {err:?}"))?;
-    let err = attempt.destroy(&cleanup_deadlines(&io.clock));
+    let err = attempt.destroy_wait(&cleanup_deadlines(&io.clock));
     if !matches!(err, Err(StepError::LockBusy)) || attempt.phase() != Phase::Quarantined {
         return Err(format!("lock {err:?} phase {:?}", attempt.phase()));
     }
@@ -764,7 +765,7 @@ fn post_stop_identity_change_does_not_delete() -> Result<(), String> {
         ok_body(&status_text("stopped", "boot1", "inc2", "exited", "exited")),
     );
     push_runner(&io, ok_body("ok"));
-    let err = attempt.destroy(&cleanup_deadlines(&io.clock));
+    let err = attempt.destroy_wait(&cleanup_deadlines(&io.clock));
     if !matches!(err, Err(StepError::Cleanup(NotRunReason::IdentityConflict)))
         || saw(&io, is_delete)
     {
@@ -777,7 +778,7 @@ fn list_without_end_marker_is_not_absence() -> Result<(), String> {
     let (mut world, io) = opened(PhaseBudgets::adr());
     let mut attempt = drive(&mut world, &io, Phase::Revoking)?;
     push_runner(&io, ok_body("list v1\ncount 0\nNOTEND\n"));
-    if attempt.destroy(&cleanup_deadlines(&io.clock)).is_ok() || saw(&io, is_stop) {
+    if attempt.destroy_wait(&cleanup_deadlines(&io.clock)).is_ok() || saw(&io, is_stop) {
         return Err("broken list was treated as absence".into());
     }
     let receipt = seal_of(&mut attempt, &io)?;
@@ -794,7 +795,7 @@ fn confirmation_without_end_marker_is_not_absence() -> Result<(), String> {
     push_status(&io, "stopped", RUN, "exited", "exited");
     push_runner(&io, ok_body("ok"));
     push_runner(&io, ok_body("list v1\ncount 0\nNOTEND\n"));
-    if attempt.destroy(&cleanup_deadlines(&io.clock)).is_ok() {
+    if attempt.destroy_wait(&cleanup_deadlines(&io.clock)).is_ok() {
         return Err("broken confirmation was absence".into());
     }
     if !saw(&io, is_delete) {
@@ -819,7 +820,7 @@ fn recovery_stop_uses_the_caller_deadline() -> Result<(), String> {
     harness::push_present(&io);
     let mut again = world.attempt();
     again
-        .recover(&deadlines)
+        .recover_wait(&deadlines)
         .map_err(|err| format!("recover: {err:?}"))?;
     let got = io
         .runner
@@ -848,7 +849,7 @@ fn expired_recovery_stop_does_not_stop() -> Result<(), String> {
     };
     harness::push_present(&io);
     let mut again = world.attempt();
-    if again.recover(&deadlines).is_ok() || saw(&io, is_stop) {
+    if again.recover_wait(&deadlines).is_ok() || saw(&io, is_stop) {
         return Err("expired recovery stop was issued".into());
     }
     Ok(())
@@ -858,7 +859,7 @@ fn stop_without_confirmation_does_not_delete() -> Result<(), String> {
     let (mut world, io) = opened(PhaseBudgets::adr());
     let mut attempt = drive(&mut world, &io, Phase::Revoking)?;
     push_until_stop(&io);
-    if attempt.destroy(&cleanup_deadlines(&io.clock)).is_ok()
+    if attempt.destroy_wait(&cleanup_deadlines(&io.clock)).is_ok()
         || !saw(&io, is_stop)
         || saw(&io, is_delete)
     {
@@ -873,7 +874,7 @@ fn delete_without_confirmation_is_not_absence() -> Result<(), String> {
     push_until_stop(&io);
     push_status(&io, "stopped", RUN, "exited", "exited");
     push_runner(&io, ok_body("ok"));
-    if attempt.destroy(&cleanup_deadlines(&io.clock)).is_ok() || !saw(&io, is_delete) {
+    if attempt.destroy_wait(&cleanup_deadlines(&io.clock)).is_ok() || !saw(&io, is_delete) {
         return Err("unconfirmed delete was absence".into());
     }
     Ok(())
@@ -883,14 +884,14 @@ fn committed_quarantine_still_requires_recovery() -> Result<(), String> {
     let (mut world, io) = opened(PhaseBudgets::adr());
     let mut attempt = drive(&mut world, &io, Phase::Revoking)?;
     push_runner(&io, ok_body("nope"));
-    if attempt.destroy(&cleanup_deadlines(&io.clock)).is_ok() {
+    if attempt.destroy_wait(&cleanup_deadlines(&io.clock)).is_ok() {
         return Err("bad list was destroyed".into());
     }
     io.ledger
         .borrow_mut()
         .push_fault(LedgerFault::CommittedLost);
     if attempt
-        .seal(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
+        .seal_wait(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
         .is_ok()
     {
         return Err("committed-lost seal was acknowledged".into());
@@ -913,7 +914,7 @@ fn committed_quarantine_still_requires_recovery() -> Result<(), String> {
     if !matches!(
         reserve_named(
             &mut again,
-            &io.clock,
+            &io,
             RUN_2,
             harness::CLONE_2,
             absolute,

@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use gcu_eval::disposable::tart::{
-    AttemptDeadline, AttemptLedger, BudgetError, BudgetField, CloneDeadline, GroupDeadline,
+    AttemptDeadline, BudgetError, BudgetField, CloneDeadline, CompletedStep, GroupDeadline,
     GuestCommand, HostClock, LeaseDeadline, LedgerFact, LedgerFault, NotRunReason, Phase,
     PhaseBudgets, ScriptOutcome, SealDeadline, StepError, TartCommand,
 };
@@ -13,7 +13,7 @@ use super::faults::{expect_not_run, expect_quarantine, stopped};
 use super::harness::{
     self, advance, assert_ids, cleanup_deadlines, drive_to, finish, guest_commands, id_clone,
     ok_body, push_guest, push_present, push_runner, query, reserve_default, reserve_named,
-    runner_commands, scripts_to_reach, start_ids, CLONE, CLONE_2, RUN, RUN_2,
+    runner_commands, scripts_to_reach, start_ids, Pump, CLONE, CLONE_2, RUN, RUN_2,
 };
 
 pub(super) fn owner_death_leaves_cleanup_unknown_until_recovery() -> Result<(), String> {
@@ -25,7 +25,7 @@ pub(super) fn owner_death_leaves_cleanup_unknown_until_recovery() -> Result<(), 
     drive_to(&mut attempt, &io, Phase::Running)?;
     let lease = LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap();
     attempt
-        .arm_owner_lease(lease)
+        .arm_wait(lease)
         .map_err(|err| format!("arm: {err:?}"))?;
     advance(&io.clock, Duration::from_secs(3))?;
     push_guest(&io, ok_body("ok"));
@@ -56,7 +56,7 @@ pub(super) fn owner_death_leaves_cleanup_unknown_until_recovery() -> Result<(), 
     push_present(&io);
     let mut again = world.attempt();
     let recovered = again
-        .recover(&cleanup_deadlines(&io.clock))
+        .recover_wait(&cleanup_deadlines(&io.clock))
         .map_err(|err| format!("recover: {err:?}"))?;
     if recovered.len() != 1 {
         return Err(format!("recovered {recovered:?}"));
@@ -69,7 +69,7 @@ pub(super) fn owner_death_leaves_cleanup_unknown_until_recovery() -> Result<(), 
     harness::push_clear(&io);
     reserve_named(
         &mut again,
-        &io.clock,
+        &io,
         RUN_2,
         CLONE_2,
         absolute,
@@ -95,7 +95,7 @@ pub(super) fn host_crash_recovers_orphan_without_reviving_the_score() -> Result<
     push_present(&io);
     let mut again = world.attempt();
     let recovered = again
-        .recover(&cleanup_deadlines(&io.clock))
+        .recover_wait(&cleanup_deadlines(&io.clock))
         .map_err(|err| format!("recover: {err:?}"))?;
     expect_not_run(&recovered[0], NotRunReason::HostCrash, false, true)?;
     if start_ids(&io) != [CLONE] || again.phase() != Phase::Idle {
@@ -107,7 +107,7 @@ pub(super) fn host_crash_recovers_orphan_without_reviving_the_score() -> Result<
     harness::push_clear(&io);
     let err = reserve_named(
         &mut reject,
-        &io.clock,
+        &io,
         RUN_2,
         CLONE,
         absolute,
@@ -129,7 +129,7 @@ pub(super) fn host_crash_recovers_orphan_without_reviving_the_score() -> Result<
     harness::push_clear(&io);
     reserve_named(
         &mut fresh,
-        &io.clock,
+        &io,
         RUN_2,
         CLONE_2,
         absolute,
@@ -149,7 +149,7 @@ pub(super) fn recovery_deletes_after_the_absolute_deadline() -> Result<(), Strin
     let mut attempt = world.attempt();
     reserve_named(
         &mut attempt,
-        &io.clock,
+        &io,
         RUN,
         CLONE,
         absolute,
@@ -159,12 +159,15 @@ pub(super) fn recovery_deletes_after_the_absolute_deadline() -> Result<(), Strin
     )
     .map_err(|err| format!("reserve: {err:?}"))?;
     drive_to(&mut attempt, &io, Phase::Running)?;
-    advance(&io.clock, Duration::from_secs(2))?;
-    if !matches!(attempt.cancel(query(&io.clock)), Err(StepError::Expired)) {
+    harness::advance_live(&mut attempt, &io, Duration::from_secs(2))?;
+    if !matches!(
+        attempt.cancel_wait(query(&io.clock)),
+        Err(StepError::Expired)
+    ) {
         return Err("expired attempt was not refused".into());
     }
     if !matches!(
-        attempt.destroy(&cleanup_deadlines(&io.clock)),
+        attempt.destroy_wait(&cleanup_deadlines(&io.clock)),
         Err(StepError::Expired)
     ) || stopped(&io)
     {
@@ -174,7 +177,7 @@ pub(super) fn recovery_deletes_after_the_absolute_deadline() -> Result<(), Strin
     push_present(&io);
     let mut again = world.attempt();
     let recovered = again
-        .recover(&cleanup_deadlines(&io.clock))
+        .recover_wait(&cleanup_deadlines(&io.clock))
         .map_err(|err| format!("recover: {err:?}"))?;
     expect_not_run(&recovered[0], NotRunReason::HostCrash, false, true)?;
     if !stopped(&io) {
@@ -189,8 +192,8 @@ pub(super) fn listed_absence_does_not_stop_or_delete() -> Result<(), String> {
     scripts_to_reach(&io, Phase::Cloned);
     let mut attempt = world.attempt();
     drive_to(&mut attempt, &io, Phase::Cloned)?;
-    match attempt.cancel(query(&io.clock)) {
-        Err(StepError::Lost(NotRunReason::Cancelled)) => {}
+    match attempt.cancel_wait(query(&io.clock)) {
+        Ok(CompletedStep::Cancelled) => {}
         other => return Err(format!("cancel: {other:?}")),
     }
     let receipt = finish(&mut attempt, &io, false)?;
@@ -213,11 +216,11 @@ pub(super) fn status_timeout_does_not_delete_and_halts() -> Result<(), String> {
     push_runner(&io, gcu_eval::disposable::tart::ScriptedReply::timed_out());
     let mut attempt = world.attempt();
     drive_to(&mut attempt, &io, Phase::Revoking)?;
-    if attempt.destroy(&cleanup_deadlines(&io.clock)).is_ok() || stopped(&io) {
+    if attempt.destroy_wait(&cleanup_deadlines(&io.clock)).is_ok() || stopped(&io) {
         return Err("timeout deleted".into());
     }
     let receipt = attempt
-        .seal(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
+        .seal_wait(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
         .map_err(|err| format!("seal: {err:?}"))?;
     expect_quarantine(&receipt, NotRunReason::CleanupFailed)?;
     drop(attempt);
@@ -226,7 +229,7 @@ pub(super) fn status_timeout_does_not_delete_and_halts() -> Result<(), String> {
     if !matches!(
         reserve_named(
             &mut again,
-            &io.clock,
+            &io,
             RUN_2,
             CLONE_2,
             absolute,
@@ -260,11 +263,11 @@ pub(super) fn identity_conflict_does_not_stop_or_delete() -> Result<(), String> 
     );
     let mut attempt = world.attempt();
     drive_to(&mut attempt, &io, Phase::Revoking)?;
-    if attempt.destroy(&cleanup_deadlines(&io.clock)).is_ok() || stopped(&io) {
+    if attempt.destroy_wait(&cleanup_deadlines(&io.clock)).is_ok() || stopped(&io) {
         return Err("identity conflict deleted".into());
     }
     let receipt = attempt
-        .seal(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
+        .seal_wait(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
         .map_err(|err| format!("{err:?}"))?;
     expect_quarantine(&receipt, NotRunReason::IdentityConflict)
 }
@@ -276,11 +279,11 @@ pub(super) fn malformed_list_is_not_absence() -> Result<(), String> {
     push_runner(&io, ok_body("nope"));
     let mut attempt = world.attempt();
     drive_to(&mut attempt, &io, Phase::Revoking)?;
-    if attempt.destroy(&cleanup_deadlines(&io.clock)).is_ok() || stopped(&io) {
+    if attempt.destroy_wait(&cleanup_deadlines(&io.clock)).is_ok() || stopped(&io) {
         return Err("malformed list was treated as gone".into());
     }
     let receipt = attempt
-        .seal(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
+        .seal_wait(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
         .map_err(|err| format!("{err:?}"))?;
     expect_quarantine(&receipt, NotRunReason::CleanupFailed)
 }
@@ -308,12 +311,12 @@ pub(super) fn delete_confirmation_still_present_is_quarantine() -> Result<(), St
     push_runner(&io, ok_body(listed));
     let mut attempt = world.attempt();
     drive_to(&mut attempt, &io, Phase::Revoking)?;
-    if attempt.destroy(&cleanup_deadlines(&io.clock)).is_ok() {
+    if attempt.destroy_wait(&cleanup_deadlines(&io.clock)).is_ok() {
         return Err("present confirmation was accepted".into());
     }
     assert_ids(&runner_commands(&io), &[CLONE])?;
     let receipt = attempt
-        .seal(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
+        .seal_wait(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
         .map_err(|err| format!("{err:?}"))?;
     expect_quarantine(&receipt, NotRunReason::CleanupFailed)
 }
@@ -326,7 +329,7 @@ pub(super) fn seal_fault_drops_the_score_and_requires_recovery() -> Result<(), S
     drive_to(&mut attempt, &io, Phase::Destroying)?;
     io.ledger.borrow_mut().push_fault(LedgerFault::ReplyLost);
     if attempt
-        .seal(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
+        .seal_wait(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
         .is_ok()
     {
         return Err("lost seal succeeded".into());
@@ -350,7 +353,7 @@ pub(super) fn seal_fault_drops_the_score_and_requires_recovery() -> Result<(), S
     if !matches!(
         reserve_named(
             &mut again,
-            &io.clock,
+            &io,
             RUN_2,
             CLONE_2,
             absolute,
@@ -384,7 +387,7 @@ pub(super) fn lock_busy_returns_without_waiting_or_cloning() -> Result<(), Strin
     let absolute = AttemptDeadline::after(io.clock.now(), AttemptDeadline::CAP).unwrap();
     let err = reserve_named(
         &mut attempt,
-        &io.clock,
+        &io,
         RUN,
         CLONE,
         absolute,
@@ -403,7 +406,7 @@ pub(super) fn lock_busy_returns_without_waiting_or_cloning() -> Result<(), Strin
         ));
     }
     let receipt = attempt
-        .seal(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
+        .seal_wait(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
         .map_err(|err| format!("seal: {err:?}"))?;
     expect_quarantine(&receipt, NotRunReason::LockBusy)
 }
@@ -417,10 +420,10 @@ pub(super) fn shrunk_clone_budget_rejects_without_consuming_the_script() -> Resu
     harness::push_clear(&io);
     harness::push_clone_ok(&io);
     let mut attempt = world.attempt();
-    reserve_default(&mut attempt, &io.clock)?;
+    reserve_default(&mut attempt, &io)?;
     let deadline = CloneDeadline::after(io.clock.now(), CloneDeadline::CAP).unwrap();
     if !matches!(
-        attempt.clone_vm(
+        attempt.clone_wait(
             gcu_eval::disposable::tart::GoldenImage::MacosS2Eval,
             deadline
         ),
@@ -447,11 +450,11 @@ pub(super) fn shrunk_prep_budget_expires_without_a_clone() -> Result<(), String>
     harness::push_clear(&io);
     harness::push_clone_ok(&io);
     let mut attempt = world.attempt();
-    reserve_default(&mut attempt, &io.clock)?;
+    reserve_default(&mut attempt, &io)?;
     advance(&io.clock, Duration::from_millis(1))?;
     let deadline = CloneDeadline::after(io.clock.now(), Duration::from_millis(1)).unwrap();
     if !matches!(
-        attempt.clone_vm(
+        attempt.clone_wait(
             gcu_eval::disposable::tart::GoldenImage::MacosS2Eval,
             deadline
         ),
@@ -484,7 +487,7 @@ pub(super) fn absolute_deadline_clips_the_recorded_clone_deadline() -> Result<()
     let mut attempt = world.attempt();
     reserve_named(
         &mut attempt,
-        &io.clock,
+        &io,
         RUN,
         CLONE,
         absolute,
@@ -495,7 +498,7 @@ pub(super) fn absolute_deadline_clips_the_recorded_clone_deadline() -> Result<()
     .map_err(|err| format!("reserve: {err:?}"))?;
     let deadline = CloneDeadline::after(io.clock.now(), CloneDeadline::CAP).unwrap();
     attempt
-        .clone_vm(
+        .clone_wait(
             gcu_eval::disposable::tart::GoldenImage::MacosS2Eval,
             deadline,
         )
@@ -520,7 +523,7 @@ pub(super) fn stop_latch_refuses_followups() -> Result<(), String> {
     if !matches!(
         reserve_named(
             &mut attempt,
-            &io.clock,
+            &io,
             RUN,
             CLONE,
             absolute,
@@ -533,7 +536,7 @@ pub(super) fn stop_latch_refuses_followups() -> Result<(), String> {
         return Err("stop latch was cleared".into());
     }
     let receipt = attempt
-        .seal(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
+        .seal_wait(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
         .map_err(|err| format!("{err:?}"))?;
     expect_not_run(&receipt, NotRunReason::Refused, false, false)?;
     if !runner_commands(&io).is_empty() {
@@ -550,7 +553,7 @@ pub(super) fn manifest_mismatch_is_not_run_without_a_clone() -> Result<(), Strin
     if !matches!(
         reserve_named(
             &mut attempt,
-            &io.clock,
+            &io,
             RUN,
             CLONE,
             absolute,
@@ -563,7 +566,7 @@ pub(super) fn manifest_mismatch_is_not_run_without_a_clone() -> Result<(), Strin
         return Err("mismatched manifest was reserved".into());
     }
     let receipt = attempt
-        .seal(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
+        .seal_wait(SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap())
         .map_err(|err| format!("{err:?}"))?;
     expect_not_run(&receipt, NotRunReason::Refused, false, true)?;
     Ok(())
@@ -575,7 +578,7 @@ pub(super) fn unsealed_row_must_be_recovered_before_reserve() -> Result<(), Stri
     harness::push_clear(&io);
     {
         let mut attempt = world.attempt();
-        reserve_default(&mut attempt, &io.clock)?;
+        reserve_default(&mut attempt, &io)?;
         if attempt.phase() != Phase::Reserved {
             return Err("did not reserve".into());
         }
@@ -585,7 +588,7 @@ pub(super) fn unsealed_row_must_be_recovered_before_reserve() -> Result<(), Stri
     let absolute = AttemptDeadline::after(io.clock.now(), AttemptDeadline::CAP).unwrap();
     let err = reserve_named(
         &mut again,
-        &io.clock,
+        &io,
         RUN_2,
         CLONE_2,
         absolute,
@@ -628,7 +631,7 @@ pub(super) fn sealed_quarantine_halts_reserve_and_recover_skips_it() -> Result<(
         .map_err(|err| format!("{err:?}"))?;
     let mut attempt = world.attempt();
     let recovered = attempt
-        .recover(&cleanup_deadlines(&io.clock))
+        .recover_wait(&cleanup_deadlines(&io.clock))
         .map_err(|err| format!("recover: {err:?}"))?;
     if !recovered.is_empty() || attempt.phase() != Phase::Idle || !runner_commands(&io).is_empty() {
         return Err("sealed quarantine was reclaimed".into());
@@ -637,7 +640,7 @@ pub(super) fn sealed_quarantine_halts_reserve_and_recover_skips_it() -> Result<(
     if !matches!(
         reserve_named(
             &mut attempt,
-            &io.clock,
+            &io,
             RUN_2,
             CLONE_2,
             absolute,
@@ -661,11 +664,11 @@ pub(super) fn late_owner_lease_does_not_extend() -> Result<(), String> {
     let mut attempt = world.attempt();
     drive_to(&mut attempt, &io, Phase::Running)?;
     attempt
-        .arm_owner_lease(LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap())
+        .arm_wait(LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap())
         .map_err(|err| format!("{err:?}"))?;
     advance(&io.clock, Duration::from_secs(3))?;
     if !matches!(
-        attempt.arm_owner_lease(LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap()),
+        attempt.arm_wait(LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap()),
         Err(StepError::LeaseExpired)
     ) {
         return Err("late lease extended".into());
@@ -688,7 +691,7 @@ pub(super) fn live_owner_lease_does_not_revoke() -> Result<(), String> {
     let mut attempt = world.attempt();
     drive_to(&mut attempt, &io, Phase::Running)?;
     attempt
-        .arm_owner_lease(LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap())
+        .arm_wait(LeaseDeadline::after(io.clock.now(), LeaseDeadline::CAP).unwrap())
         .map_err(|err| format!("{err:?}"))?;
     if !matches!(
         attempt.observe_owner_lease(query(&io.clock)),
@@ -720,7 +723,7 @@ pub(super) fn shrunk_probe_group_rejects_before_inventory() -> Result<(), String
     let mut attempt = world.attempt();
     drive_to(&mut attempt, &io, Phase::Booting)?;
     let deadline = GroupDeadline::after(io.clock.now(), GroupDeadline::CAP).unwrap();
-    if !matches!(attempt.isolate(deadline), Err(StepError::AboveBudget))
+    if !matches!(attempt.isolate_wait(deadline), Err(StepError::AboveBudget))
         || attempt.phase() != Phase::Booting
         || !guest_commands(&io).is_empty()
     {

@@ -1,8 +1,8 @@
 //! Offline Tart interface and caller-driven fake state machine (ADR 0018).
 //!
 //! S11a types describe fixed operations, an explicit deadline, and a bounded
-//! body. S11b adds a synchronous attempt machine that runs only against those
-//! fakes. Nothing here starts Tart, opens a real guest channel, admits a
+//! body. S11b adds a caller-driven attempt machine that runs only against those
+//! fakes. Each public entry or poll is one 100ms step. Nothing here starts Tart, opens a real guest channel, admits a
 //! launch, or reads the environment. H1 (the host-to-guest channel) and H2
 //! (the egress guard) stay undecided until S11-0 measures them.
 //!
@@ -28,6 +28,7 @@ mod mailbox;
 mod mailbox_guest;
 mod manifest;
 mod output;
+mod owner;
 mod parse;
 mod policy;
 mod receipt;
@@ -48,11 +49,14 @@ pub use guest::{
 };
 pub use identity::{CloneId, GoldenImage, IdentityError, RunId, MAX_IDENTITY_LEN};
 pub use ledger::{
-    AttemptLedger, ClonePermit, FakeLedger, LedgerError, LedgerFact, LedgerFault, LedgerOp,
-    Reservation, VmIdentity,
+    AttemptLedger, ClonePermit, FakeLedger, LedgerError, LedgerFact, LedgerFault, LedgerHandle,
+    LedgerOp, LedgerPoll, Reservation, VmIdentity,
 };
 pub use lock::{CleanupLock, FakeCleanupLock, LockError};
-pub use machine::{Attempt, CleanupDeadlines, ReserveInput, RuntimeLoss, StepError};
+pub use machine::{
+    ActiveCommand, Attempt, CleanupDeadlines, CompletedStep, DispatchState, EffectRecord,
+    ReserveInput, RowKey, RuntimeLoss, StepError, StepProgress, StepSpan,
+};
 pub use mailbox::{
     decode_frame, decode_reply, encode_frame, encode_reply, poll_guest, prepare_slots, publish,
     read_checked, read_slot, Activity, AsciiId, AttemptBinding, AttemptNonce, Breach, CheckedRead,
@@ -69,9 +73,12 @@ pub use output::{
     BoundedOutput, CallError, OutputError, ScriptOutcome, ScriptedReply, TraceEntry,
     MAX_OUTPUT_BYTES,
 };
+pub use owner::{FakeOwner, OwnerBuildError, OwnerProof, OwnerRead, OwnerSource, OWNER_PROOF_LIFE};
 pub use policy::{PolicyError, SoftnetFlags, MAX_ALLOW_CIDRS, SOFTNET_BLOCK_CIDR};
 pub use receipt::{AttemptOutcome, AttemptReceipt, NotRunReason, Phase, TaskScore};
-pub use runner::{FakeTartRunner, TartRunner};
+pub use runner::{
+    CommandHandle, CommandKind, CommandPoll, FakeTartRunner, ReapFault, ReapPoll, TartRunner,
+};
 pub use schedule::{
     attempt_window_ms, due, prove, step_end, ScheduleError, ScheduleProof, ACCEPT_AGE_MS,
     EXTRA_SAMPLES, GRANT_GAP_MS, ONE_WAY_MS, POLL_BYTE_BUDGET, RENEW_MS, ROUND_TRIP_MAX_MS,

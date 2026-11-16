@@ -18,6 +18,11 @@ pub enum LockError {
     /// Someone else holds it. This call did not wait.
     #[error("cleanup lock is busy")]
     Busy,
+    /// Part of a scripted acquire cost was charged. The lock was not taken.
+    ///
+    /// The caller polls again. This is not [`Self::Busy`] and not expiry.
+    #[error("lock acquire is still pending")]
+    Pending,
 }
 
 /// Try-lock used around one state decision.
@@ -88,12 +93,30 @@ impl CleanupLock for FakeCleanupLock {
         if self.clock.now() >= deadline {
             return Err(LockError::Expired);
         }
-        let step = std::mem::take(&mut self.acquire_advance);
-        if !step.is_zero() {
-            // The acquire must still return inside the deadline it was given.
-            if self.clock.advance(step).is_err() || self.clock.now() >= deadline {
+        if !self.acquire_advance.is_zero() {
+            let step = self.acquire_advance;
+            // No slice room keeps the old one-shot step, including expiry when
+            // that step lands on the deadline. A room charges at most the room
+            // and leaves the rest for the next poll.
+            let quantum = match self.clock.charge_room() {
+                Some(room) => step.min(room),
+                None => step,
+            };
+            if quantum.is_zero() {
+                return Err(LockError::Pending);
+            }
+            if self.clock.advance(quantum).is_err() || self.clock.now() >= deadline {
+                self.acquire_advance = Duration::ZERO;
                 return Err(LockError::Expired);
             }
+            let left = step.saturating_sub(quantum);
+            self.acquire_advance = left;
+            if !left.is_zero() {
+                return Err(LockError::Pending);
+            }
+        }
+        if self.clock.now() >= deadline {
+            return Err(LockError::Expired);
         }
         match self.mutex.try_lock() {
             Ok(guard) => {

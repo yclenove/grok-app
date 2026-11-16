@@ -9,7 +9,7 @@ use gcu_eval::disposable::tart::{
     RunId, ScriptOutcome, ScriptedReply, SoftnetFlags, TartRunner,
 };
 
-use super::{must_err, noted, reserve_dyn};
+use super::{dyn_ready, must_err, noted, reserve_dyn};
 
 pub(super) fn clone_at_absolute_deadline_expires_without_the_script() -> Result<(), String> {
     let clock = FakeClock::new();
@@ -35,8 +35,9 @@ pub(super) fn clone_at_absolute_deadline_expires_without_the_script() -> Result<
     }
     {
         let runner: &mut dyn TartRunner = &mut runner;
+        let started = runner.begin_clone(permit, GoldenImage::MacosS2Eval, call);
         must_err(
-            runner.clone_vm(permit, GoldenImage::MacosS2Eval, call),
+            dyn_ready(runner, started),
             CallError::Expired,
             "boundary clone",
         )?;
@@ -170,8 +171,9 @@ pub(super) fn clone_at_call_deadline_expires_while_permit_is_live() -> Result<()
     }
     {
         let runner: &mut dyn TartRunner = &mut runner;
+        let started = runner.begin_clone(permit, GoldenImage::MacosS2Eval, call);
         must_err(
-            runner.clone_vm(permit, GoldenImage::MacosS2Eval, call),
+            dyn_ready(runner, started),
             CallError::Expired,
             "call boundary",
         )?;

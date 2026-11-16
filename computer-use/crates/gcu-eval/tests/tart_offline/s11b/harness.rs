@@ -10,12 +10,13 @@ use std::time::Duration;
 
 use gcu_eval::disposable::tart::{
     Attempt, AttemptDeadline, AttemptLedger, AttemptReceipt, BoundedOutput, CallError,
-    CleanupDeadlines, CleanupLock, CloneDeadline, CloneId, DeleteDeadline, Digest, FakeCleanupLock,
-    FakeClock, FakeGuestChannel, FakeLedger, FakeTartRunner, GoldenImage, GroupDeadline,
-    GuestChannel, GuestCommand, HostClock, InstallManifest, LeaseDeadline, LoginDeadline, Phase,
-    PhaseBudgets, QueryDeadline, ReserveInput, RevokeDeadline, RunDeadline, RunId, ScriptedReply,
-    SealDeadline, SoftnetFlags, StageDeadline, StartDeadline, StepError, StopDeadline, TartCommand,
-    TartRunner, VmIdentity,
+    CleanupDeadlines, CleanupLock, CloneDeadline, CloneId, CommandHandle, CommandPoll,
+    CompletedStep, DeleteDeadline, Digest, FakeCleanupLock, FakeClock, FakeGuestChannel,
+    FakeLedger, FakeOwner, FakeTartRunner, GoldenImage, GroupDeadline, GuestChannel, GuestCommand,
+    HostClock, InstallManifest, LeaseDeadline, LedgerPoll, LoginDeadline, MonoInstant, OwnerRead,
+    OwnerSource, Phase, PhaseBudgets, QueryDeadline, ReserveInput, RevokeDeadline, RunDeadline,
+    RunId, ScriptedReply, SealDeadline, SoftnetFlags, StageDeadline, StartDeadline, StepError,
+    StepProgress, StopDeadline, TartCommand, TartRunner, VmIdentity,
 };
 use gcu_eval::disposable::Probe;
 
@@ -45,50 +46,65 @@ impl<T> Share<T> {
 }
 
 impl TartRunner for Share<FakeTartRunner> {
-    fn clone_vm(
+    fn begin_clone(
         &mut self,
         permit: gcu_eval::disposable::tart::ClonePermit,
         golden: GoldenImage,
         deadline: CloneDeadline,
-    ) -> Result<BoundedOutput, CallError> {
-        self.inner.borrow_mut().clone_vm(permit, golden, deadline)
+    ) -> Result<CommandHandle, CallError> {
+        TartRunner::begin_clone(&mut *self.inner.borrow_mut(), permit, golden, deadline)
     }
 
-    fn start(
+    fn begin_start(
         &mut self,
         clone: &CloneId,
         softnet: &SoftnetFlags,
         deadline: StartDeadline,
-    ) -> Result<BoundedOutput, CallError> {
-        self.inner.borrow_mut().start(clone, softnet, deadline)
+    ) -> Result<CommandHandle, CallError> {
+        TartRunner::begin_start(&mut *self.inner.borrow_mut(), clone, softnet, deadline)
     }
 
-    fn stop(
+    fn begin_stop(
         &mut self,
         clone: &CloneId,
         deadline: StopDeadline,
-    ) -> Result<BoundedOutput, CallError> {
-        self.inner.borrow_mut().stop(clone, deadline)
+    ) -> Result<CommandHandle, CallError> {
+        TartRunner::begin_stop(&mut *self.inner.borrow_mut(), clone, deadline)
     }
 
-    fn delete(
+    fn begin_delete(
         &mut self,
         clone: &CloneId,
         deadline: DeleteDeadline,
-    ) -> Result<BoundedOutput, CallError> {
-        self.inner.borrow_mut().delete(clone, deadline)
+    ) -> Result<CommandHandle, CallError> {
+        TartRunner::begin_delete(&mut *self.inner.borrow_mut(), clone, deadline)
     }
 
-    fn list(&mut self, deadline: QueryDeadline) -> Result<BoundedOutput, CallError> {
-        self.inner.borrow_mut().list(deadline)
+    fn begin_list(&mut self, deadline: QueryDeadline) -> Result<CommandHandle, CallError> {
+        TartRunner::begin_list(&mut *self.inner.borrow_mut(), deadline)
     }
 
-    fn status(
+    fn begin_status(
         &mut self,
         clone: &CloneId,
         deadline: QueryDeadline,
-    ) -> Result<BoundedOutput, CallError> {
-        self.inner.borrow_mut().status(clone, deadline)
+    ) -> Result<CommandHandle, CallError> {
+        TartRunner::begin_status(&mut *self.inner.borrow_mut(), clone, deadline)
+    }
+
+    fn poll_command(&mut self, handle: &CommandHandle) -> Result<CommandPoll, CallError> {
+        TartRunner::poll_command(&mut *self.inner.borrow_mut(), handle)
+    }
+
+    fn begin_kill(&mut self, handle: &CommandHandle) -> Result<(), CallError> {
+        TartRunner::begin_kill(&mut *self.inner.borrow_mut(), handle)
+    }
+
+    fn poll_reap(
+        &mut self,
+        handle: &CommandHandle,
+    ) -> Result<gcu_eval::disposable::tart::ReapPoll, CallError> {
+        TartRunner::poll_reap(&mut *self.inner.borrow_mut(), handle)
     }
 }
 
@@ -135,58 +151,74 @@ impl GuestChannel for Share<FakeGuestChannel> {
 }
 
 impl AttemptLedger for Share<FakeLedger> {
-    fn reserve(
+    fn begin_reserve(
         &mut self,
         run: RunId,
         clone: CloneId,
         absolute: AttemptDeadline,
         call: QueryDeadline,
-    ) -> Result<gcu_eval::disposable::tart::ClonePermit, gcu_eval::disposable::tart::LedgerError>
+    ) -> Result<gcu_eval::disposable::tart::LedgerHandle, gcu_eval::disposable::tart::LedgerError>
     {
-        self.inner.borrow_mut().reserve(run, clone, absolute, call)
+        AttemptLedger::begin_reserve(&mut *self.inner.borrow_mut(), run, clone, absolute, call)
     }
 
-    fn query(
-        &self,
+    fn begin_query(
+        &mut self,
         clone: &CloneId,
         call: QueryDeadline,
-    ) -> Result<gcu_eval::disposable::tart::Reservation, gcu_eval::disposable::tart::LedgerError>
+    ) -> Result<gcu_eval::disposable::tart::LedgerHandle, gcu_eval::disposable::tart::LedgerError>
     {
-        self.inner.borrow().query(clone, call)
+        AttemptLedger::begin_query(&mut *self.inner.borrow_mut(), clone, call)
     }
 
-    fn append(
+    fn begin_append(
         &mut self,
         clone: &CloneId,
         fact: gcu_eval::disposable::tart::LedgerFact,
         call: QueryDeadline,
-    ) -> Result<(), gcu_eval::disposable::tart::LedgerError> {
-        self.inner.borrow_mut().append(clone, fact, call)
+    ) -> Result<gcu_eval::disposable::tart::LedgerHandle, gcu_eval::disposable::tart::LedgerError>
+    {
+        AttemptLedger::begin_append(&mut *self.inner.borrow_mut(), clone, fact, call)
     }
 
-    fn note_identity(
+    fn begin_note_identity(
         &mut self,
         clone: &CloneId,
         identity: &VmIdentity,
         call: QueryDeadline,
-    ) -> Result<(), gcu_eval::disposable::tart::LedgerError> {
-        self.inner.borrow_mut().note_identity(clone, identity, call)
+    ) -> Result<gcu_eval::disposable::tart::LedgerHandle, gcu_eval::disposable::tart::LedgerError>
+    {
+        AttemptLedger::begin_note_identity(&mut *self.inner.borrow_mut(), clone, identity, call)
     }
 
-    fn seal(
+    fn begin_seal(
         &mut self,
         clone: &CloneId,
         call: SealDeadline,
-    ) -> Result<(), gcu_eval::disposable::tart::LedgerError> {
-        self.inner.borrow_mut().seal(clone, call)
+    ) -> Result<gcu_eval::disposable::tart::LedgerHandle, gcu_eval::disposable::tart::LedgerError>
+    {
+        AttemptLedger::begin_seal(&mut *self.inner.borrow_mut(), clone, call)
     }
 
-    fn rows(
-        &self,
+    fn begin_rows(
+        &mut self,
         call: QueryDeadline,
-    ) -> Result<Vec<gcu_eval::disposable::tart::Reservation>, gcu_eval::disposable::tart::LedgerError>
+    ) -> Result<gcu_eval::disposable::tart::LedgerHandle, gcu_eval::disposable::tart::LedgerError>
     {
-        self.inner.borrow().rows(call)
+        AttemptLedger::begin_rows(&mut *self.inner.borrow_mut(), call)
+    }
+
+    fn poll_ledger(
+        &mut self,
+        handle: &gcu_eval::disposable::tart::LedgerHandle,
+    ) -> Result<LedgerPoll, gcu_eval::disposable::tart::LedgerError> {
+        AttemptLedger::poll_ledger(&mut *self.inner.borrow_mut(), handle)
+    }
+}
+
+impl OwnerSource for Share<FakeOwner> {
+    fn poll_owner(&mut self, now: MonoInstant, deadline: MonoInstant) -> OwnerRead {
+        OwnerSource::poll_owner(&mut *self.inner.borrow_mut(), now, deadline)
     }
 }
 
@@ -205,6 +237,7 @@ pub(super) type Machine<'a> = Attempt<
     Share<FakeGuestChannel>,
     Share<FakeLedger>,
     Share<FakeCleanupLock>,
+    Share<FakeOwner>,
     FakeClock,
 >;
 
@@ -214,6 +247,7 @@ pub(super) struct World {
     guest: Share<FakeGuestChannel>,
     ledger: Share<FakeLedger>,
     lock: Share<FakeCleanupLock>,
+    owner: Share<FakeOwner>,
     budgets: PhaseBudgets,
 }
 
@@ -222,6 +256,7 @@ pub(super) struct Handles {
     pub guest: Rc<RefCell<FakeGuestChannel>>,
     pub ledger: Rc<RefCell<FakeLedger>>,
     pub lock: Rc<RefCell<FakeCleanupLock>>,
+    pub owner: Rc<RefCell<FakeOwner>>,
     pub clock: FakeClock,
 }
 
@@ -233,7 +268,8 @@ impl World {
             runner: Share::new(FakeTartRunner::new(clock.clone())),
             guest: Share::new(FakeGuestChannel::new(clock.clone())),
             ledger: Share::new(FakeLedger::new(clock.clone())),
-            lock: Share::new(FakeCleanupLock::new(clock)),
+            lock: Share::new(FakeCleanupLock::new(clock.clone())),
+            owner: Share::new(FakeOwner::new(clock)),
             budgets,
         }
     }
@@ -244,16 +280,24 @@ impl World {
             guest: self.guest.handle(),
             ledger: self.ledger.handle(),
             lock: self.lock.handle(),
+            owner: self.owner.handle(),
             clock: self.clock.clone(),
         }
     }
 
     pub(super) fn attempt(&mut self) -> Machine<'_> {
+        let now = self.clock.now();
+        self.owner
+            .inner
+            .borrow_mut()
+            .replace_proof(RUN, now)
+            .expect("run-1 is a binding id");
         Attempt::new(
             &mut self.runner,
             &mut self.guest,
             &mut self.ledger,
             &mut self.lock,
+            &mut self.owner,
             &self.clock,
             self.budgets,
         )
@@ -439,7 +483,7 @@ pub(super) fn cleanup_deadlines(clock: &FakeClock) -> CleanupDeadlines {
 )]
 pub(super) fn reserve_named(
     attempt: &mut Machine<'_>,
-    clock: &FakeClock,
+    io: &Handles,
     run: &str,
     clone: &str,
     absolute: AttemptDeadline,
@@ -447,7 +491,22 @@ pub(super) fn reserve_named(
     owner_present: bool,
     approved: InstallManifest,
 ) -> Result<(), StepError> {
-    attempt.reserve(
+    {
+        let mut owner = io.owner.borrow_mut();
+        if owner_present {
+            owner
+                .replace_proof(run, io.clock.now())
+                .map_err(|_| StepError::Refused)?;
+        } else {
+            owner.clear_proofs();
+        }
+        if stop_latched {
+            owner.push_stop();
+        }
+    }
+    let deadline = query(&io.clock);
+    let caller = deadline.at();
+    let first = attempt.reserve(
         ReserveInput {
             run: id_run(run),
             clone_id: id_clone(clone),
@@ -457,23 +516,15 @@ pub(super) fn reserve_named(
             stop_latched,
             owner_present,
         },
-        query(clock),
-    )
+        deadline,
+    );
+    settle_unit(attempt, caller, first)
 }
 
-pub(super) fn reserve_default(attempt: &mut Machine<'_>, clock: &FakeClock) -> Result<(), String> {
-    let absolute = AttemptDeadline::after(clock.now(), AttemptDeadline::CAP).unwrap();
-    reserve_named(
-        attempt,
-        clock,
-        RUN,
-        CLONE,
-        absolute,
-        false,
-        true,
-        manifest(),
-    )
-    .map_err(|err| format!("reserve: {err:?}"))
+pub(super) fn reserve_default(attempt: &mut Machine<'_>, io: &Handles) -> Result<(), String> {
+    let absolute = AttemptDeadline::after(io.clock.now(), AttemptDeadline::CAP).unwrap();
+    reserve_named(attempt, io, RUN, CLONE, absolute, false, true, manifest())
+        .map_err(|err| format!("reserve: {err:?}"))
 }
 
 fn call(name: &str, result: Result<(), StepError>) -> Result<(), String> {
@@ -490,44 +541,47 @@ pub(super) fn drive_to(
             return Ok(());
         }
         match attempt.phase() {
-            Phase::Idle => reserve_default(attempt, &io.clock)?,
+            Phase::Idle => reserve_default(attempt, io)?,
             Phase::Reserved => {
                 let deadline = CloneDeadline::after(io.clock.now(), CloneDeadline::CAP).unwrap();
                 call(
                     "clone",
-                    attempt.clone_vm(GoldenImage::MacosS2Eval, deadline),
+                    attempt.clone_wait(GoldenImage::MacosS2Eval, deadline),
                 )?;
             }
             Phase::Cloned => {
                 let deadline = StartDeadline::after(io.clock.now(), StartDeadline::CAP).unwrap();
-                call("start", attempt.start(&flags(), deadline))?;
+                call("start", attempt.start_wait(&flags(), deadline))?;
             }
             Phase::Booting => {
                 let deadline = GroupDeadline::after(io.clock.now(), GroupDeadline::CAP).unwrap();
-                call("isolate", attempt.isolate(deadline))?;
+                call("isolate", attempt.isolate_wait(deadline))?;
             }
             Phase::Isolated => {
                 let deadline = StageDeadline::after(io.clock.now(), StageDeadline::CAP).unwrap();
-                call("bootstrap", attempt.bootstrap(deadline))?;
+                call("bootstrap", attempt.bootstrap_wait(deadline))?;
             }
             Phase::Bootstrapped => {
                 let deadline = LoginDeadline::after(io.clock.now(), LoginDeadline::CAP).unwrap();
-                call("login", attempt.login(deadline))?;
+                call("login", attempt.login_wait(deadline))?;
             }
-            Phase::CredentialReady => call("ready", attempt.ready(query(&io.clock)))?,
+            Phase::CredentialReady => call("ready", attempt.ready_wait(query(&io.clock)))?,
             Phase::Ready => {
                 let deadline = RunDeadline::after(io.clock.now(), RunDeadline::CAP).unwrap();
-                call("run", attempt.run(deadline))?;
+                call("run", attempt.run_wait(deadline))?;
             }
             Phase::Running => {
                 let deadline = RevokeDeadline::after(io.clock.now(), RevokeDeadline::CAP).unwrap();
-                call("revoke", attempt.revoke(deadline))?;
+                call("revoke", attempt.revoke_wait(deadline))?;
             }
-            Phase::Revoking => call("destroy", attempt.destroy(&cleanup_deadlines(&io.clock)))?,
+            Phase::Revoking => call(
+                "destroy",
+                attempt.destroy_wait(&cleanup_deadlines(&io.clock)),
+            )?,
             Phase::Destroying => {
                 let deadline = SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap();
                 attempt
-                    .seal(deadline)
+                    .seal_wait(deadline)
                     .map(|_| ())
                     .map_err(|err| format!("seal: {err:?}"))?;
             }
@@ -548,7 +602,7 @@ pub(super) fn finish(
     if attempt.phase() == Phase::Revoking {
         push_guest(io, ok_body("ok"));
         let deadline = RevokeDeadline::after(io.clock.now(), RevokeDeadline::CAP).unwrap();
-        match attempt.revoke(deadline) {
+        match attempt.revoke_wait(deadline) {
             Ok(()) | Err(StepError::Cleanup(_)) => {}
             Err(err) => return Err(format!("finish revoke: {err:?}")),
         }
@@ -558,14 +612,14 @@ pub(super) fn finish(
             push_absent(io);
         }
         attempt
-            .destroy(&cleanup_deadlines(&io.clock))
+            .destroy_wait(&cleanup_deadlines(&io.clock))
             .map_err(|err| format!("finish destroy: {err:?}"))?;
     } else if attempt.phase() != Phase::Destroying {
         return Err(format!("finish from {:?}", attempt.phase()));
     }
     let deadline = SealDeadline::after(io.clock.now(), SealDeadline::CAP).unwrap();
     attempt
-        .seal(deadline)
+        .seal_wait(deadline)
         .map_err(|err| format!("finish seal: {err:?}"))
 }
 
@@ -627,4 +681,205 @@ pub(super) fn advance(clock: &FakeClock, step: Duration) -> Result<(), String> {
     clock
         .advance(step)
         .map_err(|err| format!("advance: {err:?}"))
+}
+
+/// Renew the owner proof in 400ms slices, then move the clock.
+///
+/// A single jump past the saved end suspends even when a newer proof is queued.
+/// This helper accepts the next proof while the saved end is still live.
+pub(super) fn advance_live(
+    attempt: &mut Machine<'_>,
+    io: &Handles,
+    step: Duration,
+) -> Result<(), String> {
+    let mut left = step;
+    let chunk = Duration::from_millis(400);
+    while !left.is_zero() {
+        let slice = if left > chunk { chunk } else { left };
+        let now = io.clock.now();
+        io.owner
+            .borrow_mut()
+            .push_proof(RUN, now)
+            .map_err(|err| format!("proof: {err:?}"))?;
+        let caller = QueryDeadline::after(now, QueryDeadline::CAP)
+            .map_err(|err| format!("caller: {err:?}"))?
+            .at();
+        attempt
+            .sync_owner(caller)
+            .map_err(|err| format!("sync: {err:?}"))?;
+        io.clock
+            .advance(slice)
+            .map_err(|err| format!("advance: {err:?}"))?;
+        left = left.saturating_sub(slice);
+    }
+    Ok(())
+}
+
+fn settle(
+    attempt: &mut Machine<'_>,
+    caller: MonoInstant,
+    first: Result<StepProgress<CompletedStep>, StepError>,
+) -> Result<CompletedStep, StepError> {
+    let mut progress = first?;
+    for _ in 0..4_000 {
+        match progress {
+            StepProgress::Done(done) => return Ok(done),
+            StepProgress::Pending => progress = attempt.poll(caller)?,
+        }
+    }
+    Err(StepError::Unexpected)
+}
+
+fn settle_unit(
+    attempt: &mut Machine<'_>,
+    caller: MonoInstant,
+    first: Result<StepProgress<CompletedStep>, StepError>,
+) -> Result<(), StepError> {
+    settle(attempt, caller, first).map(|_| ())
+}
+
+/// Pumps one public command until `Done` or an error.
+///
+/// `Pending` is not success. The first error is returned without a later poll.
+pub(super) trait Pump {
+    fn clone_wait(&mut self, golden: GoldenImage, deadline: CloneDeadline)
+        -> Result<(), StepError>;
+    fn start_wait(
+        &mut self,
+        flags: &SoftnetFlags,
+        deadline: StartDeadline,
+    ) -> Result<(), StepError>;
+    fn isolate_wait(&mut self, deadline: GroupDeadline) -> Result<(), StepError>;
+    fn bootstrap_wait(&mut self, deadline: StageDeadline) -> Result<(), StepError>;
+    fn login_wait(&mut self, deadline: LoginDeadline) -> Result<(), StepError>;
+    fn ready_wait(&mut self, deadline: QueryDeadline) -> Result<(), StepError>;
+    fn run_wait(&mut self, deadline: RunDeadline) -> Result<(), StepError>;
+    fn arm_wait(&mut self, deadline: LeaseDeadline) -> Result<(), StepError>;
+    fn revoke_wait(&mut self, deadline: RevokeDeadline) -> Result<(), StepError>;
+    fn destroy_wait(&mut self, deadlines: &CleanupDeadlines) -> Result<(), StepError>;
+    fn seal_wait(&mut self, deadline: SealDeadline) -> Result<AttemptReceipt, StepError>;
+    fn recover_wait(
+        &mut self,
+        deadlines: &CleanupDeadlines,
+    ) -> Result<Vec<AttemptReceipt>, StepError>;
+    fn cancel_wait(&mut self, deadline: QueryDeadline) -> Result<CompletedStep, StepError>;
+    fn provider_wait(&mut self, deadline: QueryDeadline) -> Result<CompletedStep, StepError>;
+    fn runtime_wait(
+        &mut self,
+        kind: gcu_eval::disposable::tart::RuntimeLoss,
+        deadline: QueryDeadline,
+    ) -> Result<CompletedStep, StepError>;
+}
+
+impl Pump for Machine<'_> {
+    fn clone_wait(
+        &mut self,
+        golden: GoldenImage,
+        deadline: CloneDeadline,
+    ) -> Result<(), StepError> {
+        let caller = deadline.at();
+        let first = self.clone_vm(golden, deadline);
+        settle_unit(self, caller, first)
+    }
+
+    fn start_wait(
+        &mut self,
+        flags: &SoftnetFlags,
+        deadline: StartDeadline,
+    ) -> Result<(), StepError> {
+        let caller = deadline.at();
+        let first = self.start(flags, deadline);
+        settle_unit(self, caller, first)
+    }
+
+    fn isolate_wait(&mut self, deadline: GroupDeadline) -> Result<(), StepError> {
+        let caller = deadline.at();
+        let first = self.isolate(deadline);
+        settle_unit(self, caller, first)
+    }
+
+    fn bootstrap_wait(&mut self, deadline: StageDeadline) -> Result<(), StepError> {
+        let caller = deadline.at();
+        let first = self.bootstrap(deadline);
+        settle_unit(self, caller, first)
+    }
+
+    fn login_wait(&mut self, deadline: LoginDeadline) -> Result<(), StepError> {
+        let caller = deadline.at();
+        let first = self.login(deadline);
+        settle_unit(self, caller, first)
+    }
+
+    fn ready_wait(&mut self, deadline: QueryDeadline) -> Result<(), StepError> {
+        let caller = deadline.at();
+        let first = self.ready(deadline);
+        settle_unit(self, caller, first)
+    }
+
+    fn run_wait(&mut self, deadline: RunDeadline) -> Result<(), StepError> {
+        let caller = deadline.at();
+        let first = self.run(deadline);
+        settle_unit(self, caller, first)
+    }
+
+    fn arm_wait(&mut self, deadline: LeaseDeadline) -> Result<(), StepError> {
+        let caller = deadline.at();
+        let first = self.arm_owner_lease(deadline);
+        settle_unit(self, caller, first)
+    }
+
+    fn revoke_wait(&mut self, deadline: RevokeDeadline) -> Result<(), StepError> {
+        let caller = deadline.at();
+        let first = self.revoke(deadline);
+        settle_unit(self, caller, first)
+    }
+
+    fn destroy_wait(&mut self, deadlines: &CleanupDeadlines) -> Result<(), StepError> {
+        let caller = deadlines.query.at();
+        let first = self.destroy(deadlines);
+        settle_unit(self, caller, first)
+    }
+
+    fn seal_wait(&mut self, deadline: SealDeadline) -> Result<AttemptReceipt, StepError> {
+        let caller = deadline.at();
+        let first = self.seal(deadline);
+        match settle(self, caller, first)? {
+            CompletedStep::Sealed(receipt) => Ok(receipt),
+            _ => Err(StepError::Unexpected),
+        }
+    }
+
+    fn recover_wait(
+        &mut self,
+        deadlines: &CleanupDeadlines,
+    ) -> Result<Vec<AttemptReceipt>, StepError> {
+        let caller = deadlines.query.at();
+        let first = self.recover(deadlines);
+        match settle(self, caller, first)? {
+            CompletedStep::Recovered(receipts) => Ok(receipts),
+            _ => Err(StepError::Unexpected),
+        }
+    }
+
+    fn cancel_wait(&mut self, deadline: QueryDeadline) -> Result<CompletedStep, StepError> {
+        let caller = deadline.at();
+        let first = self.cancel(deadline);
+        settle(self, caller, first)
+    }
+
+    fn provider_wait(&mut self, deadline: QueryDeadline) -> Result<CompletedStep, StepError> {
+        let caller = deadline.at();
+        let first = self.note_provider_crash(deadline);
+        settle(self, caller, first)
+    }
+
+    fn runtime_wait(
+        &mut self,
+        kind: gcu_eval::disposable::tart::RuntimeLoss,
+        deadline: QueryDeadline,
+    ) -> Result<CompletedStep, StepError> {
+        let caller = deadline.at();
+        let first = self.note_runtime_loss(kind, deadline);
+        settle(self, caller, first)
+    }
 }

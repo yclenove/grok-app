@@ -15,13 +15,13 @@ use std::time::Duration;
 
 use gcu_eval::disposable::tart::{
     AttemptDeadline, AttemptLedger, BoundedOutput, CallError, ClockError, CloneDeadline, CloneId,
-    DeadlineError, DeleteDeadline, Digest, FakeClock, FakeGuestChannel, FakeLedger, FakeTartRunner,
-    GoldenImage, GuestChannel, GuestCommand, HostClock, IdentityError, InstallManifest,
-    LeaseDeadline, LedgerError, LedgerFact, LoginDeadline, ManifestError, MonoInstant, OutputError,
-    PolicyError, ProbeDeadline, QueryDeadline, RevokeDeadline, RunDeadline, RunId, ScriptOutcome,
-    ScriptedReply, SealDeadline, SoftnetFlags, StageDeadline, StartDeadline, StopDeadline,
-    TartCommand, TartRunner, GUEST_CHANNEL_VERSION, MAX_ALLOW_CIDRS, MAX_IDENTITY_LEN,
-    MAX_OUTPUT_BYTES, SOFTNET_BLOCK_CIDR,
+    CommandHandle, CommandPoll, DeadlineError, DeleteDeadline, Digest, FakeClock, FakeGuestChannel,
+    FakeLedger, FakeTartRunner, GoldenImage, GuestChannel, GuestCommand, HostClock, IdentityError,
+    InstallManifest, LeaseDeadline, LedgerError, LedgerFact, LedgerPoll, LoginDeadline,
+    ManifestError, MonoInstant, OutputError, PolicyError, ProbeDeadline, QueryDeadline,
+    RevokeDeadline, RunDeadline, RunId, ScriptOutcome, ScriptedReply, SealDeadline, SoftnetFlags,
+    StageDeadline, StartDeadline, StopDeadline, TartCommand, TartRunner, GUEST_CHANNEL_VERSION,
+    MAX_ALLOW_CIDRS, MAX_IDENTITY_LEN, MAX_OUTPUT_BYTES, SOFTNET_BLOCK_CIDR,
 };
 use gcu_eval::disposable::Probe;
 
@@ -461,7 +461,7 @@ fn reserve_is_visible_before_clone_and_permit_is_single_use() -> Result<(), Stri
     let run = ok!(RunId::new("run-7"));
     let clone = ok!(CloneId::new("clone-7"));
     must_err(
-        query_dyn(&ledger, &clone, &clock)?,
+        query_dyn(&mut ledger, &clone, &clock)?,
         LedgerError::NotFound,
         "query before reserve",
     )?;
@@ -482,7 +482,7 @@ fn reserve_is_visible_before_clone_and_permit_is_single_use() -> Result<(), Stri
     if permit.absolute_deadline() != absolute.at() {
         return Err("permit deadline differs from the reserved instant".into());
     }
-    let view = ok!(query_dyn(&ledger, &clone, &clock)?);
+    let view = ok!(query_dyn(&mut ledger, &clone, &clock)?);
     if view.run() != &run
         || view.clone_id() != &clone
         || view.absolute_deadline() != absolute.at()
@@ -498,7 +498,7 @@ fn reserve_is_visible_before_clone_and_permit_is_single_use() -> Result<(), Stri
     if !runner.trace().is_empty() {
         return Err("dropping a permit invoked clone".into());
     }
-    let still = ok!(query_dyn(&ledger, &clone, &clock)?);
+    let still = ok!(query_dyn(&mut ledger, &clone, &clock)?);
     if still.is_sealed() {
         return Err("dropping a permit sealed the row".into());
     }
@@ -549,7 +549,7 @@ fn ledger_matches_exact_ids_and_seals_without_prefix() -> Result<(), String> {
         absolute,
         &clock,
     ))?;
-    let found = ok!(query_dyn(&ledger, &short, &clock)?);
+    let found = ok!(query_dyn(&mut ledger, &short, &clock)?);
     if found.run() != &short_run {
         return Err("exact query returned another run".into());
     }
@@ -563,7 +563,7 @@ fn ledger_matches_exact_ids_and_seals_without_prefix() -> Result<(), String> {
         LedgerFact::RecoveryNoted,
         ok!(QueryDeadline::after(clock.now(), Duration::from_millis(1))),
     ));
-    let after = ok!(query_dyn(&ledger, &short, &clock)?);
+    let after = ok!(query_dyn(&mut ledger, &short, &clock)?);
     if after.facts() != [LedgerFact::CloneIssued] {
         return Err("append leaked across ids".into());
     }
@@ -588,7 +588,7 @@ fn ledger_matches_exact_ids_and_seals_without_prefix() -> Result<(), String> {
         LedgerError::Sealed,
         "second seal",
     )?;
-    let sealed = ok!(query_dyn(&ledger, &short, &clock)?);
+    let sealed = ok!(query_dyn(&mut ledger, &short, &clock)?);
     if !sealed.is_sealed() || sealed.facts() != [LedgerFact::CloneIssued] {
         return Err("seal rewrote the row".into());
     }
@@ -649,7 +649,7 @@ fn ledger_expired_call_does_not_write() -> Result<(), String> {
         LedgerError::Expired,
         "expired append",
     )?;
-    let view = ok!(query_dyn(&ledger, &clone, &clock)?);
+    let view = ok!(query_dyn(&mut ledger, &clone, &clock)?);
     if !view.facts().is_empty() {
         return Err("expired append wrote a fact".into());
     }
@@ -756,32 +756,38 @@ fn command_trace_is_fixed_ops_with_required_softnet() -> Result<(), String> {
     let flags = ok!(SoftnetFlags::try_new(&[Ipv4Addr::new(1, 1, 1, 1)]));
     {
         let runner: &mut dyn TartRunner = &mut runner;
-        ok!(runner.clone_vm(
+        let started = runner.begin_clone(
             permit,
             GoldenImage::MacosS2Eval,
             ok!(CloneDeadline::after(clock.now(), Duration::from_secs(30))),
-        ));
-        ok!(runner.start(
+        );
+        ok!(dyn_ready(runner, started));
+        let started = runner.begin_start(
             &clone,
             &flags,
             ok!(StartDeadline::after(clock.now(), StartDeadline::CAP)),
-        ));
-        ok!(runner.stop(
+        );
+        ok!(dyn_ready(runner, started));
+        let started = runner.begin_stop(
             &clone,
             ok!(StopDeadline::after(clock.now(), Duration::from_secs(1))),
-        ));
-        ok!(runner.delete(
+        );
+        ok!(dyn_ready(runner, started));
+        let started = runner.begin_delete(
             &clone,
             ok!(DeleteDeadline::after(clock.now(), DeleteDeadline::CAP)),
-        ));
-        ok!(runner.list(ok!(QueryDeadline::after(
+        );
+        ok!(dyn_ready(runner, started));
+        let started = runner.begin_list(ok!(QueryDeadline::after(
             clock.now(),
             Duration::from_millis(5)
-        ))));
-        ok!(runner.status(
+        )));
+        ok!(dyn_ready(runner, started));
+        let started = runner.begin_status(
             &clone,
             ok!(QueryDeadline::after(clock.now(), QueryDeadline::CAP)),
-        ));
+        );
+        ok!(dyn_ready(runner, started));
     }
     let commands: Vec<TartCommand> = runner
         .trace()
@@ -1136,17 +1142,42 @@ fn reserve_dyn(
 ) -> Result<gcu_eval::disposable::tart::ClonePermit, LedgerError> {
     let call =
         QueryDeadline::after(clock.now(), QueryDeadline::CAP).map_err(|_| LedgerError::Expired)?;
-    ledger.reserve(run, clone, absolute, call)
+    let handle = ledger.begin_reserve(run, clone, absolute, call)?;
+    match ledger.poll_ledger(&handle)? {
+        LedgerPoll::Permit(permit) => Ok(permit),
+        LedgerPoll::Pending => Err(LedgerError::TimedOut),
+        _ => Err(LedgerError::Failed),
+    }
 }
 
 fn query_dyn(
-    ledger: &dyn AttemptLedger,
+    ledger: &mut dyn AttemptLedger,
     clone: &CloneId,
     clock: &dyn HostClock,
 ) -> Result<Result<gcu_eval::disposable::tart::Reservation, LedgerError>, String> {
     let call = QueryDeadline::after(clock.now(), QueryDeadline::CAP)
         .map_err(|err| format!("query deadline: {err:?}"))?;
-    Ok(ledger.query(clone, call))
+    let read = match ledger.begin_query(clone, call) {
+        Ok(handle) => match ledger.poll_ledger(&handle) {
+            Ok(LedgerPoll::Read(row)) => Ok(row),
+            Ok(LedgerPoll::Pending) => Err(LedgerError::TimedOut),
+            Ok(_) => Err(LedgerError::Failed),
+            Err(err) => Err(err),
+        },
+        Err(err) => Err(err),
+    };
+    Ok(read)
+}
+
+pub(crate) fn dyn_ready(
+    runner: &mut dyn TartRunner,
+    started: Result<CommandHandle, CallError>,
+) -> Result<BoundedOutput, CallError> {
+    let handle = started?;
+    match runner.poll_command(&handle)? {
+        CommandPoll::Ready(body) => Ok(body),
+        CommandPoll::Pending => Err(CallError::TimedOut),
+    }
 }
 
 fn noted<T, E: std::fmt::Debug>(result: Result<T, E>) -> Result<T, String> {
