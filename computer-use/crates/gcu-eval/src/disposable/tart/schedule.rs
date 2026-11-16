@@ -10,24 +10,28 @@
 //! 1021 ms. A one-way delay was not measured on its own. Its only upper bound
 //! is the larger round trip, 1023 ms, so each leg uses 1023 ms. The service
 //! step is 100 ms. `due` is sampled on that same step grid, so a publication
-//! can slip one more step. The grant window stays 2000 ms. None of these
-//! figures is a new lease or Stop limit.
+//! can slip one more step. The grant window is [`LEASE_WINDOW_MS`] (5000 ms,
+//! owner decision 2026-11-15). None of these figures is a Stop limit. The
+//! outer owner proof, the guest supervisor renewal, and the S3 scope lease
+//! stay as they are.
 //!
 //! The worst-case sample age when the grant is visible is guest→host, plus
-//! one service step, plus host→guest: `1023 + 100 + 1023 = 2146`. That is
-//! already past 2000 ms, so the first grant can miss its own deadline. The
-//! gap until the next grant is visible adds the 800 ms publish interval, the
+//! one service step, plus host→guest: `1023 + 100 + 1023 = 2146`. The gap
+//! until the next grant is visible adds the 800 ms publish interval, the
 //! 100 ms `due` slip, and one one-way of visibility variation:
-//! `800 + 100 + 1023 = 1923`. Continuity needs the next grant to be visible
-//! before the old deadline, which is `age + gap < 2000`. It is not. Even the
-//! tighter reading that charges the whole exchange as one 1023 ms round trip
-//! still misses: `1023 + 100 + 800 + 100 = 2023`. `prove` returns
-//! [`ScheduleError::Infeasible`] and does not hand back a nominal proof.
+//! `800 + 100 + 1023 = 1923`. Continuity needs `2146 + 1923 = 4069 < 5000`.
+//! The margin is 931 ms. The single-round-trip reading
+//! `1023 + 100 + 800 + 100 = 2023` also fits. [`prove`] returns a
+//! [`ScheduleProof`] for the attempt window.
 //!
 //! The longest window is prep plus task plus cleanup (login sits inside
-//! prep): 1_560_000 ms. The 800 ms grid would be `1_560_000 / 800 + 1 = 1951`
+//! prep): 1_560_000 ms. The 800 ms grid is `1_560_000 / 800 + 1 = 1951`
 //! samples, plus eight off-grid completion samples, 1959 against the 2048
-//! cap. That count is not a schedule. The timing bound fails first.
+//! cap. A 2000 ms grant, or a larger age or gap, still returns
+//! [`ScheduleError::Infeasible`]. So does a grid above 2048 requests. Under
+//! the historical `g+2s` window that same age is already past 2000 ms, and
+//! both `2146 + 1923` and `2023` miss it. [`prove_model`] keeps that closed
+//! case so the gate is not a constant success.
 
 use std::time::Duration;
 
@@ -107,33 +111,66 @@ pub struct ScheduleProof {
     pub slack_ms: u64,
 }
 
+/// Grant, age, and gap a feasibility check evaluates.
+///
+/// [`prove`] fills this from the measured constants and [`LEASE_WINDOW_MS`].
+/// Tests pass a shorter grant or a larger age or gap. That does not change
+/// the public lease constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CycleModel {
+    /// Attempt length, in milliseconds. This sizes the request grid.
+    pub window_ms: u64,
+    /// Guest grant. `until_ms` is the sample plus this.
+    pub grant_ms: u64,
+    /// Worst-case sample age when the grant is visible.
+    pub age_ms: u64,
+    /// Worst-case gap between grants becoming visible.
+    pub gap_ms: u64,
+}
+
 /// Prove `window_ms` fits the measured grant cycle and the 2048 cap.
 ///
-/// Does not sleep, renew, or start a thread. A window whose cycle misses the
-/// grant deadline is [`ScheduleError::Infeasible`], including a short window.
-/// The function does not return a proof that merely names the publish period.
+/// Does not sleep, renew, or start a thread. The grant is [`LEASE_WINDOW_MS`].
+/// A cycle that misses that grant, or a grid past [`MAX_POLLS`], is
+/// [`ScheduleError::Infeasible`]. The function does not return a proof that
+/// merely names the publish period.
 pub fn prove(window_ms: u64) -> Result<ScheduleProof, ScheduleError> {
+    prove_model(CycleModel {
+        window_ms,
+        grant_ms: LEASE_WINDOW_MS,
+        age_ms: ACCEPT_AGE_MS,
+        gap_ms: GRANT_GAP_MS,
+    })
+}
+
+/// Evaluate `model` against the publish grid and the 2048 cap.
+///
+/// Does not sleep, renew, or start a thread. Public callers use [`prove`].
+pub(crate) fn prove_model(model: CycleModel) -> Result<ScheduleProof, ScheduleError> {
     let period = RENEW_MS;
-    let age = ACCEPT_AGE_MS;
-    let gap = GRANT_GAP_MS;
-    let grant = LEASE_WINDOW_MS;
-    let periodic = window_ms / period + 1;
+    let periodic = model.window_ms / period + 1;
     let count = periodic.saturating_add(EXTRA_SAMPLES);
-    let fresh = age < grant;
-    let continuous = age.checked_add(gap).is_some_and(|sum| sum < grant);
+    let fresh = model.age_ms < model.grant_ms;
+    let continuous = model
+        .age_ms
+        .checked_add(model.gap_ms)
+        .is_some_and(|sum| sum < model.grant_ms);
     if !fresh || !continuous || count > MAX_POLLS {
-        return Err(ScheduleError::Infeasible { window_ms, count });
+        return Err(ScheduleError::Infeasible {
+            window_ms: model.window_ms,
+            count,
+        });
     }
     Ok(ScheduleProof {
-        window_ms,
+        window_ms: model.window_ms,
         period_ms: period,
         periodic,
         inventory_count: count,
         lease_count: count,
         margin: MAX_POLLS - count,
-        age_ms: age,
-        gap_ms: gap,
-        slack_ms: grant - age - gap,
+        age_ms: model.age_ms,
+        gap_ms: model.gap_ms,
+        slack_ms: model.grant_ms - model.age_ms - model.gap_ms,
     })
 }
 
@@ -167,27 +204,38 @@ pub fn step_end(now: MonoInstant) -> Result<MonoInstant, DeadlineError> {
 mod tests {
     use super::ScheduleError;
     use super::{
-        attempt_window_ms, prove, ACCEPT_AGE_MS, EXTRA_SAMPLES, GRANT_GAP_MS, LEASE_WINDOW_MS,
-        MAX_POLLS, ONE_WAY_MS, RENEW_MS, ROUND_TRIP_MAX_MS, STEP_MS,
+        attempt_window_ms, prove, prove_model, CycleModel, ACCEPT_AGE_MS, EXTRA_SAMPLES,
+        GRANT_GAP_MS, LEASE_WINDOW_MS, MAX_POLLS, ONE_WAY_MS, RENEW_MS, ROUND_TRIP_MAX_MS, STEP_MS,
     };
 
+    fn grid_count(window_ms: u64) -> u64 {
+        window_ms / RENEW_MS + 1 + EXTRA_SAMPLES
+    }
+
     #[test]
-    fn measured_bounds_reject_the_attempt_window() {
+    fn measured_bounds_fit_the_attempt_window() {
         if ROUND_TRIP_MAX_MS != 1023 || ONE_WAY_MS != ROUND_TRIP_MAX_MS {
             panic!("one-way bound is the round-trip max, got {ONE_WAY_MS}");
         }
         let age = ONE_WAY_MS + STEP_MS + ONE_WAY_MS;
         let gap = RENEW_MS + STEP_MS + ONE_WAY_MS;
-        if ACCEPT_AGE_MS != age || GRANT_GAP_MS != gap {
+        if ACCEPT_AGE_MS != 2_146
+            || age != ACCEPT_AGE_MS
+            || GRANT_GAP_MS != 1_923
+            || gap != GRANT_GAP_MS
+        {
             panic!("age {ACCEPT_AGE_MS} gap {GRANT_GAP_MS}, want {age} and {gap}");
         }
-        if age < LEASE_WINDOW_MS && age + gap < LEASE_WINDOW_MS {
-            panic!("bounds fit the grant; the gate would return a proof");
+        if LEASE_WINDOW_MS != 5_000 {
+            panic!("grant window {LEASE_WINDOW_MS}");
         }
-        // One round trip for the whole exchange, plus service, period, and due slip.
-        let single_round_trip = ROUND_TRIP_MAX_MS + STEP_MS + RENEW_MS + STEP_MS;
-        if single_round_trip <= LEASE_WINDOW_MS {
-            panic!("single round trip still fits: {single_round_trip}");
+        let sum = age + gap;
+        if sum != 4_069 || LEASE_WINDOW_MS - sum != 931 || sum >= LEASE_WINDOW_MS {
+            panic!("continuity {sum} against {LEASE_WINDOW_MS}");
+        }
+        let single = ROUND_TRIP_MAX_MS + STEP_MS + RENEW_MS + STEP_MS;
+        if single != 2_023 || single > LEASE_WINDOW_MS {
+            panic!("single round trip {single}");
         }
         let window = attempt_window_ms();
         if window != 1_560_000 {
@@ -195,19 +243,92 @@ mod tests {
         }
         let periodic = window / RENEW_MS + 1;
         let count = periodic + EXTRA_SAMPLES;
-        if periodic != 1951 || count != 1959 || count > MAX_POLLS {
+        if periodic != 1_951 || count != 1_959 || count > MAX_POLLS {
             panic!("count formula changed: periodic {periodic} count {count}");
         }
         match prove(window) {
+            Ok(proof)
+                if proof.window_ms == window
+                    && proof.period_ms == RENEW_MS
+                    && proof.periodic == periodic
+                    && proof.inventory_count == count
+                    && proof.lease_count == count
+                    && proof.margin == MAX_POLLS - count
+                    && proof.age_ms == age
+                    && proof.gap_ms == gap
+                    && proof.slack_ms == 931 => {}
+            other => panic!("attempt window was not proved: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn historical_2000_grant_is_infeasible() {
+        let window = attempt_window_ms();
+        let count = grid_count(window);
+        match prove_model(CycleModel {
+            window_ms: window,
+            grant_ms: 2_000,
+            age_ms: ACCEPT_AGE_MS,
+            gap_ms: GRANT_GAP_MS,
+        }) {
             Err(ScheduleError::Infeasible {
                 window_ms,
                 count: got,
             }) if window_ms == window && got == count => {}
-            other => panic!("nominal proof: {other:?}"),
+            other => panic!("2000 ms grant returned a proof: {other:?}"),
         }
-        match prove(1) {
-            Err(ScheduleError::Infeasible { window_ms: 1, .. }) => {}
-            other => panic!("short window returned a proof: {other:?}"),
+    }
+
+    #[test]
+    fn larger_jitter_is_infeasible() {
+        let window = attempt_window_ms();
+        let count = grid_count(window);
+        // 930 ms of extra gap still fits: 4069 + 930 = 4999, slack 1 ms.
+        let inside = GRANT_GAP_MS + 930;
+        match prove_model(CycleModel {
+            window_ms: window,
+            grant_ms: LEASE_WINDOW_MS,
+            age_ms: ACCEPT_AGE_MS,
+            gap_ms: inside,
+        }) {
+            Ok(proof) if proof.slack_ms == 1 && proof.gap_ms == inside => {}
+            other => panic!("jitter inside the margin was rejected: {other:?}"),
+        }
+        // One more millisecond lands on the grant. Continuity is strict.
+        let edge = GRANT_GAP_MS + 931;
+        if ACCEPT_AGE_MS + edge != LEASE_WINDOW_MS {
+            panic!("edge jitter did not land on the grant");
+        }
+        match prove_model(CycleModel {
+            window_ms: window,
+            grant_ms: LEASE_WINDOW_MS,
+            age_ms: ACCEPT_AGE_MS,
+            gap_ms: edge,
+        }) {
+            Err(ScheduleError::Infeasible {
+                window_ms,
+                count: got,
+            }) if window_ms == window && got == count => {}
+            other => panic!("edge jitter returned a proof: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_count_above_2048_is_infeasible() {
+        // 1_631_200 / 800 + 1 + 8 = 2048, still inside the cap.
+        let edge = 1_631_200;
+        match prove(edge) {
+            Ok(proof) if proof.inventory_count == MAX_POLLS && proof.margin == 0 => {}
+            other => panic!("2048 requests were rejected: {other:?}"),
+        }
+        // One more period: 1_632_000 / 800 + 1 + 8 = 2049.
+        let over = 1_632_000;
+        match prove(over) {
+            Err(ScheduleError::Infeasible {
+                window_ms,
+                count: 2_049,
+            }) if window_ms == over => {}
+            other => panic!("2049 requests were accepted: {other:?}"),
         }
     }
 }

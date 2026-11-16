@@ -182,7 +182,7 @@ pub enum SeqFault {
     /// Inventory or lease exceeded 2048 requests in this attempt.
     #[error("too many inventory or lease requests")]
     TooMany,
-    /// `sample_ms + 2000` overflowed.
+    /// `sample_ms` plus [`super::ops::LEASE_WINDOW_MS`] overflowed.
     #[error("lease deadline overflowed")]
     Overflow,
     /// A request landed in a reply slot, or the status is not legal here.

@@ -93,7 +93,7 @@ live I 的 `st_size`/`st_blocks × 512 bytes` 均须 ≤80 MiB，create scratch 
 | 准备 reserve→ready | ≤10min；安装/查询各 ≤5s，clone ≤60s；start ≤120s **含**卷准备 ≤40s（create ≤20s、attach ≤10s），未耗尽的 start 余量才供启动 |
 | guest 操作 | probe ≤2s/项、组 ≤60s；bootstrap/最终 ACK ≤5s；login ≤5min；run ≤min(task.max_seconds,15min) |
 | 清理 | 总 ≤60s：revoke/drain 10s + stop/确认 20s + delete/卷清理 20s + seal 10s；删除阶段 VM/确认 5s、normal detach 5s、唯一 force 5s、unlink/缺席 5s 共用 |
-| 调度/租约 | Stop/存活检查及 pending 推进总间隔 ≤100ms；host 发布/外层 owner 证明各 ≤1s；guest grant `g+2s`，预留 ≤1s 撤权/整树终止，总 ≤3s；独立 S3 scope 3s 不变 |
+| 调度/租约 | Stop/存活检查及 pending 推进总间隔 ≤100ms；host 发布/外层 owner 证明各 ≤1s；guest grant `g+5s`，预留 ≤1s 撤权/整树终止，总 ≤6s；独立 S3 scope 3s 不变 |
 
 子预算最大值不保证可并取；不足即停/隔离，不延总截止。
 回执记资源绑定、意图/身份/读回、版本/argv 摘要、权限/flags/索引/备份、容量峰值、每步有效截止/耗时/退出码、force 次数、独立缺席、recovery/unknown。
@@ -178,9 +178,9 @@ bootstrap/login/run terminal（含 revoke 中断的 cancelled）及 revoke termi
 ### 租约与同步调度（M4）
 
 `sample_ms=g` 是 guest **本 boot 连续单调毫秒**；须测 VM pause/宿主休眠推进语义，恢复能续用已过期 grant 则阻断。
-guest 保留本 boot 实际生成的有界 inventory `(request_seq,g)` 表，只接受引用真实样本、非未来、`g+2000` 不溢出的 grant；重复样本不推迟截止。
-host 回显样本，guest 只取固定 `g+2s`，不按收到时刻起租；新 grant 在旧截止前到达，首次 grant 不得已过自身截止。
-**旧截止一到不可复活**，最后1s撤权/释放/杀净树，总≤3s。测 sample→接受年龄、有效 grant 间隙、负载终止完成时间；不能延长租约/Stop。
+guest 保留本 boot 实际生成的有界 inventory `(request_seq,g)` 表，只接受引用真实样本、非未来、`g+5000` 不溢出的 grant；重复样本不推迟截止。
+host 回显样本，guest 只取固定 `g+5s`，不按收到时刻起租；新 grant 在旧截止前到达，首次 grant 不得已过自身截止。
+**旧截止一到不可复活**，最后1s撤权/释放/杀净树，总≤6s。测 sample→接受年龄、有效 grant 间隙、负载终止完成时间；不能延长租约/Stop。
 
 外层 owner 经既有私有控制连接每≤1s给绑定 attempt/递增序号的证明，**reserve/准备到 seal**；不得用本地 now 自续。
 guest grant 仅从首 inventory 绑定 boot 到开始 revoke 前续期，VM 退出后不写邮箱；与 owner 存活、S3 scope 租约独立。
@@ -338,7 +338,7 @@ C7 自主终止及所有 transport/liveness 验收移到 M7/M9，在 block-all �
 3. 访客 rename 覆盖已存在名字：宿主约 0.16 s 内可见。
 4. 乒乓往返稳定在约 1 s（见上表），与 2 相符。
 
-**对 §3 协议的约束（由上述事实推出，M3/M4 实现必须遵守）**：(a) 访客将会读取的每一个邮箱名字都由宿主在 VM 启动前预建，绝不让访客等待新名字出现；(b) 发布一律是 staging 后 rename 覆盖预建槽位，消息内容带方向与单调 seq，读方只接受期望 seq，旧 seq/占位继续等；(c) 读预建槽位时 ENOENT 与“读取中被替换”都是瞬时状态，丢弃本次读到的字节并在本轮截止内重读，只有读到的字节本身畸形/撕裂/seq 不符才是粘性失败；(d) 约 1 s 的可见延迟要计入租约预算（续租 ≤1 s、访客 ≤3 s 停树），M4/M7 须在负载下实测余量；(e) 重读次数要计入证据，不能隐藏。
+**对 §3 协议的约束（由上述事实推出，M3/M4 实现必须遵守）**：(a) 访客将会读取的每一个邮箱名字都由宿主在 VM 启动前预建，绝不让访客等待新名字出现；(b) 发布一律是 staging 后 rename 覆盖预建槽位，消息内容带方向与单调 seq，读方只接受期望 seq，旧 seq/占位继续等；(c) 读预建槽位时 ENOENT 与“读取中被替换”都是瞬时状态，丢弃本次读到的字节并在本轮截止内重读，只有读到的字节本身畸形/撕裂/seq 不符才是粘性失败；(d) 约 1 s 的可见延迟要计入租约预算（续租 ≤1 s、访客 ≤6 s 停树（2026-11-15 所有者决定）），M4/M7 须在负载下实测余量；(e) 重读次数要计入证据，不能隐藏。
 
 ### M2c-a 限容卷实测事实（2026-11-12）
 
@@ -393,6 +393,10 @@ M4 第 2 轮审阅后拆为 M4a（邮箱侧）与 M4b（machine 集成，见 §6
 - 结论：**在现有常量（`g+2s`、访客 ≤3 s 停树）与实测 virtiofs 可见延迟下，没有可行的 fresh-sample/grant 调度**；可行性门对任何窗口都返回 `Infeasible`，按 §3“无可行调度即 gate 失败，不增租约/线程/observer”，真实通道不得准入。代码与测试见 S11-M4a。
 - 待 owner 决定的方向（未决定，均需另行审阅）：(1) 修订租约常量（例如更长的访客租约与停树时限），这会改变 §3 的安全时限；(2) 精测单向延迟分布（C11 已测：原地写同样约 1 s，见“C11 原地写可见性实测”，此方向不能在不改常量下给出可行解）；(3) 换一种宿主→访客的快速通知方式（须仍符合 2026-11-10 的“无 IP 控制通道”决定）。
 
+**所有者决定（2026-11-15）**：选 (1)。访客租约窗口改为 `g+5s`（5000 ms），宿主失联后访客最迟 6 s 停树（最后 1 s 撤权/释放/杀净树）。宿主侧 Stop 常量不变：100 ms 锁存、500 ms 释放、5 s native、4750 ms driver。外层 owner 证明 ≤1 s、guest supervisor 续租调度、独立 S3 scope 3 s 租约不变。
+
+同一实测上界（单向 1023 ms、一步 100 ms、发布间隔 800 ms）下重新核算：样本可见年龄 1023+100+1023 = 2146 ms；相邻 grant 可见间隔 800+100+1023 = 1923 ms；2146+1923 = 4069 < 5000，余量 931 ms。请求数 1_560_000/800+1+8 = 1959 ≤ 2048。在 `g+5s` 下 fresh-sample/grant 调度可行。上文 `g+2s` 的不可行推算保留为历史事实。窗口不足（例如显式 2000 ms，或更大的年龄/间隔抖动使年龄 + 间隔不小于 5000 ms）或请求数超过 2048 时，可行性门仍返回 `Infeasible`。
+
 ### C11 原地写可见性实测（2026-11-13）
 
 同一台 Mac mini，`s11-0-probe.sh --stage M --case C11`，每子例一台一次性 clone（DEFAULT 网络，仅机制），预建两个 64 字节文件，原地 `pwrite`+`fsync`，读方每 5 ms 轮询；宿主 RTT 从 `pwrite` 之前计到读到 pong。
@@ -422,7 +426,7 @@ endpoint 泄漏、短期凭据/无 refresh、进程/窗口残余及 S3/S4/S12/TC
 | S11-M2 | [S11-0c](#lab)机械结果/无提权清单；失败缩减设计 | M1；不依赖 S11e/M7 | 复制探针无需 owner 安装；已有双主体可测，否则按§5 unknown/后移，不登录模型 |
 | S11-M3 | [codec/open/publication](#宿主发布与读取) fake/离线竞态、固定槽/源名替换、有界状态帧/过时 ACK | [七操作](#operations)；独立审阅 | 无 |
 | S11-M4a | 邮箱侧：`MailboxGuestChannel`（七方法、pending、不重发、仅经 inventory 完成、消费记录核对）、grant 记账与样本固定、按实测上界的调度可行性门、单次读取 128 KiB | M3；独立审阅 | 无 |
-| S11-M4b | machine 集成：每个公开 step 共享 100 ms 截止与可续跑分片、kill/reap 句柄与冻结截止、Stop/owner 证明服务（reserve→seal）、unknown effect 粘性隔离、回收游标、保存的 revoke end；先短设计再代码 | M4a、调度可行性有解（见“M4a 调度可行性”）、设计与代码独立审阅后才真实接线 | 视调度结论而定 |
+| S11-M4b | machine 集成：每个公开 step 共享 100 ms 截止与可续跑分片、kill/reap 句柄与冻结截止、Stop/owner 证明服务（reserve→seal）、unknown effect 粘性隔离、回收游标、保存的 revoke end；先短设计再代码 | M4a、调度可行性已满足（见“M4a 调度可行性”的**所有者决定（2026-11-15）**）、设计与代码独立审阅后才真实接线 | 视调度结论而定 |
 | S11-M5 | 卷账本/持久目录身份/销毁屏障 fake、C5/recovery | [五条规则](#destroy)；禁 VM-only 成功先 seal | 无 |
 | S11-M6 | 宿主卷/Tart 私有适配（依§2生命周期） | 仅 M2 已测固定 argv，接 M5；[准入边界](#admission) | 只在已审阅宿主范围内 |
 | S11-M7 | S11e supervisor/golden/sandbox | [§4](#supervisor)与下列自主终止义务 | 必要准备安装/封存签认 |
