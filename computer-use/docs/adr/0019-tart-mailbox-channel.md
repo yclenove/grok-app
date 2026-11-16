@@ -408,7 +408,24 @@ M4 第 2 轮审阅后拆为 M4a（邮箱侧）与 M4b（machine 集成，见 §6
 
 **推论**：(a) 宿主→访客约 1 s 的可见延迟不来自 rename，而来自访客侧 virtiofs 的缓存周期；原地写不能绕开它。(b) 访客持有的 fd 看不到宿主后续写入，任何依赖持久 fd 的读法都不可用。(c) 原地写会被读到撕裂，若采用必须带校验。(d) 因此“M4a 调度可行性”的不可行结论不变；在不改常量的前提下，经共享目录的宿主→访客通知无法明显快于 1 s。
 
-**仍未测**：C8 真正的双主体映射（准备副本 `macos-s2-eval-c8` 已克隆，等 owner 建标准账号，步骤见 runbook）、block-all 下的自主运行与存活（M7/M9）。
+### C8 双主体实测（2026-11-15）
+
+同一台 Mac mini，`s11-0-probe.sh --stage M --case C8 --golden macos-s2-eval-c8 --second-key …`：一次性 clone 来自 owner 准备的副本 `macos-s2-eval-c8`（新增标准账号 `gcuprobe`，uid 502，非 admin，已核实）；两主体都只经各自的一次性受限密钥运行固定命令；阶段 A1（eval，uid 501，admin 组）→ B（gcuprobe）→ A2（eval），在导出的私有目录 `mailbox/c8/` 下操作。判定 `unknown/observed`（机制测量）。
+
+| 操作 | 结果（只记事实） |
+| --- | --- |
+| A1 eval 建 `a-file`（chmod 0600）、`a-shared`（0644）、`a-dir`（0700） | 全部 ok；访客看到属主 501:20 |
+| B gcuprobe 对 eval 的 `a-file`（0600）读/写/chmod/chown 为自身/rename/unlink | **全部 ok** |
+| B 对 `a-shared` 同上；对 `a-dir` 读/chmod/chown/rename/unlink | 全部 ok；仅“往 `a-dir` 写”为 other |
+| B 建 `b-file`、chmod 0600；chown 给 uid 501 | 建与 chmod ok（访客看到 502:20）；chown 给 501 为 **EPERM** |
+| A2 eval 对 gcuprobe 的 `b-file` 读/写/chmod/chown/rename/unlink | 全部 ok |
+| 宿主侧 | 结果槽属宿主用户；访客新建对象在宿主上已被 B/A2 删除；ACL 两侧均为 none |
+
+**推论**：经 Tart `--dir`（virtiofs）导出的目录上，访客内的 Unix 属主只是显示身份，**不执行权限检查**：任一访客账号都能读写、改权限、把他人对象 chown 给自己、重命名和删除另一账号（含 admin）创建的 0600 对象；唯一被拒的是把自己的对象 chown 给他人。因此**不能用访客内的文件权限把模型进程与 supervisor 隔开**：模型账号若能访问该挂载点，就能改写/删除 supervisor 的邮箱文件。M7（§4 supervisor/sandbox）必须用挂载点不可见、沙箱或等价手段阻止模型进程访问邮箱，不能依赖 uid/mode/ACL。
+
+首轮双主体运行在启动就绪处失败一次：就绪 SSH 单次 15 s 超时后探针即放弃；已改为在同一启动预算内重试（`stage-m-ready-retry` 回归）。
+
+**仍未测**：block-all 下的自主运行与存活（M7/M9）。
 
 ## 6. 残余风险、not_run 与分步交付
 

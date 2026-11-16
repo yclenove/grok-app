@@ -959,7 +959,7 @@ ssh_bg() {
   SSH_BG_PID=$!
 }
 boot_ready_m() {
-  local name=$1 exec_done=0 guest_ip="" boot_until
+  local name=$1 exec_done=0 guest_ip="" boot_until rs
   boot_until=$((SECONDS + $(cap_secs 60)))
   S_SSH=no-address
   while [[ "$SECONDS" -lt "$boot_until" && "$REQUEST_CLEANUP" != 1 ]]; do
@@ -973,9 +973,16 @@ boot_ready_m() {
     fi
     if [[ "$S_SSH" == pending ]]; then
       if ! sole_running; then S_SSH=not-sole; break; fi
-      ssh_lab 15 /dev/null "$SSH_KEY" /usr/bin/true
-      if [[ "$RB_TIMED_OUT" == 1 || "$RB_OVERFLOW" == 1 || "$HALT" == 1 ]]; then S_SSH=timeout; break; fi
-      if [[ "$RB_STATUS" -eq 0 ]]; then S_SSH=connected; fi
+      rs=15
+      if [[ "${S11_TEST_MODE:-}" == 1 ]]; then
+        case "${S11_READY_SSH_SEC:-}" in ""|*[!0-9]*) ;; *) rs=$S11_READY_SSH_SEC ;; esac
+      fi
+      ssh_lab "$rs" /dev/null "$SSH_KEY" /usr/bin/true
+      if [[ "$RB_OVERFLOW" == 1 || "$HALT" == 1 ]]; then S_SSH=timeout; break; fi
+      # A slow first answer while the guest is still booting: the attempt was
+      # reaped, so try again inside the same boot budget instead of giving up.
+      if [[ "$RB_TIMED_OUT" == 1 ]]; then S_SSH=no-address
+      elif [[ "$RB_STATUS" -eq 0 ]]; then S_SSH=connected; fi
     fi
     if [[ "$S_SSH" == connected && "$exec_done" == 1 ]]; then S_COLL=ok; S_EXEC=$EXEC_RESULT; return 0; fi
     [[ "$SECONDS" -ge "$boot_until" ]] && break

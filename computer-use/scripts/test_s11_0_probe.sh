@@ -194,6 +194,7 @@ install_templates() {
     'if [[ -n "$kh" && -f "$kh" ]]; then cp "$kh" "$ROOT/known_hosts.copy"; fi' \
     'ready=0; for a in "$@"; do [[ "$a" == "/usr/bin/true" ]] && ready=1; done' \
     'if [[ "$ready" == 1 ]]; then' \
+    '  if [[ -f "$ROOT/ssh_hang_once" && ! -f "$ROOT/ssh_hang_once.hit" ]]; then : >"$ROOT/ssh_hang_once.hit"; trap "exit 0" TERM INT HUP; sleep 5; exit 0; fi' \
     '  if [[ -f "$ROOT/ssh_fail_n" ]]; then n=0; [[ -f "$ROOT/ssh.count" ]] && n=$(cat "$ROOT/ssh.count"); n=$((n+1)); echo "$n" >"$ROOT/ssh.count"; fn=$(cat "$ROOT/ssh_fail_n"); [[ "$n" -le "$fn" ]] && exit 255; fi' \
     '  exit 0; fi' \
     'case " $* " in *s11m.XXXXXX*) if [[ -f "$ROOT/init.body" ]]; then cat >"$ROOT/init2.body"; else cat >"$ROOT/init.body"; fi; printf "init-ok\n"; exit 0 ;; esac' \
@@ -886,7 +887,7 @@ setup() {
   export TMPDIR=$CASE/tmp
   export S11_START_SEC=0
   unset BASH_ENV S11_XTRACE S11_BOUND_SEC S11_BOUND_POLLS S11_FORCE_NAME S11_PROBE_BUDGET S11_CLEANUP_BUDGET S11_REAP_POLLS S11_FAIL_ROW_N S11_FAIL_STAGE S11_PROBE_MODE
-  unset S11_HDIUTIL S11_DISKUTIL S11_PLUTIL S11_MOUNT S11_MDUTIL S11_TMUTIL S11_MDFIND S11_STAT S11_DF S11_VOLIO S11_LS S11_TEST_MODE S11_C10_WAIT  S11_R_BUDGET S11_RECEIPT_STALL S11_READY_SEC S11_C7_BUDGET S11_C11_PREP_STALL
+  unset S11_HDIUTIL S11_DISKUTIL S11_PLUTIL S11_MOUNT S11_MDUTIL S11_TMUTIL S11_MDFIND S11_STAT S11_DF S11_VOLIO S11_LS S11_TEST_MODE S11_C10_WAIT S11_READY_SSH_SEC  S11_R_BUDGET S11_RECEIPT_STALL S11_READY_SEC S11_C7_BUDGET S11_C11_PREP_STALL
   export S11_TEST_MODE=1
   ARGS=(--ssh-key "$CASE/id_key" --tart-home "$CASE/thome" --out "$CASE/out")
 }
@@ -4219,6 +4220,20 @@ PY
   [[ -n "$mbx" && -f "$mbx/result-a1" && -f "$mbx/result-b" && -f "$mbx/result-a2" ]] || die "phase slots removed"
 }
 
+# One slow readiness answer while the guest boots must be retried inside the
+# boot budget, not end the case (seen once on the Mini with the C8 copy).
+test_stage_m_ready_retry() {
+  setup
+  write_pinned
+  write_fake_probe
+  touch "$ROOT/ssh_hang_once"
+  export S11_READY_SSH_SEC=1
+  run_probe 30 --stage M --case C1 --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned" "${ARGS[@]}"
+  common_end
+  [[ -f "$ROOT/ssh_hang_once.hit" ]] || die "hang not exercised"
+  grep -F -q '"ssh":"connected"' "$CASE/out/report.json" || die "readiness not retried"
+}
+
 test_c8_ssh_disconnect_stops_dispatch() {
   prep_c8_dual
   printf '%s\n' a1 >"$ROOT/c8_disconnect"
@@ -4327,6 +4342,7 @@ run_case c8-golden-usage test_c8_golden_rejected
 run_case c8-second-key-usage test_c8_second_key_rejected
 run_case dispatcher-c8 test_dispatcher_c8_dual_literals
 run_case c8-dual test_c8_dual_flow
+run_case stage-m-ready-retry test_stage_m_ready_retry
 run_case c8-ssh-disconnect test_c8_ssh_disconnect_stops_dispatch
 run_case c8-stop-skips-host test_c8_stop_failure_skips_host_identity
 run_case c8-forged-host test_c8_forged_result_host_not_authoritative
