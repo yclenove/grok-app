@@ -24,7 +24,7 @@ MEASURED=""; UNMEASURED=""; RUN_ARGV=()
 S_STAGE=""; S_NAME=""; S_CREATED=no; S_LAUNCH=not-run; S_COLL=not-run
 S_SSH=not-run; S_EXEC=not-run; S_V6=not-run
 M_CASE=""; M_PROBE=""; PINNED_KEY=""; EXPORT_DIR=""; ONCE_KEY=""; ONCE_PUB=""; GUEST_IP=""
-C8_DUAL=0; SECOND_KEY=""; ONCE_B_KEY=""; ONCE_B_PUB=""; ONCE_PATHS=""
+C8_DUAL=0; C8_PHASES_OK=0; SECOND_KEY=""; ONCE_B_KEY=""; ONCE_B_PUB=""; ONCE_PATHS=""
 M_VERDICT=unknown; M_REASON=skipped; EXPORT_STATE=absent; M_BOUNDARY=-
 EXPORT_DONE=0; SSH_BG_PID=""; SSH_BG_OV=0; SSH_BG_AB=0
 # Fixed tool paths. Overrides apply only in the stub suite (S11_TEST_MODE=1).
@@ -1409,7 +1409,7 @@ parse_fields() {
   done
   [[ "$v" == 1 ]] || return 1
   case "$reason" in
-    -|deadline|timeout|peer-not-ready|no-peer-summary|single-principal|no-non-admin-principal|principal-unknown|mapping-not-measured|torn|bad-pong|bad-part|bad-record|not-sole|init-failed|upload-failed|verify-failed|run-failed|probe-failed|skipped|quarantine|subject-policy|io|nofollow|replaced|partial-coverage|rollback|skip|observed|cap|a1-missing|b-missing|a2-missing|a1-malformed|b-malformed|a2-malformed|a1-timeout|b-timeout|a2-timeout) ;;
+    -|deadline|timeout|peer-not-ready|no-peer-summary|single-principal|no-non-admin-principal|principal-unknown|mapping-not-measured|torn|bad-pong|bad-part|bad-record|not-sole|init-failed|upload-failed|verify-failed|run-failed|probe-failed|skipped|quarantine|subject-policy|io|nofollow|replaced|partial-coverage|rollback|skip|observed|cap|incomplete|a1-missing|b-missing|a2-missing|a1-malformed|b-malformed|a2-malformed|a1-timeout|b-timeout|a2-timeout|a1-ssh|b-ssh|a2-ssh) ;;
     *) return 1 ;;
   esac
   case "$verdict" in ok|failed|unknown|not-ack) ;; *) return 1 ;; esac
@@ -1436,8 +1436,9 @@ parse_fields() {
       case "$n" in ""|*[!0-9]*) return 1 ;; esac
       ;;
     c8d)
-      [[ "$nseen" -eq 11 && "$role" == host && "$verdict" == unknown && "$n" == 2 ]] || return 1
-      [[ -n "$counted" && -n "$a_steps" && -n "$b_steps" && -n "$guest_id" && -n "$host_id" ]] || return 1
+      [[ "$nseen" -eq 12 && "$role" == host && "$verdict" == unknown && "$n" == 2 ]] || return 1
+      [[ -n "$counted" && -n "$a_steps" && -n "$b_steps" && -n "$guest_id" && -n "$host_id" && -n "$retry" ]] || return 1
+      c1_retry_ok "$retry" || return 1
       ;;
     c11)
       [[ "$nseen" -eq 10 && "$role" == host && -n "$mode" && -n "$n" && -n "$torn" && -n "$rtt" && -n "$resid" ]] || return 1
@@ -1575,7 +1576,7 @@ c8d_set() {
   M_OP=c8d
   M_ROLE_REC=host
   M_N=2
-  M_RECORD="v=1 op=c8d role=host verdict=unknown reason=${reason} n=2 counted=- a_steps=- b_steps=- guest_id=- host_id=-"
+  M_RECORD="v=1 op=c8d role=host verdict=unknown reason=${reason} n=2 counted=- a_steps=- b_steps=- guest_id=- host_id=- retry=absent:0,replaced:0"
   SHAPE_OK=1
 }
 c8d_phase() {
@@ -1592,19 +1593,73 @@ c8d_phase() {
     c8d_set "${phase}-malformed"
     return 1
   fi
+  # The dispatcher exits 6 when the probe returns 1 for verdict=unknown.
+  if [[ "$G_ST" != 6 ]]; then
+    c8d_set "${phase}-ssh"
+    return 1
+  fi
   return 0
 }
-m_run_c8_dual() {
+# One captured line from the host collector's private stdout. result-host is not a fallback.
+c8d_take_private() {
+  local raw=$WORKDIR/p8.out line n sz
+  [[ -f "$raw" && ! -L "$raw" ]] || { c8d_set probe-failed; return 1; }
+  sz=$(wc -c <"$raw" | tr -d ' ')
+  case "$sz" in ''|*[!0-9]*) c8d_set probe-failed; return 1 ;; esac
+  [[ "$sz" -ge 1 && "$sz" -le 4096 ]] || { c8d_set probe-failed; return 1; }
+  n=$(wc -l <"$raw" | tr -d ' ')
+  [[ "$n" == 1 ]] || { c8d_set probe-failed; return 1; }
+  IFS= read -r line <"$raw" || { c8d_set probe-failed; return 1; }
+  printf '%s\n' "$line" >"$WORKDIR/p8.one" || { IO_FAIL=1; c8d_set probe-failed; return 1; }
+  cmp -s "$WORKDIR/p8.one" "$raw" || { c8d_set probe-failed; return 1; }
+  parse_fields "$line" || { c8d_set probe-failed; return 1; }
+  [[ "$M_OP" == c8d && "$M_ROLE_REC" == host && "$M_VERDICT" == unknown && "$SHAPE_OK" == 1 ]] || { c8d_set probe-failed; return 1; }
+}
+# Archival copy only. A mismatch must not replace the private stdout record.
+c8d_archive_host() {
+  local src=$EXPORT_DIR/mailbox/result-host
+  [[ -f "$src" && ! -L "$src" ]] || return 0
+  head -c 4097 -- "$src" >"$WORKDIR/result-host.archive" 2>/dev/null || true
+}
+c8d_collect_host() {
   local left
-  clear_snaps; arm_m_load
-  c8d_phase a1 "$ONCE_KEY" eval || return 1
-  c8d_phase b "$ONCE_B_KEY" gcuprobe || return 1
-  c8d_phase a2 "$ONCE_KEY" eval || return 1
   left=$(m_left)
   run_bounded "$left" "$WORKDIR/p8.out" "$WORKDIR/p8.err" - -- "$M_PROBE" c8dual host --dir "$EXPORT_DIR/mailbox" --role host --timeout "$left" || true
   snap1
-  read_slot_verdict "$EXPORT_DIR/mailbox/result-host" || true
-  settle_host c8 || true
+  if [[ "$H1_TO" == 1 || "$H1_RU" == 1 ]]; then
+    c8d_set deadline
+    return 1
+  fi
+  if [[ "$H1_OV" == 1 || "$H1_AB" == 1 || "$H1_ST" != 1 ]]; then
+    c8d_set probe-failed
+    return 1
+  fi
+  c8d_take_private || return 1
+  c8d_archive_host
+}
+c8d_vm_stopped() {
+  local line
+  [[ "$M_QUARANTINE" == 1 || "$HALT" == 1 || "$REAP_UNKNOWN" == 1 ]] && return 1
+  line=$(awk 'NR==1 { print; exit }' "$WORKDIR/cleanup.last" 2>/dev/null || true)
+  [[ "$line" == "ok ok yes" ]]
+}
+c8d_after_stop() {
+  [[ "$C8_DUAL" == 1 ]] || return 0
+  [[ "$C8_PHASES_OK" == 1 ]] || return 0
+  if c8d_vm_stopped; then
+    c8d_collect_host || true
+    return 0
+  fi
+  c8d_set quarantine
+}
+m_run_c8_dual() {
+  clear_snaps; arm_m_load
+  C8_PHASES_OK=0
+  c8d_phase a1 "$ONCE_KEY" eval || return 1
+  c8d_phase b "$ONCE_B_KEY" gcuprobe || return 1
+  c8d_phase a2 "$ONCE_KEY" eval || return 1
+  C8_PHASES_OK=1
+  return 0
 }
 m_run_c8() {
   local left
@@ -1695,6 +1750,39 @@ write_c1_names() {
   done
 }
 name_allowed() { grep -F -x -q -- "$1" "$2"; }
+# lstat identity. Two numeric fields. Does not follow a symlink.
+dir_id() {
+  local out a b
+  [[ ! -L "$1" ]] || return 1
+  if ! out=$(/usr/bin/stat -c '%d %i' -- "$1" 2>/dev/null); then
+    out=$(/usr/bin/stat -f '%d %i' "$1" 2>/dev/null) || return 1
+  fi
+  case "$out" in *' '*) ;; *) return 1 ;; esac
+  a=${out%% *}
+  b=${out#* }
+  [[ "$b" != *' '* ]] || return 1
+  case "$a" in ''|*[!0-9]*) return 1 ;; esac
+  case "$b" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s %s\n' "$a" "$b"
+}
+# One level, no -L. Any child, a failed listing, or a replaced directory is unproved.
+prove_empty_dir() {
+  local dir=$1 id1 id2 raw=$WORKDIR/empty.raw
+  [[ -L "$dir" ]] && return 1
+  [[ -d "$dir" ]] || return 1
+  id1=$(dir_id "$dir") || return 1
+  run_bounded 10 "$raw" "$WORKDIR/empty.err" - -- bash -c 'set -o pipefail; set -f; find "$1" -mindepth 1 -maxdepth 1 -print0 | while IFS= read -r -d "" p; do printf "%s\0" "$p"; exit 1; done; exit $?' _ "$dir" || true
+  [[ "$RB_STATUS" -eq 0 && "$RB_TIMED_OUT" != 1 && "$RB_OVERFLOW" != 1 && "$RB_ABORTED" != 1 && "$REAP_UNKNOWN" != 1 ]] || return 1
+  [[ ! -s "$raw" ]] || return 1
+  id2=$(dir_id "$dir") || return 1
+  [[ "$id1" == "$id2" ]] || return 1
+}
+audit_fixed_empty() {
+  local path=$1
+  [[ -L "$path" ]] && return 1
+  [[ -e "$path" ]] || return 0
+  prove_empty_dir "$path"
+}
 scan_one() {
   local dir=$1 allow=$2 dirs=$3 raw=$WORKDIR/scan.raw path name count=0
   [[ -d "$dir" && ! -L "$dir" ]] || return 1
@@ -1737,7 +1825,7 @@ audit_export() {
         write_names "$WORKDIR/allow.root" result-guest result-host c8
         write_names "$WORKDIR/allow.dirs" c8
         write_names "$WORKDIR/allow.c8" result-a1 result-a1.tmp result-b result-b.tmp result-a2 result-a2.tmp a-file a-shared b-file a-file.ren a-shared.ren a-dir.ren b-file.ren a-dir
-        write_names "$WORKDIR/allow.c8dirs" a-dir
+        write_names "$WORKDIR/allow.c8dirs" a-dir a-dir.ren
       else
         write_names "$WORKDIR/allow.root" result-guest result-host
         : >"$WORKDIR/allow.dirs"
@@ -1758,6 +1846,8 @@ audit_export() {
     [[ -d "$mbx/evidence" ]] && { scan_one "$mbx/evidence" "$WORKDIR/allow.evidence" "$WORKDIR/allow.none" || return 1; }
   elif [[ "$C8_DUAL" == 1 && -d "$mbx/c8" && ! -L "$mbx/c8" ]]; then
     scan_one "$mbx/c8" "$WORKDIR/allow.c8" "$WORKDIR/allow.c8dirs" || return 1
+    audit_fixed_empty "$mbx/c8/a-dir" || return 1
+    audit_fixed_empty "$mbx/c8/a-dir.ren" || return 1
   fi
 }
 cleanup_export() {
@@ -1821,6 +1911,7 @@ record_m_row() {
 }
 run_m_one() {
   local st=0
+  C8_PHASES_OK=0
   M_VERDICT=unknown; M_REASON=skipped; EXPORT_STATE=absent; EXPORT_DIR=""
   begin_stage M
   if ! prepare_export; then
@@ -1843,6 +1934,7 @@ run_m_one() {
     [[ "$S_SSH" == not-sole ]] && M_REASON=not-sole
   fi
   cleanup_owned
+  c8d_after_stop
   cleanup_export
   record_m_row
 }

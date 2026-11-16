@@ -3,8 +3,8 @@
 //!
 //! ADR counts create, chmod, chown and rename toward the 12-op cap. read,
 //! write and unlink are recorded and do not spend the cap. chmod and chown
-//! run before rename and unlink so they still see the object. A rename that
-//! succeeds is renamed back; the undo is not a second counted rename.
+//! run before rename. Each planned rename is one attempt; a later unlink
+//! uses that attempt's resulting pathname.
 use super::{decode, field, finish, numeric, rec_text, say, Opt};
 use crate::io::{self, Dir, RdErr};
 use std::fs::{self, OpenOptions};
@@ -21,7 +21,7 @@ const HOST_NAMES: [&str; 7] = ["result-a1", "result-b", "result-a2", "a-file", "
 const PLACEHOLDER: &str = "v=1 op=empty seq=0";
 const GUEST_KEYS: &[&str] = &["v", "op", "role", "phase", "verdict", "reason", "self", "ops", "cap", "steps", "ids"];
 #[cfg(test)]
-const HOST_KEYS: &[&str] = &["v", "op", "role", "verdict", "reason", "n", "counted", "a_steps", "b_steps", "guest_id", "host_id"];
+const HOST_KEYS: &[&str] = &["v", "op", "role", "verdict", "reason", "n", "counted", "a_steps", "b_steps", "guest_id", "host_id", "retry"];
 
 #[derive(Clone, Copy)]
 struct Act {
@@ -93,6 +93,33 @@ fn class_err(err: &std::io::Error) -> &'static str {
     class_raw(err.raw_os_error())
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct Calls {
+    counted: u32,
+    rename: u32,
+}
+
+#[cfg(test)]
+thread_local! {
+    static CALLS: std::cell::Cell<Calls> = const { std::cell::Cell::new(Calls { counted: 0, rename: 0 }) };
+}
+
+#[cfg(test)]
+fn note_counted(kind: &str) {
+    CALLS.with(|slot| {
+        let mut cur = slot.get();
+        cur.counted += 1;
+        if kind == "rename" {
+            cur.rename += 1;
+        }
+        slot.set(cur);
+    });
+}
+
+#[cfg(not(test))]
+fn note_counted(_kind: &str) {}
+
 extern "C" {
     fn getuid() -> u32;
     fn getgid() -> u32;
@@ -120,6 +147,7 @@ fn op_create_file(dir: &Path, name: &str) -> &'static str {
     }
     let mut opts = OpenOptions::new();
     opts.write(true).create_new(true).mode(0o600);
+    note_counted("create");
     match opts.open(&path) {
         Ok(_) => "ok",
         Err(err) => class_err(&err),
@@ -134,6 +162,7 @@ fn op_create_dir(dir: &Path, name: &str) -> &'static str {
     }
     let mut builder = fs::DirBuilder::new();
     builder.mode(0o700);
+    note_counted("create");
     match builder.create(&path) {
         Ok(()) => "ok",
         Err(err) => class_err(&err),
@@ -144,10 +173,13 @@ fn op_chmod(dir: &Path, name: &str, mode: u32) -> &'static str {
     let path = dir.join(name);
     match fs::symlink_metadata(&path) {
         Ok(meta) if meta.file_type().is_symlink() => "other",
-        Ok(_) => match fs::set_permissions(&path, fs::Permissions::from_mode(mode)) {
-            Ok(()) => "ok",
-            Err(err) => class_err(&err),
-        },
+        Ok(_) => {
+            note_counted("chmod");
+            match fs::set_permissions(&path, fs::Permissions::from_mode(mode)) {
+                Ok(()) => "ok",
+                Err(err) => class_err(&err),
+            }
+        }
         Err(err) => class_err(&err),
     }
 }
@@ -159,6 +191,7 @@ fn op_chown(dir: &Path, name: &str, uid: u32) -> &'static str {
         Ok(_) => {}
         Err(err) => return class_err(&err),
     }
+    note_counted("chown");
     match std::os::unix::fs::lchown(&path, Some(uid), None) {
         Ok(()) => "ok",
         Err(err) => class_err(&err),
@@ -231,12 +264,11 @@ fn op_rename(dir: &Path, name: &str) -> &'static str {
         Ok(_) => {}
         Err(err) => return class_err(&err),
     }
-    if let Err(err) = fs::rename(&src, &dst) {
-        return class_err(&err);
+    note_counted("rename");
+    match fs::rename(&src, &dst) {
+        Ok(()) => "ok",
+        Err(err) => class_err(&err),
     }
-    // The counted rename already happened. A failed undo leaves `name.ren`.
-    let _ = fs::rename(&dst, &src);
-    "ok"
 }
 
 fn op_unlink(dir: &Path, name: &str) -> &'static str {
@@ -255,19 +287,148 @@ fn op_unlink(dir: &Path, name: &str) -> &'static str {
     }
 }
 
-fn perform(dir: &Path, phase: &str, act: &Act, uid: u32) -> &'static str {
+fn perform(dir: &Path, phase: &str, act: &Act, name: &str, uid: u32) -> &'static str {
     match act.kind {
-        "create" if act.object == "a-dir" => op_create_dir(dir, act.object),
-        "create" => op_create_file(dir, act.object),
-        "chmod" => op_chmod(dir, act.object, chmod_mode(phase, act.object)),
-        "read" => op_read(dir, act.object),
-        "write" => op_write(dir, act.object),
-        "chown" => op_chown(dir, act.object, uid),
-        "chown501" => op_chown(dir, act.object, 501),
-        "rename" => op_rename(dir, act.object),
-        "unlink" => op_unlink(dir, act.object),
+        "create" if act.object == "a-dir" => op_create_dir(dir, name),
+        "create" => op_create_file(dir, name),
+        "chmod" => op_chmod(dir, name, chmod_mode(phase, act.object)),
+        "read" => op_read(dir, name),
+        "write" => op_write(dir, name),
+        "chown" => op_chown(dir, name, uid),
+        "chown501" => op_chown(dir, name, 501),
+        "rename" => op_rename(dir, name),
+        "unlink" => op_unlink(dir, name),
         _ => "other",
     }
+}
+
+fn acl_summary(bytes: &[u8]) -> String {
+    crate::sha256::hex_digest(bytes).chars().take(16).collect()
+}
+
+fn c_path(path: &Path) -> Option<std::ffi::CString> {
+    std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()
+}
+
+#[cfg(target_os = "linux")]
+fn xattr_nofollow(path: &std::ffi::CStr, name: &std::ffi::CStr) -> Result<Option<Vec<u8>>, ()> {
+    extern "C" {
+        fn lgetxattr(path: *const std::os::raw::c_char, name: *const std::os::raw::c_char, value: *mut std::os::raw::c_void, size: usize) -> isize;
+    }
+    const ENODATA: i32 = 61;
+    let mut buf = [0u8; 128];
+    // lgetxattr does not follow symlinks. A value past the buffer is ERANGE.
+    let rc = unsafe { lgetxattr(path.as_ptr(), name.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+    if rc < 0 {
+        let err = std::io::Error::last_os_error().raw_os_error();
+        return if err == Some(ENODATA) { Ok(None) } else { Err(()) };
+    }
+    let n = rc as usize;
+    if n == 0 || n > buf.len() {
+        return Err(());
+    }
+    Ok(Some(buf[..n].to_vec()))
+}
+
+#[cfg(target_os = "linux")]
+fn acl_token(path: &Path, is_dir: bool) -> String {
+    let Some(cpath) = c_path(path) else {
+        return "incomplete".to_string();
+    };
+    let access = match std::ffi::CString::new("system.posix_acl_access") {
+        Ok(name) => xattr_nofollow(&cpath, &name),
+        Err(_) => return "incomplete".to_string(),
+    };
+    let access = match access {
+        Ok(v) => v,
+        Err(()) => return "incomplete".to_string(),
+    };
+    let default_acl = if is_dir {
+        let Some(name) = std::ffi::CString::new("system.posix_acl_default").ok() else {
+            return "incomplete".to_string();
+        };
+        match xattr_nofollow(&cpath, &name) {
+            Ok(v) => v,
+            Err(()) => return "incomplete".to_string(),
+        }
+    } else {
+        None
+    };
+    if access.is_none() && default_acl.is_none() {
+        return "none".to_string();
+    }
+    let mut raw = Vec::new();
+    for (i, part) in [access, default_acl].iter().enumerate() {
+        raw.push(i as u8);
+        match part {
+            None => raw.push(0),
+            Some(bytes) => {
+                raw.push(1);
+                raw.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                raw.extend_from_slice(bytes);
+            }
+        }
+    }
+    acl_summary(&raw)
+}
+
+#[cfg(target_os = "macos")]
+fn set_errno(value: i32) {
+    extern "C" {
+        fn __error() -> *mut i32;
+    }
+    unsafe {
+        *__error() = value;
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn acl_token(path: &Path, _is_dir: bool) -> String {
+    use std::os::raw::{c_char, c_int, c_void};
+    extern "C" {
+        fn acl_get_link_np(path: *const c_char, typ: c_int) -> *mut c_void;
+        fn acl_get_entry(acl: *mut c_void, entry_id: c_int, entry_p: *mut *mut c_void) -> c_int;
+        fn acl_size(acl: *mut c_void) -> isize;
+        fn acl_copy_ext(buf: *mut c_void, acl: *mut c_void, size: isize) -> isize;
+        fn acl_free(obj: *mut c_void) -> c_int;
+    }
+    let Some(cpath) = c_path(path) else {
+        return "incomplete".to_string();
+    };
+    // acl_get_link_np does not follow the final symlink. An existing object with
+    // no ACL returns NULL and ENOENT, the same errno as a missing path.
+    let exists = fs::symlink_metadata(path).is_ok();
+    unsafe {
+        set_errno(0);
+        let acl = acl_get_link_np(cpath.as_ptr(), 0x100);
+        let err = std::io::Error::last_os_error().raw_os_error();
+        if acl.is_null() {
+            return if exists && err == Some(2) { "none".to_string() } else { "incomplete".to_string() };
+        }
+        let mut entry: *mut c_void = std::ptr::null_mut();
+        let got = acl_get_entry(acl, 0, &mut entry);
+        if got != 0 {
+            acl_free(acl);
+            return "none".to_string();
+        }
+        let size = acl_size(acl);
+        if size <= 0 || size > 128 {
+            acl_free(acl);
+            return "incomplete".to_string();
+        }
+        let mut buf = vec![0u8; size as usize];
+        let n = acl_copy_ext(buf.as_mut_ptr().cast(), acl, size);
+        acl_free(acl);
+        if n != size {
+            return "incomplete".to_string();
+        }
+        acl_summary(&buf)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn acl_token(_path: &Path, _is_dir: bool) -> String {
+    "incomplete".to_string()
 }
 
 fn ident_tail(path: &Path, host: bool) -> String {
@@ -275,10 +436,11 @@ fn ident_tail(path: &Path, host: bool) -> String {
         Ok(meta) if meta.file_type().is_symlink() => "symlink".to_string(),
         Ok(meta) => {
             let mode = meta.mode() & 0o7777;
+            let acl = acl_token(path, meta.is_dir());
             if host {
-                format!("{}:{}:{:o}:{}:{}:{}", meta.uid(), meta.gid(), mode, meta.nlink(), meta.dev(), meta.ino())
+                format!("{}:{}:{:o}:{}:{}:{}:{acl}", meta.uid(), meta.gid(), mode, meta.nlink(), meta.dev(), meta.ino())
             } else {
-                format!("{}:{}:{:o}:{}", meta.uid(), meta.gid(), mode, meta.nlink())
+                format!("{}:{}:{:o}:{}:{acl}", meta.uid(), meta.gid(), mode, meta.nlink())
             }
         }
         Err(_) => "absent".to_string(),
@@ -305,21 +467,31 @@ fn guest_line(phase: &str, reason: &str, uid: u32, gid: u32, ops: u32, steps: &s
     format!("v=1 op=c8d role=guest phase={phase} verdict=unknown reason={reason} self={uid}:{gid} ops={ops} cap=12 steps={steps} ids={ids}")
 }
 
-fn host_line(reason: &str, counted: &str, a_steps: &str, b_steps: &str, guest_id: &str, host_id: &str) -> String {
-    format!("v=1 op=c8d role=host verdict=unknown reason={reason} n=2 counted={counted} a_steps={a_steps} b_steps={b_steps} guest_id={guest_id} host_id={host_id}")
+fn has_incomplete(text: &str) -> bool {
+    text.split([',', ';', '=']).any(|part| part.split(':').any(|field| field == "incomplete"))
+}
+
+fn host_line(reason: &str, counted: &str, a_steps: &str, b_steps: &str, guest_id: &str, host_id: &str, retry: &str) -> String {
+    let reason = if reason == "observed" && (has_incomplete(guest_id) || has_incomplete(host_id)) { "incomplete" } else { reason };
+    format!("v=1 op=c8d role=host verdict=unknown reason={reason} n=2 counted={counted} a_steps={a_steps} b_steps={b_steps} guest_id={guest_id} host_id={host_id} retry={retry}")
 }
 
 pub fn failure_line(reason: &str) -> String {
-    host_line(reason, "-", "-", "-", "-", "-")
+    host_line(reason, "-", "-", "-", "-", "-", "absent:0,replaced:0")
 }
 
 fn line_ok(line: &str) -> bool {
     !line.is_empty() && line.len() <= 4095 && !line.contains('\n') && !line.contains('"') && !line.contains('\\')
 }
 
+fn live_index(object: &str) -> Option<usize> {
+    GUEST_NAMES.iter().position(|name| *name == object)
+}
+
 fn run_plan(dir: &Path, phase: &str, end: Instant, uid: u32) -> (Vec<String>, u32, &'static str) {
     let mut steps = Vec::new();
     let mut ops = 0u32;
+    let mut live = GUEST_NAMES.map(|name| name.to_string());
     for act in plan(phase) {
         if io::past(end) {
             return (steps, ops, "deadline");
@@ -330,7 +502,15 @@ fn run_plan(dir: &Path, phase: &str, end: Instant, uid: u32) -> (Vec<String>, u3
                 Err(()) => return (steps, ops, "cap"),
             }
         }
-        let code = perform(dir, phase, &act, uid);
+        let Some(idx) = live_index(act.object) else {
+            steps.push(format!("{}:{}:other", act.object, act.kind));
+            continue;
+        };
+        let name = live[idx].clone();
+        let code = perform(dir, phase, &act, &name, uid);
+        if act.kind == "rename" && code == "ok" {
+            live[idx] = format!("{name}.ren");
+        }
         steps.push(format!("{}:{}:{code}", act.object, act.kind));
     }
     (steps, ops, "observed")
@@ -400,6 +580,10 @@ fn id_num(text: &str) -> bool {
     !text.is_empty() && text.len() <= 10 && text.bytes().all(|b| b.is_ascii_digit())
 }
 
+fn acl_token_ok(text: &str) -> bool {
+    !text.is_empty() && text.len() <= 64 && text.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
 fn ids_ok(text: &str) -> bool {
     let parts: Vec<&str> = text.split(',').collect();
     if parts.len() != GUEST_NAMES.len() {
@@ -417,7 +601,8 @@ fn ids_ok(text: &str) -> bool {
         let gid = bits.next().unwrap_or("");
         let mode = bits.next().unwrap_or("");
         let nlink = bits.next().unwrap_or("");
-        if bits.next().is_some() || !id_num(uid) || !id_num(gid) || !id_num(nlink) || mode.is_empty() || !mode.bytes().all(|b| b.is_ascii_digit()) {
+        let acl = bits.next().unwrap_or("");
+        if bits.next().is_some() || !id_num(uid) || !id_num(gid) || !id_num(nlink) || mode.is_empty() || !mode.bytes().all(|b| b.is_ascii_digit()) || !acl_token_ok(acl) {
             return false;
         }
     }
@@ -492,7 +677,7 @@ fn over_principal(a1: u32, a2: u32) -> bool {
     a1.saturating_add(a2) > CAP
 }
 
-fn judge_views(views: [Result<View, Fault>; 3], host_id: &str) -> String {
+fn judge_views(views: [Result<View, Fault>; 3], host_id: &str, retry: &str) -> String {
     let mut reason = "observed";
     for (phase, view) in PHASES.iter().zip(views.iter()) {
         if let Err(fault) = view {
@@ -523,7 +708,7 @@ fn judge_views(views: [Result<View, Fault>; 3], host_id: &str) -> String {
     }
     let guest_id = if guest_parts.is_empty() { "-".to_string() } else { guest_parts.join(";") };
     let host_id = if host_id.is_empty() { "-" } else { host_id };
-    let line = host_line(reason, &counted, &a_steps, &b_steps, &guest_id, host_id);
+    let line = host_line(reason, &counted, &a_steps, &b_steps, &guest_id, host_id, retry);
     if line_ok(&line) {
         line
     } else {
@@ -537,7 +722,7 @@ fn judge_texts(phases: [Option<&str>; 3], host_id: &str) -> String {
         None => Err(Fault::Missing),
         Some(text) => parse_guest(text, PHASES[i]),
     });
-    judge_views(views, host_id)
+    judge_views(views, host_id, "absent:0,replaced:0")
 }
 
 fn wait_retry(retry_end: Instant, end: Instant) -> bool {
@@ -552,34 +737,36 @@ fn wait_retry(retry_end: Instant, end: Instant) -> bool {
     !io::past(end)
 }
 
-fn read_phase(dir: &Dir, phase: &str, end: Instant) -> Result<Option<String>, Fault> {
+fn read_phase(dir: &Dir, phase: &str, end: Instant) -> (Result<Option<String>, Fault>, super::Retry) {
     let name = format!("result-{phase}");
+    let mut retry = super::Retry::zero();
     let retry_end = io::now() + Duration::from_secs(2);
     let retry_end = if retry_end < end { retry_end } else { end };
     loop {
         if io::past(end) {
-            return Err(Fault::Timeout);
+            return (Err(Fault::Timeout), retry);
         }
         match dir.read_file(&name, 4096, end) {
             Ok((bytes, _, _, _)) => {
                 let Some(text) = rec_text(&bytes) else {
-                    return Err(Fault::Malformed);
+                    return (Err(Fault::Malformed), retry);
                 };
                 if text == PLACEHOLDER {
                     if !wait_retry(retry_end, end) {
-                        return if io::past(end) { Err(Fault::Timeout) } else { Ok(None) };
+                        return (if io::past(end) { Err(Fault::Timeout) } else { Ok(None) }, retry);
                     }
                     continue;
                 }
-                return Ok(Some(text.to_string()));
+                return (Ok(Some(text.to_string())), retry);
             }
-            Err(RdErr::Absent) => {
+            Err(err @ (RdErr::Absent | RdErr::Replaced)) => {
+                retry.note(&err);
                 if !wait_retry(retry_end, end) {
-                    return if io::past(end) { Err(Fault::Timeout) } else { Ok(None) };
+                    return (if io::past(end) { Err(Fault::Timeout) } else { Ok(None) }, retry);
                 }
             }
-            Err(RdErr::Deadline) => return Err(Fault::Timeout),
-            Err(_) => return Err(Fault::Malformed),
+            Err(RdErr::Deadline) => return (Err(Fault::Timeout), retry),
+            Err(_) => return (Err(Fault::Malformed), retry),
         }
     }
 }
@@ -610,8 +797,11 @@ fn run_host(opt: &Opt) -> i32 {
     }
     let mut texts: [Option<String>; 3] = [None, None, None];
     let mut faults: [Option<Fault>; 3] = [None, None, None];
+    let mut retry = super::Retry::zero();
     for (i, phase) in PHASES.iter().enumerate() {
-        match read_phase(&c8, phase, opt.end) {
+        let (got, part) = read_phase(&c8, phase, opt.end);
+        retry.add(part);
+        match got {
             Ok(Some(text)) => texts[i] = Some(text),
             Ok(None) => faults[i] = Some(Fault::Missing),
             Err(fault) => faults[i] = Some(fault),
@@ -627,7 +817,7 @@ fn run_host(opt: &Opt) -> i32 {
             None => Err(Fault::Missing),
         }
     });
-    let line = judge_views(views, &host_id);
+    let line = judge_views(views, &host_id, &retry.text());
     let late = failure_line("deadline");
     finish(&root, "result-host", &line, "unknown", opt.end, &late)
 }
@@ -667,7 +857,7 @@ mod tests {
     use super::*;
 
     fn sample_ids() -> String {
-        "a-file:501:20:600:1,a-shared:501:20:644:1,a-dir:501:20:700:2,b-file:absent".to_string()
+        "a-file:501:20:600:1:none,a-shared:501:20:644:1:none,a-dir:501:20:700:2:none,b-file:absent".to_string()
     }
 
     fn synth(phase: &str, reason: &str, ops: u32, steps: &str) -> String {
@@ -735,7 +925,7 @@ mod tests {
         assert_eq!(field(&rec, "phase"), "a1");
         assert_eq!(field(&rec, "ops"), "5");
         assert_eq!(field(&rec, "verdict"), "unknown");
-        let host = host_line("observed", "8,12", &steps, "b-file:create:ok", &format!("a1={}", sample_ids()), "a-file:1:1:600:1:1:2");
+        let host = host_line("observed", "8,12", &steps, "b-file:create:ok", &format!("a1={}", sample_ids()), "a-file:1:1:600:1:1:2:none", "absent:0,replaced:0");
         let rec = decode(&host, HOST_KEYS).expect("host decode");
         assert_eq!(field(&rec, "role"), "host");
         assert_eq!(field(&rec, "n"), "2");
@@ -827,6 +1017,8 @@ mod tests {
         let host = fs::read_to_string(mbx.join("result-host")).unwrap();
         assert!(host.contains("verdict=unknown"), "{host}");
         assert!(host.contains("reason=observed"), "{host}");
+        assert!(host.contains("retry=absent:0,replaced:0"), "{host}");
+        assert!(host.contains(":none"), "{host}");
         assert!(host.contains("counted=8,12"), "{host}");
         assert!(host.contains("a-file:create:ok"), "{host}");
         assert!(host.contains("a-shared:chmod:ok"), "{host}");
@@ -852,6 +1044,265 @@ mod tests {
         let a2 = fs::read_to_string(c8.join("result-a2")).unwrap();
         assert!(a2.contains("ops=3"), "{a2}");
         assert!(crate::execute(&["c8dual".into(), "a1".into(), "--dir".into(), dir, "--role".into(), "host".into(), "--timeout".into(), "2".into()]).is_err());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    fn scratch_dir(label: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!("s11-c8d-{label}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        // open_path does not follow symlinks. macOS temp_dir starts at /var.
+        fs::canonicalize(&base).unwrap()
+    }
+
+    fn reset_calls() {
+        CALLS.with(|slot| slot.set(Calls { counted: 0, rename: 0 }));
+    }
+
+    #[test]
+    fn b_successful_renames_are_one_syscall_and_unlink_follows() {
+        let base = scratch_dir("ren");
+        fs::create_dir(base.join("a-dir")).unwrap();
+        reset_calls();
+        assert_eq!(op_rename(&base, "a-dir"), "ok");
+        assert!(!base.join("a-dir").exists(), "rename returned to the original name");
+        assert!(base.join("a-dir.ren").is_dir());
+        let once = CALLS.with(|slot| slot.get());
+        assert_eq!(once.rename, 1);
+        assert_eq!(op_unlink(&base, "a-dir.ren"), "ok");
+        assert!(!base.join("a-dir.ren").exists());
+
+        fs::write(base.join("a-file"), b"a").unwrap();
+        fs::write(base.join("a-shared"), b"s").unwrap();
+        fs::create_dir(base.join("a-dir")).unwrap();
+        reset_calls();
+        let end = Instant::now() + Duration::from_secs(30);
+        let (steps, ops, reason) = run_plan(&base, "b", end, self_ids().0);
+        assert_eq!(reason, "observed");
+        assert_eq!(ops, 12);
+        let got = CALLS.with(|slot| slot.get());
+        assert_eq!(got.rename, 3, "B rename syscalls {steps:?}");
+        assert_eq!(got.counted, 12, "B counted syscalls {steps:?}");
+        assert!(steps.iter().any(|step| step == "a-dir:rename:ok"), "{steps:?}");
+        assert!(steps.iter().any(|step| step == "a-dir:unlink:ok"), "{steps:?}");
+        assert!(!base.join("a-dir").exists());
+        assert!(!base.join("a-dir.ren").exists());
+        assert!(!base.join("a-file").exists() && !base.join("a-file.ren").exists());
+        assert!(!base.join("a-shared").exists() && !base.join("a-shared.ren").exists());
+        assert!(base.join("b-file").is_file());
+
+        reset_calls();
+        let (steps, ops, reason) = run_plan(&base, "a2", end, self_ids().0);
+        assert_eq!(reason, "observed");
+        assert_eq!(ops, 3);
+        let got = CALLS.with(|slot| slot.get());
+        assert_eq!(got.rename, 1, "A2 rename syscalls {steps:?}");
+        assert_eq!(got.counted, 3, "A2 counted syscalls {steps:?}");
+        assert!(steps.iter().any(|step| step == "b-file:unlink:ok"), "{steps:?}");
+        assert!(!base.join("b-file").exists());
+        assert!(!base.join("b-file.ren").exists());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    fn host_from_slots(label: &str, a1: &[u8], b: &str, a2: &str, hook: bool) -> String {
+        let base = scratch_dir(label);
+        let mbx = base.join("mailbox");
+        fs::create_dir(&mbx).unwrap();
+        let c8 = mbx.join("c8");
+        fs::create_dir(&c8).unwrap();
+        fs::write(c8.join("result-a1"), a1).unwrap();
+        fs::write(c8.join("result-b"), format!("{b}\n")).unwrap();
+        fs::write(c8.join("result-a2"), format!("{a2}\n")).unwrap();
+        if hook {
+            let live = c8.join("result-a1");
+            let aside = c8.join("result-a1.aside");
+            let (steps, ops) = planned("a1");
+            let valid = format!("{}\n", synth("a1", "observed", ops, &steps));
+            io::test_set_read_hook(
+                "result-a1",
+                Box::new(move || {
+                    fs::rename(&live, &aside).unwrap();
+                    fs::write(&live, valid).unwrap();
+                }),
+            );
+        }
+        let dir = mbx.to_str().unwrap().to_string();
+        let code = crate::execute(&["c8dual".into(), "host".into(), "--dir".into(), dir, "--role".into(), "host".into(), "--timeout".into(), "30".into()]).unwrap();
+        io::test_clear_read_hook();
+        assert_eq!(code, 1);
+        let host = fs::read_to_string(mbx.join("result-host")).unwrap();
+        let _ = fs::remove_dir_all(&base);
+        host
+    }
+
+    #[test]
+    fn replaced_phase_slot_is_reread_not_malformed() {
+        let (b_steps, b_ops) = planned("b");
+        let (a2_steps, a2_ops) = planned("a2");
+        let host = host_from_slots("repl", b"v=1 op=empty seq=0\n", &synth("b", "observed", b_ops, &b_steps), &synth("a2", "observed", a2_ops, &a2_steps), true);
+        assert!(!host.contains("reason=a1-malformed"), "{host}");
+        assert!(host.contains("retry=absent:0,replaced:1"), "{host}");
+        assert!(host.contains("a-file:create:ok"), "{host}");
+    }
+
+    #[test]
+    fn stable_malformed_phase_is_not_retried() {
+        let (b_steps, b_ops) = planned("b");
+        let (a2_steps, a2_ops) = planned("a2");
+        let host = host_from_slots("bad", b"not-a-record\n", &synth("b", "observed", b_ops, &b_steps), &synth("a2", "observed", a2_ops, &a2_steps), false);
+        assert!(host.contains("reason=a1-malformed"), "{host}");
+        assert!(host.contains("retry=absent:0,replaced:0"), "{host}");
+        assert!(!host.contains("replaced:1"), "{host}");
+    }
+
+    #[test]
+    fn incomplete_acl_downgrades_observed_only() {
+        let bad = "a1=a-file:1:1:600:1:incomplete";
+        let line = host_line("observed", "8,12", "a", "b", bad, "a-file:1:1:600:1:1:2:none", "absent:0,replaced:0");
+        assert!(line.contains("reason=incomplete"), "{line}");
+        assert!(!line.contains("reason=observed"), "{line}");
+        let kept = host_line("a1-malformed", "-", "-", "-", bad, "-", "absent:0,replaced:0");
+        assert!(kept.contains("reason=a1-malformed"), "{kept}");
+        assert_ne!(acl_summary(b"acl-one"), acl_summary(b"acl-two"));
+    }
+
+    #[test]
+    fn symlink_identity_does_not_follow() {
+        let base = scratch_dir("sym");
+        fs::write(base.join("target"), b"t").unwrap();
+        fs::set_permissions(base.join("target"), fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink("target", base.join("link")).unwrap();
+        assert_eq!(ident_tail(&base.join("link"), false), "symlink");
+        assert_eq!(ident_tail(&base.join("missing"), false), "absent");
+        assert_eq!(acl_token(&base.join("missing"), false), "incomplete");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn posix_acl(user_id: u32, user_perm: u16) -> Vec<u8> {
+        fn entry(tag: u16, perm: u16, id: u32) -> [u8; 8] {
+            let mut raw = [0u8; 8];
+            raw[0..2].copy_from_slice(&tag.to_le_bytes());
+            raw[2..4].copy_from_slice(&perm.to_le_bytes());
+            raw[4..8].copy_from_slice(&id.to_le_bytes());
+            raw
+        }
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&2u32.to_le_bytes());
+        blob.extend_from_slice(&entry(0x01, 6, 0xFFFF_FFFF));
+        blob.extend_from_slice(&entry(0x02, user_perm, user_id));
+        blob.extend_from_slice(&entry(0x04, 4, 0xFFFF_FFFF));
+        blob.extend_from_slice(&entry(0x10, user_perm, 0xFFFF_FFFF));
+        blob.extend_from_slice(&entry(0x20, 0, 0xFFFF_FFFF));
+        blob
+    }
+
+    #[cfg(target_os = "linux")]
+    fn set_posix_acl(path: &Path, blob: &[u8]) {
+        extern "C" {
+            fn lsetxattr(path: *const std::os::raw::c_char, name: *const std::os::raw::c_char, value: *const std::os::raw::c_void, size: usize, flags: i32) -> i32;
+        }
+        let cpath = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        let name = std::ffi::CString::new("system.posix_acl_access").unwrap();
+        let rc = unsafe { lsetxattr(cpath.as_ptr(), name.as_ptr(), blob.as_ptr().cast(), blob.len(), 0) };
+        assert_eq!(rc, 0, "lsetxattr {}", std::io::Error::last_os_error());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn equal_mode_different_acls_and_query_failure() {
+        let base = scratch_dir("acl");
+        let left = base.join("left");
+        let right = base.join("right");
+        fs::write(&left, b"x").unwrap();
+        fs::write(&right, b"x").unwrap();
+        fs::set_permissions(&left, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&right, fs::Permissions::from_mode(0o600)).unwrap();
+        set_posix_acl(&left, &posix_acl(65534, 4));
+        set_posix_acl(&right, &posix_acl(65533, 4));
+        fs::set_permissions(&left, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&right, fs::Permissions::from_mode(0o600)).unwrap();
+        let mode = |path: &Path| fs::symlink_metadata(path).unwrap().mode() & 0o7777;
+        assert_eq!(mode(&left), mode(&right));
+        let a = acl_token(&left, false);
+        let b = acl_token(&right, false);
+        assert_ne!(a, b, "equal mode produced the same ACL summary");
+        assert_ne!(a, "none");
+        assert_ne!(a, "incomplete");
+        assert_ne!(b, "none");
+        assert_ne!(b, "incomplete");
+        assert_eq!(acl_token(&base.join("missing"), false), "incomplete");
+        let proc = Path::new("/proc/self/status");
+        if proc.is_file() {
+            assert_eq!(acl_token(proc, false), "incomplete");
+        }
+        let plain = base.join("plain");
+        fs::write(&plain, b"p").unwrap();
+        assert_eq!(acl_token(&plain, false), "none");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_allow(path: &Path, mask: u64) {
+        use std::os::raw::{c_char, c_int, c_void};
+        extern "C" {
+            fn acl_init(count: c_int) -> *mut c_void;
+            fn acl_create_entry(acl_p: *mut *mut c_void, entry_p: *mut *mut c_void) -> c_int;
+            fn acl_set_tag_type(entry: *mut c_void, tag: c_int) -> c_int;
+            fn acl_set_permset_mask_np(entry: *mut c_void, mask: u64) -> c_int;
+            fn acl_set_qualifier(entry: *mut c_void, qualifier: *const c_void) -> c_int;
+            fn acl_set_link_np(path: *const c_char, typ: c_int, acl: *mut c_void) -> c_int;
+            fn acl_free(obj: *mut c_void) -> c_int;
+            fn mbr_uid_to_uuid(uid: u32, uu: *mut u8) -> c_int;
+        }
+        let cpath = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        let mut uuid = [0u8; 16];
+        let rc = unsafe { mbr_uid_to_uuid(self_ids().0, uuid.as_mut_ptr()) };
+        assert_eq!(rc, 0, "mbr_uid_to_uuid {}", std::io::Error::last_os_error());
+        unsafe {
+            let mut acl = acl_init(1);
+            assert!(!acl.is_null(), "acl_init");
+            let mut entry: *mut c_void = std::ptr::null_mut();
+            assert_eq!(acl_create_entry(&mut acl, &mut entry), 0, "acl_create_entry");
+            assert_eq!(acl_set_tag_type(entry, 1), 0, "acl_set_tag_type");
+            assert_eq!(acl_set_permset_mask_np(entry, mask), 0, "acl_set_permset_mask_np");
+            assert_eq!(acl_set_qualifier(entry, uuid.as_ptr().cast()), 0, "acl_set_qualifier");
+            let set = acl_set_link_np(cpath.as_ptr(), 0x100, acl);
+            let err = std::io::Error::last_os_error();
+            acl_free(acl);
+            assert_eq!(set, 0, "acl_set_link_np {err}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn equal_mode_different_acls_and_query_failure() {
+        let base = scratch_dir("acl");
+        let left = base.join("left");
+        let right = base.join("right");
+        let plain = base.join("plain");
+        fs::write(&left, b"x").unwrap();
+        fs::write(&right, b"x").unwrap();
+        fs::write(&plain, b"p").unwrap();
+        for path in [&left, &right, &plain] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        set_allow(&left, 2);
+        set_allow(&right, 4);
+        for path in [&left, &right] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let mode = |path: &Path| fs::symlink_metadata(path).unwrap().mode() & 0o7777;
+        assert_eq!(mode(&left), mode(&right));
+        let a = acl_token(&left, false);
+        let b = acl_token(&right, false);
+        assert_ne!(a, b, "equal mode produced the same ACL summary");
+        assert_ne!(a, "none");
+        assert_ne!(a, "incomplete");
+        assert_ne!(b, "none");
+        assert_ne!(b, "incomplete");
+        assert_eq!(acl_token(&plain, false), "none");
+        assert_eq!(acl_token(&base.join("missing"), false), "incomplete");
         let _ = fs::remove_dir_all(&base);
     }
 }

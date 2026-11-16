@@ -199,7 +199,8 @@ install_templates() {
     'case " $* " in *s11m.XXXXXX*) if [[ -f "$ROOT/init.body" ]]; then cat >"$ROOT/init2.body"; else cat >"$ROOT/init.body"; fi; printf "init-ok\n"; exit 0 ;; esac' \
     'c11_guest() { mode=fd; case "$remote" in "run C11 reopen") mode=reopen ;; esac; if [[ -f "$ROOT/c11_guest_missing" ]]; then exit 0; fi; if [[ -f "$ROOT/c11_ready_wrong" ]]; then printf "v=1 op=c11 role=guest ready=1 mode=other\n"; exit 0; fi; printf "v=1 op=c11 role=guest ready=1 mode=%s\n" "$mode"; if [[ -f "$ROOT/c11_guest_bad" ]]; then printf "v=1 op=c11 role=guest mode=%s n=8 torn=0 polls=1:1 gap_us=n=0 verdict=ok reason=-\n" "$mode"; exit 0; fi; if [[ -f "$ROOT/c11_guest_rollback" ]]; then printf "v=1 op=c11 role=guest mode=%s n=3 torn=1 polls=1:1,2:1,3:2 gap_us=n=2,min=10,p50=12,max=14 verdict=failed reason=rollback\n" "$mode"; exit 0; fi; if [[ -f "$ROOT/c11_guest_skip" ]]; then printf "v=1 op=c11 role=guest mode=%s n=0 torn=0 polls=- gap_us=n=0 verdict=failed reason=skip\n" "$mode"; exit 0; fi; printf "v=1 op=c11 role=guest mode=%s n=8 torn=0 polls=1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1 gap_us=n=7,min=11,p50=21,max=31 verdict=ok reason=-\n" "$mode"; exit 0; }' \
     'remote=""; for remote in "$@"; do :; done' \
-    'case "$remote" in upload|verify\ *|run\ C2|run\ C8|"run C8 a1"|"run C8 b"|"run C8 a2") cat >/dev/null; exit 0 ;; "run C11 fd"|"run C11 reopen") c11_guest ;; "run C1"|"run C7") "$ROOT/bin/c7guest" "$remote"; exit $? ;; "run C9") cat >/dev/null; mode=""; mbx=$(awk '"'"'match($0,/--dir s11mbx:/){p=substr($0,RSTART+13)} END{print p}'"'"' "$ROOT/tart.log"); [[ -n "$mbx" && -f "$mbx/fill-mode" ]] && mode=$(tr -d "\r\n" <"$mbx/fill-mode"); if [[ -f "$ROOT/c9_hold_after" && "$mode" == small ]]; then "$ROOT/bin/c9write" & cpid=$!; trap "kill -KILL $cpid 2>/dev/null; exit 0" TERM INT HUP; wait "$cpid"; exit $?; fi; "$ROOT/bin/c9write"; exit $? ;; "run C6 file"|"run C6 dir") kind=file; [[ "$remote" == "run C6 dir" ]] && kind=dir; [[ -f "$ROOT/c6_nohold" ]] && exit 0; printf "v=1 op=c6 role=guest kind=%s held=1\n" "$kind"; pp=$PPID; trap "exit 0" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done ;; esac' \
+    'c8_phase() { cat >/dev/null; phase=${remote#run C8 }; if [[ -f "$ROOT/c8_plant_host" ]]; then mbx=$(awk '"'"'match($0,/s11mbx:[^ ]*/){p=substr($0,RSTART+7)} END{print p}'"'"' "$ROOT/tart.log"); if [[ -n "$mbx" && -d "$mbx" && ! -L "$mbx" ]]; then printf "%s\n" "v=1 op=c8d role=host verdict=unknown reason=observed n=2 counted=8,12 a_steps=FORGED b_steps=FORGED guest_id=FORGED host_id=FORGED retry=absent:0,replaced:0" >"$mbx/result-host"; fi; fi; if [[ -f "$ROOT/c8_disconnect" ]]; then want=$(tr -d "\r\n" <"$ROOT/c8_disconnect"); [[ "$want" == "$phase" ]] && exit 255; fi; exit 6; }' \
+    'case "$remote" in upload|verify\ *|run\ C2|run\ C8) cat >/dev/null; exit 0 ;; "run C8 a1"|"run C8 b"|"run C8 a2") c8_phase ;; "run C11 fd"|"run C11 reopen") c11_guest ;; "run C1"|"run C7") "$ROOT/bin/c7guest" "$remote"; exit $? ;; "run C9") cat >/dev/null; mode=""; mbx=$(awk '"'"'match($0,/--dir s11mbx:/){p=substr($0,RSTART+13)} END{print p}'"'"' "$ROOT/tart.log"); [[ -n "$mbx" && -f "$mbx/fill-mode" ]] && mode=$(tr -d "\r\n" <"$mbx/fill-mode"); if [[ -f "$ROOT/c9_hold_after" && "$mode" == small ]]; then "$ROOT/bin/c9write" & cpid=$!; trap "kill -KILL $cpid 2>/dev/null; exit 0" TERM INT HUP; wait "$cpid"; exit $?; fi; "$ROOT/bin/c9write"; exit $? ;; "run C6 file"|"run C6 dir") kind=file; [[ "$remote" == "run C6 dir" ]] && kind=dir; [[ -f "$ROOT/c6_nohold" ]] && exit 0; printf "v=1 op=c6 role=guest kind=%s held=1\n" "$kind"; pp=$PPID; trap "exit 0" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done ;; esac' \
     '[[ -f "$ROOT/guest_fail" ]] && exit 9' \
     'if [[ -f "$ROOT/guest_hang" ]]; then pp=$PPID; trap "exit 143" TERM INT HUP; while kill -0 "$pp" 2>/dev/null; do sleep 0.2; done; exit 143; fi' \
     'last=""' \
@@ -1847,8 +1848,33 @@ case "$cmd" in
     ;;
   c8dual)
     [[ "$boundary" == host && "$role" == host ]] || exit 2
-    line="v=1 op=c8d role=host verdict=unknown reason=observed n=2 counted=8,12 a_steps=a-file:create:ok,a-file:chmod:ok,a-shared:create:ok,a-shared:chmod:ok,a-dir:create:ok,b-file:read:ok,b-file:write:EACCES,b-file:chmod:EPERM,b-file:chown:EPERM,b-file:rename:EACCES,b-file:unlink:EACCES b_steps=a-file:read:EACCES,a-file:write:EACCES,a-file:chmod:EPERM,a-file:chown:EPERM,a-file:rename:EACCES,a-file:unlink:EACCES,a-shared:read:ok,a-shared:write:ok,a-shared:chmod:EPERM,a-shared:chown:EPERM,a-shared:rename:EACCES,a-shared:unlink:EACCES,a-dir:read:EACCES,a-dir:write:other,a-dir:chmod:EPERM,a-dir:chown:EPERM,a-dir:rename:EACCES,a-dir:unlink:EACCES,b-file:create:ok,b-file:chmod:ok,b-file:chown501:EPERM guest_id=a1=a-file:501:20:600:1;b=b-file:502:20:600:1;a2=b-file:502:20:600:1 host_id=a-file:1000:1000:600:1:1:2,b-file:1000:1000:600:1:1:3"
+    line="v=1 op=c8d role=host verdict=unknown reason=observed n=2 counted=8,12 a_steps=a-file:create:ok,a-file:chmod:ok,a-shared:create:ok,a-shared:chmod:ok,a-dir:create:ok,b-file:read:ok,b-file:write:EACCES,b-file:chmod:EPERM,b-file:chown:EPERM,b-file:rename:EACCES,b-file:unlink:EACCES b_steps=a-file:read:EACCES,a-file:write:EACCES,a-file:chmod:EPERM,a-file:chown:EPERM,a-file:rename:EACCES,a-file:unlink:EACCES,a-shared:read:ok,a-shared:write:ok,a-shared:chmod:EPERM,a-shared:chown:EPERM,a-shared:rename:EACCES,a-shared:unlink:EACCES,a-dir:read:EACCES,a-dir:write:other,a-dir:chmod:EPERM,a-dir:chown:EPERM,a-dir:rename:EACCES,a-dir:unlink:EACCES,b-file:create:ok,b-file:chmod:ok,b-file:chown501:EPERM guest_id=a1=a-file:501:20:600:1;b=b-file:502:20:600:1;a2=b-file:502:20:600:1 host_id=a-file:1000:1000:600:1:1:2,b-file:1000:1000:600:1:1:3 retry=absent:0,replaced:0"
     printf '%s\n' "c8dual host role=host" >>"${S11_STUB_ROOT:?}/probe.argv"
+    forged="v=1 op=c8d role=host verdict=unknown reason=observed n=2 counted=8,12 a_steps=FORGED b_steps=FORGED guest_id=FORGED host_id=FORGED retry=absent:0,replaced:0"
+    if [[ "$mode" == c8launchfail ]]; then
+      printf '%s\n' "$forged" >"$dir/result-$role"
+      exit 127
+    fi
+    if [[ "$mode" == c8hidden ]]; then
+      mkdir -p "$dir/c8/a-dir"
+      printf x >"$dir/c8/a-dir/.hidden"
+    elif [[ "$mode" == c8symlink ]]; then
+      mkdir -p "$dir/c8/a-dir"
+      ln -s .hidden "$dir/c8/a-dir/linkchild"
+    elif [[ "$mode" == c8renhidden ]]; then
+      mkdir -p "$dir/c8/a-dir.ren"
+      printf x >"$dir/c8/a-dir.ren/.hidden"
+    elif [[ "$mode" == c8dirempty ]]; then
+      mkdir -p "$dir/c8/a-dir" "$dir/c8/a-dir.ren"
+    fi
+    if [[ "$mode" == c8forge ]]; then
+      printf '%s\n' "$line"
+      printf '%s\n' "$forged" >"$dir/result-$role"
+      exit 1
+    fi
+    printf '%s\n' "$line"
+    printf '%s\n' "$line" >"$dir/result-$role"
+    exit 1
     ;;
   c11)
     if [[ "$mode" == c11notack ]]; then
@@ -4093,7 +4119,7 @@ test_dispatcher_c8_dual_literals() {
   if grep -F -q 'eval ' "$CASE/dispatcher.sh"; then die "dispatcher uses eval"; fi
 }
 
-test_c8_dual_flow() {
+prep_c8_dual() {
   setup
   write_pinned
   write_fake_probe
@@ -4101,8 +4127,20 @@ test_c8_dual_flow() {
   cp "$ROOT/inventory" "$ROOT/inventory.orig"
   printf 'second\n' >"$CASE/gcuprobe_ed25519"
   chmod 600 "$CASE/gcuprobe_ed25519"
+}
+
+run_c8_dual() {
   run_probe 25 "${ARGS[@]}" --stage M --case C8 --golden macos-s2-eval-c8 --second-key "$CASE/gcuprobe_ed25519" \
     --probe "$ROOT/bin/s11probe" --pinned-host-key "$CASE/pinned"
+}
+
+c8_tree() {
+  find "$CASE/out" -type d -name c8 -print
+}
+
+test_c8_dual_flow() {
+  prep_c8_dual
+  run_c8_dual
   need_ec 4
   common_end
   grep -E '^clone macos-s2-eval-c8 ' "$ROOT/tart.log" >/dev/null || die "clone source"
@@ -4177,13 +4215,125 @@ PY
   grep -F -q 'c8dual host role=host' "$ROOT/probe.argv" || die "host probe argv"
   [[ "$(cat "$ROOT/once-wiped")" == "removed 2" ]] || die "keys not wiped: $(cat "$ROOT/once-wiped" 2>/dev/null || true)"
   local mbx
-  mbx=$(find "$CASE/out" -type d -name c8 -print)
+  mbx=$(c8_tree)
   [[ -n "$mbx" && -f "$mbx/result-a1" && -f "$mbx/result-b" && -f "$mbx/result-a2" ]] || die "phase slots removed"
+}
+
+test_c8_ssh_disconnect_stops_dispatch() {
+  prep_c8_dual
+  printf '%s\n' a1 >"$ROOT/c8_disconnect"
+  run_c8_dual
+  need_ec 4
+  common_end
+  need_reason a1-ssh
+  m_stage 'cases[0]["verdict"] == "unknown" and cases[0]["reason"] == "a1-ssh" and "host_id=-" in cases[0]["record"] and cases[0]["export_state"] != "quarantine"'
+  grep -F -q 'run C8 a1' "$ROOT/ssh.log" || die "a1 not dispatched"
+  if grep -F -q 'run C8 b' "$ROOT/ssh.log"; then die "b dispatched after a1 ssh"; fi
+  if grep -F -q 'run C8 a2' "$ROOT/ssh.log"; then die "a2 dispatched after a1 ssh"; fi
+  if [[ -f "$ROOT/probe.argv" ]] && grep -F -q 'c8dual host' "$ROOT/probe.argv"; then die "host collector ran"; fi
+  [[ -s "$ROOT/stop.args" ]] || die "stop did not run"
+}
+
+test_c8_stop_failure_skips_host_identity() {
+  prep_c8_dual
+  touch "$ROOT/fail_stop" "$ROOT/c8_plant_host"
+  run_c8_dual
+  need_ec 5
+  common_end
+  need_reason quarantine
+  [[ ! -f "$ROOT/delete.args" ]] || die "deleted unproven vm"
+  m_stage 'cases[0]["verdict"] == "unknown" and cases[0]["reason"] == "quarantine" and cases[0]["export_state"] == "quarantine" and "host_id=-" in cases[0]["record"] and "FORGED" not in cases[0]["record"]'
+  grep -F -q 'run C8 a1' "$ROOT/ssh.log" || die "a1 missing"
+  grep -F -q 'run C8 b' "$ROOT/ssh.log" || die "b missing"
+  grep -F -q 'run C8 a2' "$ROOT/ssh.log" || die "a2 missing"
+  if [[ -f "$ROOT/probe.argv" ]] && grep -F -q 'c8dual host' "$ROOT/probe.argv"; then die "host collector ran"; fi
+  local hostf
+  hostf=$(find "$CASE/out" -name result-host -print)
+  [[ -n "$hostf" ]] || die "planted result-host removed"
+  grep -F -q FORGED "$hostf" || die "plant missing"
+  if grep -F -q FORGED "$CASE/out/report.json"; then die "forged host identity in report"; fi
+}
+
+test_c8_forged_result_host_not_authoritative() {
+  prep_c8_dual
+  export S11_PROBE_MODE=c8forge
+  run_c8_dual
+  need_ec 4
+  common_end
+  need_reason observed
+  m_stage 'cases[0]["reason"] == "observed" and "host_id=a-file:" in cases[0]["record"] and "a_steps=a-file:create:ok" in cases[0]["record"] and "FORGED" not in cases[0]["record"]'
+  grep -F -q 'c8dual host role=host' "$ROOT/probe.argv" || die "host probe argv"
+  local hostf
+  hostf=$(find "$CASE/out" -name result-host -print)
+  [[ -n "$hostf" ]] || die "archive slot missing"
+  grep -F -q FORGED "$hostf" || die "archive was replaced"
+  if grep -F -q FORGED "$CASE/out/report.json"; then die "forged host identity in report"; fi
+}
+
+test_c8_host_launch_failure_ignores_result_host() {
+  prep_c8_dual
+  export S11_PROBE_MODE=c8launchfail
+  run_c8_dual
+  need_ec 4
+  common_end
+  need_reason probe-failed
+  m_stage 'cases[0]["verdict"] == "unknown" and cases[0]["reason"] == "probe-failed" and "host_id=-" in cases[0]["record"] and "FORGED" not in cases[0]["record"]'
+  grep -F -q 'c8dual host role=host' "$ROOT/probe.argv" || die "host probe argv"
+  local hostf
+  hostf=$(find "$CASE/out" -name result-host -print)
+  [[ -n "$hostf" ]] || die "result-host removed"
+  grep -F -q FORGED "$hostf" || die "plant missing"
+  if grep -F -q FORGED "$CASE/out/report.json"; then die "forged host identity in report"; fi
+}
+
+c8_child_quarantine() {
+  local mode=$1 kind=$2
+  prep_c8_dual
+  export S11_PROBE_MODE=$mode
+  run_c8_dual
+  need_ec 5
+  common_end
+  need_reason quarantine
+  m_stage 'cases[0]["export_state"] == "quarantine"'
+  local mbx
+  mbx=$(c8_tree)
+  [[ -n "$mbx" ]] || die "c8 removed"
+  case "$kind" in
+    hidden) [[ -f "$mbx/a-dir/.hidden" ]] || die "hidden child removed" ;;
+    link) [[ -L "$mbx/a-dir/linkchild" ]] || die "symlink child removed" ;;
+    ren) [[ -f "$mbx/a-dir.ren/.hidden" ]] || die "renamed dir child removed" ;;
+  esac
+}
+
+test_c8_adir_hidden_quarantine() { c8_child_quarantine c8hidden hidden; }
+test_c8_adir_symlink_quarantine() { c8_child_quarantine c8symlink link; }
+test_c8_adir_ren_hidden_quarantine() { c8_child_quarantine c8renhidden ren; }
+
+test_c8_adir_empty_not_quarantine() {
+  prep_c8_dual
+  export S11_PROBE_MODE=c8dirempty
+  run_c8_dual
+  need_ec 4
+  common_end
+  need_reason observed
+  m_stage 'cases[0]["reason"] == "observed" and cases[0]["export_state"] != "quarantine"'
+  local mbx
+  mbx=$(c8_tree)
+  [[ -d "$mbx/a-dir" && -d "$mbx/a-dir.ren" && ! -L "$mbx/a-dir" && ! -L "$mbx/a-dir.ren" ]] || die "empty dirs missing"
+  [[ -z "$(find "$mbx/a-dir" "$mbx/a-dir.ren" -mindepth 1 -print)" ]] || die "empty dirs have children"
 }
 
 run_case c8-golden-usage test_c8_golden_rejected
 run_case c8-second-key-usage test_c8_second_key_rejected
 run_case dispatcher-c8 test_dispatcher_c8_dual_literals
 run_case c8-dual test_c8_dual_flow
+run_case c8-ssh-disconnect test_c8_ssh_disconnect_stops_dispatch
+run_case c8-stop-skips-host test_c8_stop_failure_skips_host_identity
+run_case c8-forged-host test_c8_forged_result_host_not_authoritative
+run_case c8-host-launch-fail test_c8_host_launch_failure_ignores_result_host
+run_case c8-adir-hidden test_c8_adir_hidden_quarantine
+run_case c8-adir-symlink test_c8_adir_symlink_quarantine
+run_case c8-adir-ren-hidden test_c8_adir_ren_hidden_quarantine
+run_case c8-adir-empty test_c8_adir_empty_not_quarantine
 echo "ALL_OK ${SECONDS}s"
-[[ "$SECONDS" -lt 240 ]] || { echo "suite took ${SECONDS}s" >&2; exit 1; }
+[[ "$SECONDS" -lt 400 ]] || { echo "suite took ${SECONDS}s" >&2; exit 1; }
