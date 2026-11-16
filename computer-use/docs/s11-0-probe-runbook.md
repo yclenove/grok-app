@@ -34,7 +34,7 @@ bash computer-use/scripts/s11-0-probe.sh --stage all \
 bash computer-use/scripts/s11-0-probe.sh --stage B --endpoint-placeholder --tart-home '<路径>'
 ```
 
-常用参数：`--stage A|B|C|M|V|R|all`（默认 all；`all` 不含 M、V、R），`--out`（必须是全新不存在的目录；默认 `./s11-0-out`。脚本拒绝已存在的目录或符号链接，避免把陈旧报告当成这次的证据），`--lan-ip <IPv4>`（不给则 LAN 记为未测量；不扫描），`--ssh-key`，`--tart-home <路径>`，`--dry-run`。阶段 M 另要 `--case C1|C2|C8` 和 `--pinned-host-key <文件>`；非 dry-run 还要 `--probe <测量二进制>`。阶段 V 的 `--case` 是 `C4|C1|C2|C9|C5|C6|C7|C10`。C5 还要 `--fault F1|F2|F3|F4|F5`。阶段 R 要 `--receipt <volume-receipt>`，并且拒绝 `--dry-run`。这些标志不能和 A/B/C 一起用。没有 `--golden`、`--clone-name`、`--guest-user`、`--hostname`、`--softnet`，也没有可复用的 clone 名字参数或环境变量。拒绝 root。dry-run 走同一套 argv 构造，只打印，不 clone。阶段 M 的 `--out` 要是绝对路径，路径上每一级都不是符号链接（Mini 上放在家目录；测量核心会拒绝符号链接组件）。
+常用参数：`--stage A|B|C|M|V|R|all`（默认 all；`all` 不含 M、V、R），`--out`（必须是全新不存在的目录；默认 `./s11-0-out`。脚本拒绝已存在的目录或符号链接，避免把陈旧报告当成这次的证据），`--lan-ip <IPv4>`（不给则 LAN 记为未测量；不扫描），`--ssh-key`，`--tart-home <路径>`，`--dry-run`。阶段 M 另要 `--case C1|C2|C8|C11` 和 `--pinned-host-key <文件>`；非 dry-run 还要 `--probe <测量二进制>`。阶段 V 的 `--case` 是 `C4|C1|C2|C9|C5|C6|C7|C10`。C5 还要 `--fault F1|F2|F3|F4|F5`。阶段 R 要 `--receipt <volume-receipt>`，并且拒绝 `--dry-run`。这些标志不能和 A/B/C 一起用。没有 `--golden`、`--clone-name`、`--guest-user`、`--hostname`、`--softnet`，也没有可复用的 clone 名字参数或环境变量。拒绝 root。dry-run 走同一套 argv 构造，只打印，不 clone。阶段 M 的 `--out` 要是绝对路径，路径上每一级都不是符号链接（Mini 上放在家目录；测量核心会拒绝符号链接组件）。
 
 ## 时长与清理
 
@@ -95,21 +95,23 @@ bash computer-use/scripts/s11-0-probe.sh --stage B --endpoint-placeholder --tart
 
 不要改宿主的 PF、防火墙、路由或 DNS。
 
-## 阶段 M（邮箱机械，C1 / C2 / C8）
+## 阶段 M（邮箱机械，C1 / C2 / C8 / C11）
 
 阶段 M 复用本脚本的 clone、启动、取地址、清理和报告，不起阶段 A/B 的网络采集。`tart run` 使用 `--no-graphics --net-softnet`，并加上 `--dir s11mbx:<本次导出>/mailbox`。这是 DEFAULT 网络的实验室例外，不加 block，也不加 allow。报告增加 `evidence` = `DEFAULT-network/mechanics-only`，以及 `export` = `host-private-directory (not the capped HFSX volume)`。导出目录是脚本在 `--out` 下用 `mktemp` 新建的 0700 私有目录，不是限容卷。
 
 真机跑阶段 M 之前必须先发一句，确认这次是 DEFAULT 网络机械实验、网关会暴露。没有这句话就不要跑。本段不构成运行授权。真实 VM 上的阶段 M 仍是 not_run。
 
-每个子例用 `/usr/bin/ssh-keygen` 在宿主私有目录生成一把一次性 ed25519。现有 eval 密钥只做两步：就绪命令 `/usr/bin/true`，以及一次固定初始化（客机新建 0700 目录、写入固定 dispatcher、客机 `shasum -a 256` 核对宿主算出的摘要、追加带 `restrict,command=` 的一次性公钥）。任何一步失败都停。之后的 upload、verify、run 只用一次性密钥。dispatcher 只按字面接受 `upload`、`verify` 加 64 位十六进制、`run C1`、`run C2`、`run C8`、`run C9`、`run C6 file`、`run C6 dir`、`run C7`。`--pinned-host-key` 是 golden 的 ssh-ed25519 公钥，clone 继承同一把主机密钥。SSH 使用 `StrictHostKeyChecking=yes`、独立 known_hosts、只认这一把私钥、关闭转发、不用 TTY。每次连接前，本次 clone 必须是唯一正在运行的 VM。
+每个子例用 `/usr/bin/ssh-keygen` 在宿主私有目录生成一把一次性 ed25519。现有 eval 密钥只做两步：就绪命令 `/usr/bin/true`，以及一次固定初始化（客机新建 0700 目录、写入固定 dispatcher、客机 `shasum -a 256` 核对宿主算出的摘要、追加带 `restrict,command=` 的一次性公钥）。任何一步失败都停。之后的 upload、verify、run 只用一次性密钥。dispatcher 只按字面接受 `upload`、`verify` 加 64 位十六进制、`run C1`、`run C2`、`run C8`、`run C9`、`run C6 file`、`run C6 dir`、`run C7`、`run C11 fd`、`run C11 reopen`。`--pinned-host-key` 是 golden 的 ssh-ed25519 公钥，clone 继承同一把主机密钥。SSH 使用 `StrictHostKeyChecking=yes`、独立 known_hosts、只认这一把私钥、关闭转发、不用 TTY。每次连接前，本次 clone 必须是唯一正在运行的 VM。
 
 C2 对 `file-sync`、`dir-sync`、`rename` 各起一台新 clone。每个边界计划发布 3 次。file-sync 完成两次重命名；第三次只把文件 fsync 到 `part` 后退出，不重命名，也不同步被测数据目录。三个子例都是 `not-ack`，并且 VM 清理被证实时，聚合才是 `not-ack`、退出码 0。`unknown` 或没跑到的子例优先于 `not-ack`。C8 若客机只有一个非管理员主体，结果是 `unknown` / `single-principal`。不建账户，不提权。
+
+C11 测预建固定长度文件上的原地写入可见性，复用本阶段的 clone、导出、SSH 和清理。两个 64 字节全 0 文件 `ip-hg`（宿主写、访客读）和 `ip-gh`（访客写、宿主读）在 VM 启动前，由现有有界执行器监督，以排他、不跟随符号链接的方式直接建在私有导出目录里，不经过临时文件再移动或复制。无法证明这次创建完成时，按现有的 unknown/quarantine 处理，不启动 VM。记录是 64 字节：`v=1 seq=<十进制> crc=<8 位小写十六进制>`，左对齐，空格补齐，末字节是换行。crc 是 seq 十进制 ASCII（无前导 0）的 SHA-256 前 8 个十六进制字符。`seq=0` 的规范记录只写在预建的 `ip-gh` 上，表示访客就绪。crc 不符或 seq 解析不出算撕裂，重读，不算失败；seq 回退或跳号算失败。`fd` 读方打开一次并持有 fd，每 5 毫秒 `pread` 64 字节；`reopen` 每次轮询打开、读取、关闭。写方每次 `pwrite` 64 字节后 `fsync`。两种读法各起一台新 clone，各 8 轮，单轮上限 5 秒。第 1 轮开始前，宿主先读到访客在 `ip-gh` 上的 seq=0，这段等待不计入 8 个往返样本；一直等不到是 `unknown` / `peer-not-ready`。宿主往返从这次 `pwrite` 之前算起，到读到同号 pong 为止，包含写入和 `fsync`，记在宿主自己的单调时钟上。`fsync` 返回之后到读到 pong 的残差另记为 `resid_us`，不代替 `rtt_us`。读到合法记录之后，以及访客写完 pong 并 `fsync` 之后，都按该轮开始时定下的截止和命令截止复查，过点不算成功，也不把截止往后推。访客记自己时钟上从上次 pong 的 `fsync` 返回到看见下一个 ping 的间隔。两边不假设共同时钟。宿主只接受访客的一行摘要；访客的数字不替换宿主测得的 `n`、`torn`、`rtt_us`、`resid_us`。摘要缺失或畸形则该子例是 `unknown`；访客写明回退或跳号则仍是 `failed`。报告仍是 `DEFAULT-network/mechanics-only`。跑 C11 之前先发一句：这次只在预建的 64 字节文件上测原地 pwrite/pread 可见性，仍是 DEFAULT 网络机械实验，不改任何常量。本段不构成运行授权。真实 VM 上的 C11 仍是 not_run。
 
 结束时只删除脚本自己创建的已知文件名，空目录用 `rmdir`。出现未知名字或符号链接时，一个都不删，整目录留存并记 `quarantine`，退出码非零。不递归删除。白名单里的客机帧可以留下，状态记 `retained`，这不是 quarantine。报告没写成功时，脚本非零退出（测量本来可以是 0 时，退出码是 2）。
 
 阶段 M 在 quarantine（含审计超量、超时、未证明 VM 已退出）时退出码是 5，即使采集结果同时是 unknown；测量原因仍留在该 case 行。A/B/C 仍是采集失败优先于清理失败。
 
-测量二进制是 `tools/s11-mailbox-probe`。它只接收目录、角色和计数/超时，子命令是 `writer`、`reader`、`c2 <boundary>`、`c8`，以及只在客机上跑的 `fill --mode data|small`。另有客机子命令 `hold --kind file|dir --secs <秒>` 和 `c7ops --ms <毫秒>`：各打一行测量结果。`hold` 在打印 `held=1` 之后才睡眠。文件操作走目录 fd。它不负责 VM、SSH 或磁盘镜像，宿主也不用它卸载卷。
+测量二进制是 `tools/s11-mailbox-probe`。它只接收目录、角色和计数/超时，子命令是 `writer`、`reader`、`c2 <boundary>`、`c8`、`c11 --mode fd|reopen`，以及只在客机上跑的 `fill --mode data|small`。另有客机子命令 `hold --kind file|dir --secs <秒>` 和 `c7ops --ms <毫秒>`：各打一行测量结果。`hold` 在打印 `held=1` 之后才睡眠。文件操作走目录 fd。它不负责 VM、SSH 或磁盘镜像，宿主也不用它卸载卷。
 
 ## 阶段 V（限容卷，C4 / C1 / C2 / C9）
 
@@ -175,7 +177,7 @@ C5 不起 VM。`--case C5 --fault F1|F2|F3|F4|F5` 在凭据写到一半时用 `k
 
 C8 要第二个**标准（非管理员）**账号，才能测两个主体在邮箱上的 UID/权限映射。golden `macos-s2-eval` 不动；总控已从它克隆出准备副本 `macos-s2-eval-c8`，并在 Mini 的 `~/cu2-ci/s11-0/c8/` 生成了只给该账号用的 ed25519 密钥（私钥不离开 Mini）。下列步骤由 owner 完成，所有密码由 owner 输入，总控不经手：
 
-1. 在 Mini 上启动副本：`TART_HOME="/Volumes/Mini扩展/VMs/tart" tart run macos-s2-eval-c8`。
+1. 在 Mini 上启动副本：`TART_HOME="<Tart 主目录>" tart run macos-s2-eval-c8`（主目录与平时运行探针时 `--tart-home` 用的相同）。
 2. 以 `eval` 登录客机，在终端执行：`sudo sysadminctl -addUser gcuprobe -fullName "GCU probe" -password -`（不加 `-admin`，即标准账号；新账号密码自定、不必告知）；建 `/Users/gcuprobe/.ssh`，把总控给出的公钥写入 `authorized_keys`，属主 `gcuprobe:staff`，目录 0700、文件 0600；如有远程登录用户限制，执行 `sudo dseditgroup -o edit -a gcuprobe -t user com.apple.access_ssh`。
 3. `dscl . -read /Groups/admin GroupMembership` 的输出里不应有 `gcuprobe`。
 4. `sudo shutdown -h now` 关机，告诉总控。
