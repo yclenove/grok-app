@@ -1056,10 +1056,14 @@ async fn scoped_launch_dispatch_refuses_before_approval_with_default_policy_and_
 
 fn element_index(text: &str) -> u32 {
     text.lines()
-        .find(|line| line.contains("Go"))
+        // The button row, not any line with "Go" in it: the screenshot path's
+        // random temp-dir suffix can contain "Go" (e.g. gcu-session-IGoqtB).
+        .find(|line| line.contains(" button Go "))
         .and_then(|line| line.split_whitespace().next())
         .and_then(|token| token.parse().ok())
-        .expect("allowed observation did not index Go")
+        .unwrap_or_else(|| {
+            panic!("allowed observation did not index Go; observation text:\n{text}")
+        })
 }
 
 fn attachment_bytes(result: &CallToolResult) -> Vec<Vec<u8>> {
