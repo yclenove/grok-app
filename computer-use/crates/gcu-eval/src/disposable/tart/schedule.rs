@@ -30,7 +30,7 @@
 //! cap. A 2000 ms grant, or a larger age or gap, still returns
 //! [`ScheduleError::Infeasible`]. So does a grid above 2048 requests. Under
 //! the historical `g+2s` window that same age is already past 2000 ms, and
-//! both `2146 + 1923` and `2023` miss it. [`prove_model`] keeps that closed
+//! both `2146 + 1923` and `2023` miss it. The test-only `prove_model` keeps that closed
 //! case so the gate is not a constant success.
 
 use std::time::Duration;
@@ -111,11 +111,21 @@ pub struct ScheduleProof {
     pub slack_ms: u64,
 }
 
-/// Grant, age, and gap a feasibility check evaluates.
+/// Prove `window_ms` fits the measured grant cycle and the 2048 cap.
 ///
-/// [`prove`] fills this from the measured constants and [`LEASE_WINDOW_MS`].
-/// Tests pass a shorter grant or a larger age or gap. That does not change
-/// the public lease constant.
+/// Does not sleep, renew, or start a thread. The grant is [`LEASE_WINDOW_MS`].
+/// A cycle that misses that grant, or a grid past [`MAX_POLLS`], is
+/// [`ScheduleError::Infeasible`]. The function does not return a proof that
+/// merely names the publish period. Production code has no other entry: the
+/// grant, age and gap are always the measured constants.
+pub fn prove(window_ms: u64) -> Result<ScheduleProof, ScheduleError> {
+    evaluate(window_ms, LEASE_WINDOW_MS, ACCEPT_AGE_MS, GRANT_GAP_MS)
+}
+
+/// Grant, age, and gap a test feeds to the same evaluator as [`prove`].
+///
+/// Test builds only, so no production caller can pick its own bounds.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CycleModel {
     /// Attempt length, in milliseconds. This sizes the request grid.
@@ -128,49 +138,37 @@ pub(crate) struct CycleModel {
     pub gap_ms: u64,
 }
 
-/// Prove `window_ms` fits the measured grant cycle and the 2048 cap.
-///
-/// Does not sleep, renew, or start a thread. The grant is [`LEASE_WINDOW_MS`].
-/// A cycle that misses that grant, or a grid past [`MAX_POLLS`], is
-/// [`ScheduleError::Infeasible`]. The function does not return a proof that
-/// merely names the publish period.
-pub fn prove(window_ms: u64) -> Result<ScheduleProof, ScheduleError> {
-    prove_model(CycleModel {
-        window_ms,
-        grant_ms: LEASE_WINDOW_MS,
-        age_ms: ACCEPT_AGE_MS,
-        gap_ms: GRANT_GAP_MS,
-    })
+/// Test-only entry to the evaluator with chosen bounds.
+#[cfg(test)]
+pub(crate) fn prove_model(model: CycleModel) -> Result<ScheduleProof, ScheduleError> {
+    evaluate(model.window_ms, model.grant_ms, model.age_ms, model.gap_ms)
 }
 
-/// Evaluate `model` against the publish grid and the 2048 cap.
-///
-/// Does not sleep, renew, or start a thread. Public callers use [`prove`].
-pub(crate) fn prove_model(model: CycleModel) -> Result<ScheduleProof, ScheduleError> {
+/// Evaluate one cycle against the publish grid and the 2048 cap. Private.
+fn evaluate(
+    window_ms: u64,
+    grant_ms: u64,
+    age_ms: u64,
+    gap_ms: u64,
+) -> Result<ScheduleProof, ScheduleError> {
     let period = RENEW_MS;
-    let periodic = model.window_ms / period + 1;
+    let periodic = window_ms / period + 1;
     let count = periodic.saturating_add(EXTRA_SAMPLES);
-    let fresh = model.age_ms < model.grant_ms;
-    let continuous = model
-        .age_ms
-        .checked_add(model.gap_ms)
-        .is_some_and(|sum| sum < model.grant_ms);
+    let fresh = age_ms < grant_ms;
+    let continuous = age_ms.checked_add(gap_ms).is_some_and(|sum| sum < grant_ms);
     if !fresh || !continuous || count > MAX_POLLS {
-        return Err(ScheduleError::Infeasible {
-            window_ms: model.window_ms,
-            count,
-        });
+        return Err(ScheduleError::Infeasible { window_ms, count });
     }
     Ok(ScheduleProof {
-        window_ms: model.window_ms,
+        window_ms,
         period_ms: period,
         periodic,
         inventory_count: count,
         lease_count: count,
         margin: MAX_POLLS - count,
-        age_ms: model.age_ms,
-        gap_ms: model.gap_ms,
-        slack_ms: model.grant_ms - model.age_ms - model.gap_ms,
+        age_ms,
+        gap_ms,
+        slack_ms: grant_ms - age_ms - gap_ms,
     })
 }
 
