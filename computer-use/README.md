@@ -266,7 +266,7 @@ gcu uninstall --client claude --yes
 
 Clients: `grok`, `codex`, `claude`, `antigravity`, `gemini`, `opencode`, `cursor`, `vscode`. `--scope` is `user` (default) or `project`. Pass the client as the positional argument or as `--client`. `--dry-run` prints a diff and writes nothing. `--json` prints one object. Repeating install does not duplicate the entry. Uninstall removes only `grok-computer-use` and hooks this installer owns.
 
-The installed `gcu mcp` selects `auto`: a build with the matching backend can reach the real desktop; current Windows/Linux release-workflow artifacts lack the native assembly features and exit 2 instead. There is no fake fallback. The installer adds neither `--driver fake` nor automatic approval. On macOS it uses the helper proxy above. Re-read the upgrade notice before reconnecting an old installation.
+The installed `gcu mcp` selects `auto`: a build with the matching backend can reach the real desktop; release-workflow artifacts assemble the native route for their platform (`native-windows` on Windows; `native-x11` and `native-wayland` on Linux). A self-built binary without those features exits 2 instead. There is no fake fallback. The installer adds neither `--driver fake` nor automatic approval. On macOS it uses the helper proxy above. Re-read the upgrade notice before reconnecting an old installation.
 
 Any real change under the Grok directory asks on a terminal:
 
