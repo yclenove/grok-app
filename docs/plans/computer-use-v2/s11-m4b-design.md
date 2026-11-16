@@ -1,5 +1,6 @@
 # S11-M4b：machine 集成设计
 
+修订记录：2026-11-15 round-1；补齐 D1/D3～D5 及回归，D2 按 controller 决策移除 ACK 工作门。
 日期：2026-11-15；状态：待独立设计审阅，本文不授权真实接线。
 基线：`3e3c390b`（M3、M4a、C11、`g+5s` 已合并）。下文源码路径相对 `computer-use/`，`tart/` 指 `crates/gcu-eval/src/disposable/tart/`。
 依据：[ADR 0019 §3/§6](../../../computer-use/docs/adr/0019-tart-mailbox-channel.md)、[M4 一审](reviews/2026-11-13-s11-m4-review.md)、[二审](reviews/2026-11-13-s11-m4-review-r2.md)、[M4a 三审](reviews/2026-11-13-s11-m4a-review-r3.md)。
@@ -8,7 +9,9 @@
 ## 1. 最小执行机制与截止
 
 保留单一同步调用方；在 `Attempt` 内保存枚举游标、固定输入、已发记录和不透明句柄。没有线程、回调、observer、自动续租或 Drop 清理。
-现有命名入口（reserve/clone/start 等）初始化对应游标并推进一片；返回 `Result<StepProgress<T>, StepError>`，明确区分 `Pending` 与 `Done(T)`；后续统一 `poll(caller)` 续跑。不得用 `Ok(())` 冒充阶段完成。
+现有命名入口（reserve/clone/start 等）初始化对应游标并推进一片；与后续统一 `poll(caller)` 都返回 `Result<StepProgress<CompletedStep>, StepError>`，明确区分 `Pending` 与 `Done(CompletedStep)`。
+`CompletedStep` 是闭集：`Reserved, Cloned, Started, Isolated, Bootstrapped, LoggedIn, Ready, Ran, Revoked, Destroyed, Cancelled, ProviderCrashNoted, RuntimeLossNoted, OwnerLeaseObserved, Sealed(AttemptReceipt), Recovered(Vec<AttemptReceipt>)`；各入口只交回对应变体。
+完成值以 move 随 `Done` 交付一次并清空游标/结果槽；recovery 的回执向量跨 yield 保存到全部完成。无活动游标的 poll 返回 `StepError::NoActiveStep`，无 IO、无重复写入/回执；Pending 不表示阶段完成。
 新命令不能覆盖未完成游标；重复入口只允许相同输入，不能重发。取消/Stop 是优先状态转换，保留被取消命令的句柄。
 
 每个公开推进入口只创建一次 `StepCtx { start, end = start.checked_add(100ms) }`；内部推进不能再开 step。
@@ -39,6 +42,7 @@ stop 的确认共用 stop end，delete 的缺席查询共用 delete end；不能
 `TartRunner` 的固定操作改为内部 begin/poll 及 cancel/reap 接口；句柄绑定命令实例，不接受任意 argv。`AttemptLedger` 同样提供有类型的读写 pending 句柄，写入与读回是两个阶段；不加阻塞兼容默认实现。
 `ClonePermit` 未派发时留在游标中；begin 接管后即使回复丢失也不能取回/复制。reserve 丢 ACK 只可读回该行，不重造 permit，不重发 clone。
 guest 保持七方法、版本 1：现有同槽重复调用即私有 begin/poll；machine 保存 op、实际 seq、pending/accepted、原 end。普通副作用最多一个，inventory 独立，lease/revoke 优先。
+M4b-1 即接入既有 normalized `Pending/Accepted/Terminal` 分类、begin-once progress/effect 记录与冻结 end，并迁移既有公开阶段路径；accepted 仍未完成，terminal 须交阶段验收，分类本身不产生成功。成本 fake 使用同一回复语法、真实实发记账及跨片剩余成本；完整语义验收/真实组合等留在 -2（§10），不得靠即时 legacy 成功绕过 -1 的公开路径回归。
 跨步只保存有界自有字节、解析位置、身份和句柄；账本 rows/list 也按有界条目推进。及时读到但尚未验收的候选可暂存，下步仍须重新过全部验收门。
 邮箱文件 FD 不跨 poll；每次读重新打开。一次 tmp→rename 发布保留源 FD 至该次有界调用结束，不把半个发布伪装成可恢复的文件 cursor。
 
@@ -50,9 +54,10 @@ M4b 只实现/验证离线合作式接口；未来真实实现若无法约束发
 ## 2. 命令取消、kill 与 reap
 
 每次 begin 保留唯一 `CommandHandle`（命令种类、row/attempt、进程实例、输出上限、原 end）；成功终态或完成有界取消前不得丢弃。
-正常执行在原预算内留取消尾段：`tail = min(1000ms, 首次剩余预算/2)`，工作截止为 `op_end-tail`。这是内部提前停止等待的策略，不增加任何 ADR/Host Stop 时限；短预算不足就拒绝新工作。
-首次需要取消时冻结 `cancel_end = min(op_end, cleanup_end, attempt_end, cancel_start+tail, 适用的既有 Stop 终止截止)`；未进入 cleanup 的可选 end 不参与。后续调用不能重算成 `now+tail`。
-普通工作 end 到达即禁新工作并转 `CancelRequested → KillPending → ReapPending → Exited | Unresolved`；kill 对同一句柄只 begin 一次，pending 只 poll。
+begin 时按各固定命令的 kill/reap 合约，在既有 operation 预算内固定 `work_end < op_end`，余下 `[work_end, op_end)` 为终止份额；成本回归验证该分配，预算不足拒绝 begin。不设统一 1s 取消 cap 或半预算比例。
+首次取消冻结 `cancel_end = min(op_end, 所属 phase_end, cleanup_end, attempt_end, 适用的既有 Stop 终止截止)`；未进入 cleanup 的可选 end 不参与，后续只可收紧、不可重算延长。早取消可用至该有效 end 的剩余预算。
+终止份额包含在所属阶段内；revoke/stop/delete/seal 仍各限 10/20/20/10s，并交 cleanup 总 60s 与 attempt end。各最大值不保证能同时取满，不新增阶段、不借 guest 最后 1s，也不增加 Stop 预算。
+`work_end` 到达即禁新工作并转 `CancelRequested → KillPending → ReapPending → Exited | Unresolved`；kill 对同一句柄只 begin 一次，pending 只 poll。
 取消每片先服务 owner/Stop，再推进一片 kill/reap，调用仍交 step.end/cancel_end。绝不能在入口先 reap、再无限跳过 owner 服务。
 reap 只接受严格解码、匹配 handle/进程实例、明确已退出且已回收的及时终态；空 body、含糊的成功、pending、unknown、错句柄、迟到终态均不是退出证明。
 `now >= cancel_end` 即停止重试，Unresolved 是 sticky unknown/quarantine，保留定位信息，禁止新 attempt；不能靠每步换新截止永久等待。
@@ -112,10 +117,11 @@ revoke_end 纳入每片旧截止检查；IO/解析返回后、设 revoke_ok 前�
 
 ## 7. 接入 M4a：验收、消费与身份
 
-machine 要求 `G: GuestChannel + GuestAccounting`；只扩展私有侧接口，不改七方法/版本。暴露只读 binding、实发计数/时间/seq、当前 pinned_grant 及首次已验证 envelope boot；测试 fake 必须给真实记账，不用默认空实现通过接线测试。
-inventory/lease 的权威计数来自 adapter 的**发布完成计数**，发布完成时记录时间；SeqTracker 的派发前预记不是已发布证据。需要时在 `publish_new` 增加此私有快照，不增加线字段。
-每次调用前后取快照差值，包含“已发布但随后 poll 出错”的路径；poll、ENOENT、旧 ACK、片不足的派发前拒绝均不计数、不改 last_publication。发布结果不明另记 dispatch unknown，禁止重试填补。
-machine 不再 bump_inv/猜 lease_seq；counter/时间来自同一发布事件。第 2049 个必需请求在发布前拒绝，并转撤权/隔离；不能只是 should_renew=false 后继续工作。
+machine 要求 `G: GuestChannel + GuestAccounting`；只扩展私有侧接口，不改七方法/版本。暴露只读 binding、实发计数/seq、两个发布时间、当前 pinned_grant 及首次已验证 envelope boot；测试 fake 必须给真实记账，不用默认空实现通过接线测试。
+inventory/lease 的权威计数来自 adapter 的**发布完成计数**；保存两个不同时间：开始该次发布、请求尚不可能可见前立即取不可变 `h_pre`，成功完成后取 `h_done` 并恰好计数一次。rename 可见到 fsync/校验返回之间允许 guest 采样，故 `h_done` 不能作保守到期锚点。
+`h_pre` 精确绑定该 inventory request seq；pin 保存它，poll、同 g 的重复样本、ACK 均不替换。`h_done` 只用于成功发布记账与 cadence；SeqTracker 的派发前预记不是已发布证据。需要时在 `publish_new` 增加此私有快照，不增加线字段。
+每次调用前后取快照差值，包含“已发布但随后 poll 出错”的路径；poll、ENOENT、旧 ACK、片不足的派发前拒绝均不计数、不改 `last_publication_done`。发布完成不确定仍为 dispatch unknown/quarantine，禁止重试填补。
+machine 不再 bump_inv/猜 lease_seq；计数和 `h_done` 来自同一成功完成事件。第 2049 个必需请求在发布前拒绝，并转撤权/隔离；不能只是 should_renew=false 后继续工作。
 
 terminal 验收顺序固定为：旧期限/服务门 → envelope及 guest identity → 实发 op/seq、阶段及 result 类型 → 语义成功 → 再查服务/期限 → 提交 evidence/消费记录 → 同一步 `note_consumed(exact note)`。
 语义要求 bootstrap 的非零 generation 与既有 native ACK 义务、login=ready、run 的合法 provisional score、revoke 的完整 drain；`outcome=ok/login=missing` 仍拒绝。
@@ -131,19 +137,20 @@ Tart boot 是另一个域。start 后先取得精确归属的 running status T�
 
 ## 8. 租约服务与 step 交错
 
-reserve 在任何资源副作用前调用 `schedule::prove(attempt_window_ms())` 并保存 proof；缩短预算可用更短窗口，不能用测试参数扩大真实可见性界限。
-采用 M4a 当前常量：两单向界各 1023ms、step 100ms、发布周期 800ms；age=2146ms、gap=1923ms，4069<5000，余量 931ms。
+reserve 在任何资源副作用前调用 `schedule::prove(attempt_window_ms())`，合并下列 guest/machine 两个不等式及请求数门并保存 proof；任一不满足即在分配前失败。缩短预算可用更短窗口，不能用测试参数扩大真实可见性界限。
+采用 M4a 当前常量：两单向界各 1023ms、step 100ms、发布周期 800ms。guest 侧：age=2146ms、gap=1923ms，`2146+1923=4069<5000`，余量 931ms。
+machine 侧：一个在途 inventory，下一请求最迟在两腿加服务后发布，`1023+1023+2×100=2246<5000ms`；相邻 `h_pre+5000ms` 保守窗口重叠 ≥2754ms。回复验收才换 pin，组合 trace 必须证明实际换 pin 前旧 host end 未到，不能靠尚未返回的请求延长。
 最长窗口 1,560,000ms：每流 1951 个周期位置 + 最多 8 次离格完成/消费采样 = 1959≤2048，余 89；probe 不逐项新发 inventory。离格额度单独保存，优先复用周期采样，不能靠加快采样耗尽 cap。
 该算式是可行性门，不是“每 800ms 必有新样本”的证据：adapter 同时只能开一个 inventory；未完成则只 poll，完成后按 due 尽快发下一请求，不重发或追补一串漏掉的 tick。
-首 inventory 绑定 boot 后至 revoke 开始前，在各公开步都运行租约服务（不只 Running）；800ms 的 `schedule::due(last_actual_publication, now)` 分别控制新 inventory 与 lease，计入 100ms 服务偏移。
+首 inventory 绑定 boot 后至 revoke 开始前，在各公开步都运行租约服务（不只 Running）；800ms 的 `schedule::due(last_publication_done, now)` 分别控制新 inventory 与 lease，计入 100ms 服务偏移。
 lease 可覆盖未 ACK 的旧 lease，seq 连续增加；poll 同 seq 不计新请求。grant 使用 adapter 的完整 pinned `(inventory_request_seq,g)`；同 g 不换引用/不延 end，下降或加法溢出拒绝。
 guest 只认真实已生成样本，截止固定 `g+5000`，不从 ACK/收到时刻起租；旧截止到达永久停止，最后 ≤1s 撤权/释放/杀树，总 ≤6s。S3 scope 3s 独立。
 
-host 保存候选样本与**已确认 grant 覆盖**两份状态。保留 ≤2048 项实发 grant/ACK 摘要表，精确核对引用与 end；旧已发且一致 ACK 仅丢弃，不延租；未发/改内容失败。
-host/guest 单调时钟不共用 epoch：为每个 pinned sample 保存其 inventory 的宿主实际发布时间 h，保守 host end 取 `h+5000ms`（采样不可能早于请求发布）。同样本一直沿用该 h，不直接把 g 当 MonoInstant，也不用 ACK 到达时间重算。
-仅及时匹配的 ACK 可建立对应的已确认覆盖；新样本/新发布/pending ACK 均不能独自延长覆盖。首次 ACK 前不开普通副作用；替换前先查旧覆盖 end，过期永久禁工作/续租，转撤权，迟到 ACK/新样本不能复活。
-这个保守界可能提前结束一次仍存活的 guest；允许 fail-closed，不声称 M4a 算式保证串行通道在所有延迟排列下可持续。无法在旧覆盖内确认下一 grant 的 trace 必须停止，不能放松准入或靠本地时间自续。
-每次实际发布、读取、采纳后检查观测进度/旧覆盖及原 op_end；长 login、max-task 同样受约束。没有可用新样本、预算/计数耗尽或抖动超界时转撤权，不发“补救”复活 grant。
+按 controller 的 D2 决策，移除“confirmed coverage 须 current ACK 才可工作”：ADR §3 的 lease terminal/确认“不产生 owner/scope/准入/清理证明”；guest 自行执行固定 `g+5000` 与 ≤6s 停树。
+ACK 仅作完整性检查：保留 ≤2048 项实发 grant/ACK 摘要表，terminal 必须精确等于某个已发 grant（含引用与 end）；过时但一致的 ACK（含首次见到）只丢弃、不延长任何东西，未发/改内容即失败。首次 ACK 尚未到、被覆盖或 pending 均不单独阻塞工作，ACK 也不更新 pin/host end。
+host/guest 单调时钟不共用 epoch：最新 pin 的保守 `host_end = h_pre+5000ms`，采样不可能早于该次发布开始。同 g 保留完整旧 pin/锚点，不把 g 当 MonoInstant、不用 `h_done` 或 ACK 到达时间重算。
+bootstrap/login/run 的 host 工作门为：`now < 最新 pin.host_end`、调度 proof 仍成立且未耗尽（含各流 2048 cap/离格额度）、owner/Stop 允许；身份及原 op/phase/attempt 门照旧。clone/卷准备/start/绑定 inventory 是前置阶段，按其原 owner/身份门执行。
+已有 pin 后，换新 pin、每次发布/读取/解析/采纳前后先查旧 host end；到期永久禁普通工作/续租，转撤权，晚样本/ACK 不复活。无新样本、预算/计数耗尽或模型外抖动/丢失导致门失败亦如此；仅 ACK 延迟或缺席不构成到期。长 login、max-task 使用同一门。
 
 每片顺序：旧截止/owner/Stop → 优先 revoke/释放或取消 → 适用的 due lease/待办 inventory → 当前阶段一片。租约 IO 用掉的时间不能再供阶段单独花 100ms。
 仅在共享剩余预算内推进下一项；保留服务轮转位置，不能让 pending lease 的 poll 永久饿死 inventory，也不能让慢查询/连续 probe/4s stop 阻止服务。VM 退出后不再写邮箱。
@@ -151,7 +158,7 @@ host/guest 单调时钟不共用 epoch：为每个 pinned sample 保存其 inven
 ## 9. 离线验收与评审可核对项
 
 fake runner/guest **在每次 begin/poll 内**把 IO 成本计入同一个 FakeClock；另给锁、ledger、解析、服务、note 成本。总耗时大于片的工作必须逐片扣剩余成本，不能永远以“101ms 放不下”原地拒绝，也不能只在测试外部跳时钟。
-每条 trace 记录 step 起止、各 call_end、实发与 poll、proof/Stop 检查、采纳/消费、kill/reap 顺序、样本生成/guest 接受时间。合作式路径每步 ≤100ms；另注入违约超时，断言返回后无后续 IO/采纳，并 fail-closed，不把它计为满足时限。
+每条 trace 记录 step 起止、各 call_end、实发与 poll、proof/Stop 检查、采纳/消费、kill/reap 顺序、inventory 的 h_pre/h_done、换 pin/host end、样本生成/guest 接受时间及 ACK 判定。合作式路径每步 ≤100ms；另注入违约超时，断言返回后无后续 IO/采纳，并 fail-closed，不把它计为满足时限。
 
 | 对应义务 | 必须有的回归（检查行为和最终回执） |
 | --- | --- |
@@ -162,16 +169,22 @@ fake runner/guest **在每次 begin/poll 内**把 IO 成本计入同一个 FakeC
 | R2-4 | reserve 的 500ms 锁成本改为片内让出/拒绝；慢 clone/start/ledger/seal 跨片完成；60ms lease+60ms inventory 共享 100ms；permit/命令只 begin 一次 |
 | R2-5 | bootstrap/login/run 各覆盖已发丢回复、恰在 end 返回 Err、读取/解析失败、accepted 后 provider/guest 丢失；后来清理成功仍 unknown/quarantine、无消费/后续 |
 | R2-6 | kill/reap 多片 pending、冻结 end 耗尽、迟到/空/畸形/unknown/错 handle 的 reap；每片有 owner/Stop 服务，严格退出证明正例，无无限等待 |
+| D3 取消预算 | clone 60s 预算内早取消，kill/reap 用 1.2s 且在全部旧 end 内，进程回收成功；在 work_end 取消须于原 op_end 前完成或 Unresolved；revoke/stop/delete/seal 内取消核对 10/20/20/10s 与总 60s，不加预算 |
+| D4 完成契约 | seal 与多行 recovery 在 begin 后暂停，仅 public poll 收到精确 Sealed/Recovered 一次；再 poll 为 NoActiveStep、无重复写入/其它回执；reserve→clone 跨 entry/poll 仍唯一 permit 构造/移动 |
+| D5 -1 独立可达 | 仅 M4b-1 经 public reserve/clone/start/isolate 到 normalized guest 操作；多片真实扣费 pending→accepted，分别注入丢结果/Stop/owner 到期并完成有权清理；bootstrap/login/run 均覆盖，无 phase setter/空记账/legacy 即时成功/-2 代码；迁移后既有 suite 编译 |
 | R2-7 | 两行 recovery：A 完成，B 已 StartIssued 但 list 缺名且未证退出；在每阶段暂停，B 不继承 A 游标/期限，禁止 seal；新 attempt 亦从零开始 |
 | R2-8 | 撤权前 inventory 已 pending，短 revoke end 内开始复用读、IO 中跨 end；不得 revoke_ok/note/consume；另测迟到首 drain 与连续非终态超过 10s |
 | R2-11 | 数千次未派发拒绝/pending poll 后计数与发布时间不动，随后成功发布只 +1；发布后读失败仍 +1；正常 machine 服务走到请求 2049 明确关闭 |
+| D1 发布锚点 | Attempt+真实 adapter：rename t=1、guest 采样 t=2、延迟 fsync/校验于 t=80 成功，h_pre=0/h_done=80、完成计数恰 +1；无更新 pin（含同 g）且暂扣替换 ACK 时，工作/采纳须于 t=5000 关闭，不能到 5080；poll/ACK 不改锚点，完成不明隔离 |
 | R2-12 | pre-start A，guest B，Tart T（B≠T）走到成功 scored seal；分别替换 guest/Tart token 均拒绝；绑定夹取期间 T 变化/缺失也拒绝 |
 | 机器消费/R2-9 衔接 | Attempt+真实 MailboxGuestChannel：ready 成功后才消费；login/missing、failed/unknown/cancelled、late、错身份/未发/future seq 不消费；active+revoke 同时验收、重复确认/合法下一项 |
 | ADR 片内到期/不复活 | 锁/发布/解析/消费/取消时到期，保留原 end；新样本、旧 ACK、新 owner proof 均不能越过已到期边界复活，unknown 无评分 |
 
 组合测试使用实际 adapter 和时钟驱动 guest 状态机：读真实七操作请求、生成连续样本、保留 active+revoke、核对 consume，exclusive tmp→rename；时钟推进即检查不可逆过期/整树终止，不能只在收到 lease 时检查。
-覆盖 long-login 与完整 1,560,000ms 窗口的成功 trace（含足够密的真实可接受确认），核对实际发布≤1959/各流≤2048、年龄/间隙、终止≤6s；不能用即时常量 ACK 或清私有 in-flight 位代替。
-再跑不对称 900+100ms、双向 1023ms、服务 jitter、ENOENT、跳过 lease 版本、lost ACK 和 g 相同/下降。逐条报告持续成功或按旧覆盖及时关闭；双向慢路径允许保守提前关闭，不能把停止的 trace 冒充完整窗口成功。
+覆盖 long-login 与完整 1,560,000ms 窗口成功 trace，核对实际发布≤1959/各流≤2048、guest 年龄/间隙、host pin/end 连续、终止≤6s；不能用即时常量 ACK 或清私有 in-flight 位代替。
+D2 必须组合 Attempt、真实 adapter、自主时钟 guest，重复 900+100ms 与 1023+1023ms 两种周期（含服务成本）：分配前 guest/machine/count gate 均成功，trace 须持续工作、pin/end 无断档，不能以慢路径提前关闭代替可行性证据。
+显式在首次 ACK 前覆盖 lease，断言尚无 current ACK 时门仍通过并发生有权工作；一致旧 ACK 丢弃、首个/替换 ACK 均不授予或延长覆盖，未发/改内容失败。每轮记录 gate 判定与 trace 一致，核对 2246ms 发布界及 ≥2754ms 窗口重叠。
+另测服务 jitter、ENOENT、跳过 lease 版本、lost ACK 和 g 相同/下降；界内且新 pin 连续的 ACK 丢失不单独阻工，模型外丢样本/抖动、耗尽或真实错误仍按旧 host end/原 end 及时关闭、不复活；这些负例与可行性成功 trace 分开。
 保留 M4a 单读 128KiB（含最终稳定帧/失败字节）、R3 截止/字节修复回归；重读和全 attempt 字节统计不能误算成请求数或 attempt 字节上限。
 代码交付需 fmt、`cargo test -p gcu-eval`（含 tart_offline）、Linux/Windows clippy及 macOS 离线测试；检查七方法/v1、精确 lexical exemptions、唯一 permit 构造及无新依赖/线程/启用开关。离线成功不记真实时限已验收。
 
@@ -181,8 +194,8 @@ fake runner/guest **在每次 begin/poll 内**把 IO 成本计入同一个 FakeC
 
 | PR | 交付与完成条件 |
 | --- | --- |
-| M4b-1 | 共享 step/截止入口、所有 runner/ledger begin-poll 游标、保留句柄与取消、owner/Stop、sticky unknown、按行 reclaim；以成本 fake 通过 R2-2～R2-7、慢查询/连续 probe/4s stop，公开 Pending 不冒充 Done |
-| M4b-2 | 依赖 -1；M4a normalized reply/身份接线、drain、验收后消费、私有实发记账、租约调度与组合 trace；通过 R2-8/R2-11/R2-12及消费/长窗口回归，并重跑 -1 的成本/Stop 回归 |
+| M4b-1 | 共享 step/截止、CompletedStep 单次交付、所有 runner/ledger begin-poll 游标与句柄取消、owner/Stop、sticky unknown、按行 reclaim；同时交付 normalized Pending/Accepted/Terminal、begin-once guest progress/effect/原 end 与真实派发成本 fake。独立通过 R2-2～R2-7、D3/D4/D5、慢查询/连续 probe/4s stop，既有 suite 随签名迁移编译；Pending 不冒充 Done |
+| M4b-2 | 依赖 -1 的分类/进度，无第二套 reply grammar；完成语义 terminal 验收、真实 adapter 组合、consume/drain 证明、boot 配对、私有发布双时间/计数、租约调度及 guest/machine 联合 gate；通过 D1/D2、R2-8/R2-11/R2-12及消费/长窗口回归，并重跑 -1 的成本/Stop 回归 |
 
 文件归属：`machine/io.rs` 管统一门与 clip，新增私有 cursor/service/completion 模块承载进度；`runner.rs`/`ledger.rs` 改离线句柄接口，`guest.rs` 只扩私有 accounting，`mailbox_guest.rs` 补发布证据。`deadline.rs`/`budgets.rs` 不增加 ADR cap。
 两 PR 都保持真实 provider/admission 关闭。真实 Tart/卷/网络操作、准入 token、M5 完整卷账本/销毁屏障、M7 supervisor/sandbox/真实整树证明均不在本卡；fake 的 VM 清理不能授权 VM-only 生产 seal。
