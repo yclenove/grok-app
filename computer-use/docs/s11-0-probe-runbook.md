@@ -34,7 +34,7 @@ bash computer-use/scripts/s11-0-probe.sh --stage all \
 bash computer-use/scripts/s11-0-probe.sh --stage B --endpoint-placeholder --tart-home '<路径>'
 ```
 
-常用参数：`--stage A|B|C|M|V|R|all`（默认 all；`all` 不含 M、V、R），`--out`（必须是全新不存在的目录；默认 `./s11-0-out`。脚本拒绝已存在的目录或符号链接，避免把陈旧报告当成这次的证据），`--lan-ip <IPv4>`（不给则 LAN 记为未测量；不扫描），`--ssh-key`，`--tart-home <路径>`，`--dry-run`。阶段 M 另要 `--case C1|C2|C8|C11` 和 `--pinned-host-key <文件>`；非 dry-run 还要 `--probe <测量二进制>`。阶段 V 的 `--case` 是 `C4|C1|C2|C9|C5|C6|C7|C10`。C5 还要 `--fault F1|F2|F3|F4|F5`。阶段 R 要 `--receipt <volume-receipt>`，并且拒绝 `--dry-run`。这些标志不能和 A/B/C 一起用。没有 `--golden`、`--clone-name`、`--guest-user`、`--hostname`、`--softnet`，也没有可复用的 clone 名字参数或环境变量。拒绝 root。dry-run 走同一套 argv 构造，只打印，不 clone。阶段 M 的 `--out` 要是绝对路径，路径上每一级都不是符号链接（Mini 上放在家目录；测量核心会拒绝符号链接组件）。
+常用参数：`--stage A|B|C|M|V|R|all`（默认 all；`all` 不含 M、V、R），`--out`（必须是全新不存在的目录；默认 `./s11-0-out`。脚本拒绝已存在的目录或符号链接，避免把陈旧报告当成这次的证据），`--lan-ip <IPv4>`（不给则 LAN 记为未测量；不扫描），`--ssh-key`，`--tart-home <路径>`，`--dry-run`。阶段 M 另要 `--case C1|C2|C8|C11` 和 `--pinned-host-key <文件>`；非 dry-run 还要 `--probe <测量二进制>`。阶段 V 的 `--case` 是 `C4|C1|C2|C9|C5|C6|C7|C10`。C5 还要 `--fault F1|F2|F3|F4|F5`。阶段 R 要 `--receipt <volume-receipt>`，并且拒绝 `--dry-run`。这些标志不能和 A/B/C 一起用。`--golden` 只在阶段 M 接受两个字面值 `macos-s2-eval`（默认）和 `macos-s2-eval-c8`。没有 `--clone-name`、`--guest-user`、`--hostname`、`--softnet`，也没有可复用的 clone 名字参数或环境变量。拒绝 root。dry-run 走同一套 argv 构造，只打印，不 clone。阶段 M 的 `--out` 要是绝对路径，路径上每一级都不是符号链接（Mini 上放在家目录；测量核心会拒绝符号链接组件）。
 
 ## 时长与清理
 
@@ -101,9 +101,9 @@ bash computer-use/scripts/s11-0-probe.sh --stage B --endpoint-placeholder --tart
 
 真机跑阶段 M 之前必须先发一句，确认这次是 DEFAULT 网络机械实验、网关会暴露。没有这句话就不要跑。本段不构成运行授权。真实 VM 上的阶段 M 仍是 not_run。
 
-每个子例用 `/usr/bin/ssh-keygen` 在宿主私有目录生成一把一次性 ed25519。现有 eval 密钥只做两步：就绪命令 `/usr/bin/true`，以及一次固定初始化（客机新建 0700 目录、写入固定 dispatcher、客机 `shasum -a 256` 核对宿主算出的摘要、追加带 `restrict,command=` 的一次性公钥）。任何一步失败都停。之后的 upload、verify、run 只用一次性密钥。dispatcher 只按字面接受 `upload`、`verify` 加 64 位十六进制、`run C1`、`run C2`、`run C8`、`run C9`、`run C6 file`、`run C6 dir`、`run C7`、`run C11 fd`、`run C11 reopen`。`--pinned-host-key` 是 golden 的 ssh-ed25519 公钥，clone 继承同一把主机密钥。SSH 使用 `StrictHostKeyChecking=yes`、独立 known_hosts、只认这一把私钥、关闭转发、不用 TTY。每次连接前，本次 clone 必须是唯一正在运行的 VM。
+每个子例用 `/usr/bin/ssh-keygen` 在宿主私有目录生成一把一次性 ed25519。现有 eval 密钥只做两步：就绪命令 `/usr/bin/true`，以及一次固定初始化（客机新建 0700 目录、写入固定 dispatcher、客机 `shasum -a 256` 核对宿主算出的摘要、追加带 `restrict,command=` 的一次性公钥）。任何一步失败都停。之后的 upload、verify、run 只用一次性密钥。dispatcher 只按字面接受 `upload`、`verify` 加 64 位十六进制、`run C1`、`run C2`、`run C8`、`run C8 a1`、`run C8 a2`、`run C8 b`、`run C9`、`run C6 file`、`run C6 dir`、`run C7`、`run C11 fd`、`run C11 reopen`。`run C8 a1` 和 `run C8 a2` 只接受 eval 的一次性密钥，`run C8 b` 只接受 gcuprobe 的一次性密钥。`--pinned-host-key` 是 golden 的 ssh-ed25519 公钥，clone 继承同一把主机密钥。SSH 使用 `StrictHostKeyChecking=yes`、独立 known_hosts、只认这一把私钥、关闭转发、不用 TTY。每次连接前，本次 clone 必须是唯一正在运行的 VM。
 
-C2 对 `file-sync`、`dir-sync`、`rename` 各起一台新 clone。每个边界计划发布 3 次。file-sync 完成两次重命名；第三次只把文件 fsync 到 `part` 后退出，不重命名，也不同步被测数据目录。三个子例都是 `not-ack`，并且 VM 清理被证实时，聚合才是 `not-ack`、退出码 0。`unknown` 或没跑到的子例优先于 `not-ack`。C8 若客机只有一个非管理员主体，结果是 `unknown` / `single-principal`。不建账户，不提权。
+C2 对 `file-sync`、`dir-sync`、`rename` 各起一台新 clone。每个边界计划发布 3 次。file-sync 完成两次重命名；第三次只把文件 fsync 到 `part` 后退出，不重命名，也不同步被测数据目录。三个子例都是 `not-ack`，并且 VM 清理被证实时，聚合才是 `not-ack`、退出码 0。`unknown` 或没跑到的子例优先于 `not-ack`。C8 若客机只有一个非管理员主体，结果是 `unknown` / `single-principal`。不建账户，不提权。给了 `--second-key` 时改走双主体，结果是 `unknown` / `observed`，见下文 C8 一节。单主体行为不变。
 
 C11 测预建固定长度文件上的原地写入可见性，复用本阶段的 clone、导出、SSH 和清理。两个 64 字节全 0 文件 `ip-hg`（宿主写、访客读）和 `ip-gh`（访客写、宿主读）在 VM 启动前，由现有有界执行器监督，以排他、不跟随符号链接的方式直接建在私有导出目录里，不经过临时文件再移动或复制。无法证明这次创建完成时，按现有的 unknown/quarantine 处理，不启动 VM。记录是 64 字节：`v=1 seq=<十进制> crc=<8 位小写十六进制>`，左对齐，空格补齐，末字节是换行。crc 是 seq 十进制 ASCII（无前导 0）的 SHA-256 前 8 个十六进制字符。`seq=0` 的规范记录只写在预建的 `ip-gh` 上，表示访客就绪。crc 不符或 seq 解析不出算撕裂，重读，不算失败；seq 回退或跳号算失败。`fd` 读方打开一次并持有 fd，每 5 毫秒 `pread` 64 字节；`reopen` 每次轮询打开、读取、关闭。写方每次 `pwrite` 64 字节后 `fsync`。两种读法各起一台新 clone，各 8 轮，单轮上限 5 秒。第 1 轮开始前，宿主先读到访客在 `ip-gh` 上的 seq=0，这段等待不计入 8 个往返样本；一直等不到是 `unknown` / `peer-not-ready`。宿主往返从这次 `pwrite` 之前算起，到读到同号 pong 为止，包含写入和 `fsync`，记在宿主自己的单调时钟上。`fsync` 返回之后到读到 pong 的残差另记为 `resid_us`，不代替 `rtt_us`。读到合法记录之后，以及访客写完 pong 并 `fsync` 之后，都按该轮开始时定下的截止和命令截止复查，过点不算成功，也不把截止往后推。访客记自己时钟上从上次 pong 的 `fsync` 返回到看见下一个 ping 的间隔。两边不假设共同时钟。宿主只接受访客的一行摘要；访客的数字不替换宿主测得的 `n`、`torn`、`rtt_us`、`resid_us`。摘要缺失或畸形则该子例是 `unknown`；访客写明回退或跳号则仍是 `failed`。报告仍是 `DEFAULT-network/mechanics-only`。跑 C11 之前先发一句：这次只在预建的 64 字节文件上测原地 pwrite/pread 可见性，仍是 DEFAULT 网络机械实验，不改任何常量。本段不构成运行授权。真实 VM 上的 C11 仍是 not_run。
 
@@ -111,7 +111,7 @@ C11 测预建固定长度文件上的原地写入可见性，复用本阶段的 
 
 阶段 M 在 quarantine（含审计超量、超时、未证明 VM 已退出）时退出码是 5，即使采集结果同时是 unknown；测量原因仍留在该 case 行。A/B/C 仍是采集失败优先于清理失败。
 
-测量二进制是 `tools/s11-mailbox-probe`。它只接收目录、角色和计数/超时，子命令是 `writer`、`reader`、`c2 <boundary>`、`c8`、`c11 --mode fd|reopen`，以及只在客机上跑的 `fill --mode data|small`。另有客机子命令 `hold --kind file|dir --secs <秒>` 和 `c7ops --ms <毫秒>`：各打一行测量结果。`hold` 在打印 `held=1` 之后才睡眠。文件操作走目录 fd。它不负责 VM、SSH 或磁盘镜像，宿主也不用它卸载卷。
+测量二进制是 `tools/s11-mailbox-probe`。它只接收目录、角色和计数/超时，子命令是 `writer`、`reader`、`c2 <boundary>`、`c8`、`c8dual <a1|b|a2|host>`、`c11 --mode fd|reopen`，以及只在客机上跑的 `fill --mode data|small`。另有客机子命令 `hold --kind file|dir --secs <秒>` 和 `c7ops --ms <毫秒>`：各打一行测量结果。`hold` 在打印 `held=1` 之后才睡眠。文件操作走目录 fd。它不负责 VM、SSH 或磁盘镜像，宿主也不用它卸载卷。
 
 ## 阶段 V（限容卷，C4 / C1 / C2 / C9）
 
@@ -182,7 +182,26 @@ C8 要第二个**标准（非管理员）**账号，才能测两个主体在邮�
 3. `dscl . -read /Groups/admin GroupMembership` 的输出里不应有 `gcuprobe`。
 4. `sudo shutdown -h now` 关机，告诉总控。
 
-之后总控以 headless 启动该副本，核对 `gcuprobe` 非管理员、能用该密钥登录，再实现并评审 C8 的双主体映射，最后按阶段 M 的规则运行（每次用一次性 clone，准备副本本身不运行实验）。
+验证已完成（gcuprobe uid 502 非 admin）。`authorized_keys` 只含总控生成的专用公钥，私钥在 Mini 的 `~/cu2-ci/s11-0/c8/gcuprobe_ed25519`。准备副本本身从不运行实验。
+
+跑双主体之前先发一句：这次从 `macos-s2-eval-c8` 克隆一次性 VM，用 eval 和 gcuprobe 各自的一次性密钥测 C8 映射，仍是 DEFAULT 网络机械实验，准备副本本身不启动。没有这句话就不要跑。本段不构成运行授权。真实 VM 上的双主体阶段 M 仍是 not_run。
+
+双主体命令（仍是阶段 M，每次从 golden 克隆一次，准备副本不运行）：
+
+```text
+bash computer-use/scripts/s11-0-probe.sh --stage M --case C8 \
+  --golden macos-s2-eval-c8 \
+  --second-key ~/cu2-ci/s11-0/c8/gcuprobe_ed25519 \
+  --pinned-host-key <golden 的 ssh-ed25519 公钥> \
+  --probe <s11-mailbox-probe> \
+  --ssh-key <eval 的密钥> \
+  --tart-home <Tart 主目录> \
+  --out <新建的绝对目录>
+```
+
+`--second-key` 只在 `--case C8` 下有效，文件必须是当前用户的普通文件、模式 0600、不是符号链接。给了它就必须同时给 `--golden macos-s2-eval-c8`。不给则仍是单主体，记 `n` 与 `no-non-admin-principal` 或 `single-principal`。
+
+VM 启动前预建 `c8/` 和 a1、b、a2 三个结果槽。顺序是 A1（eval）、B（gcuprobe）、A2（eval）。计入每人 12 次上限的只有 create、chmod、chown 尝试和 rename；read、write、unlink 只记 errno，不占名额。每个对象上的顺序是 read、write、chmod、chown、rename（成功则改回原名）、unlink，这样 chmod 和 chown 看到的还是原对象。判定是机制测量：`unknown` / `observed`，不是 ok 或 failed。阶段缺失、畸形或超时是 `unknown` 和对应 reason。结果写预建槽（staging 后 rename 覆盖）。
 
 ## 桩测试
 

@@ -24,6 +24,7 @@ MEASURED=""; UNMEASURED=""; RUN_ARGV=()
 S_STAGE=""; S_NAME=""; S_CREATED=no; S_LAUNCH=not-run; S_COLL=not-run
 S_SSH=not-run; S_EXEC=not-run; S_V6=not-run
 M_CASE=""; M_PROBE=""; PINNED_KEY=""; EXPORT_DIR=""; ONCE_KEY=""; ONCE_PUB=""; GUEST_IP=""
+C8_DUAL=0; C8_PHASES_OK=0; SECOND_KEY=""; ONCE_B_KEY=""; ONCE_B_PUB=""; ONCE_PATHS=""
 M_VERDICT=unknown; M_REASON=skipped; EXPORT_STATE=absent; M_BOUNDARY=-
 EXPORT_DONE=0; SSH_BG_PID=""; SSH_BG_OV=0; SSH_BG_AB=0
 # Fixed tool paths. Overrides apply only in the stub suite (S11_TEST_MODE=1).
@@ -808,6 +809,7 @@ set -f
 umask 077
 MBX='/Volumes/My Shared Files/s11mbx'
 WORK='/Users/eval/.s11m/work'
+if [[ "$(id -un)" == "gcuprobe" ]]; then WORK=/Users/gcuprobe/.s11m/work; fi
 cmd=${SSH_ORIGINAL_COMMAND-}
 case "$cmd" in
   *$'\n'*|*$'\r'*|*'$('*|*'`'*|*[';|&><']*) printf 'reject\n'; exit 2 ;;
@@ -836,7 +838,7 @@ case "$cmd" in
     chmod 0600 "$WORK/probe.sha256"
     exit 0
     ;;
-  'run C1'|'run C2'|'run C8'|'run C9'|'run C6 file'|'run C6 dir'|'run C7'|'run C11 fd'|'run C11 reopen')
+  'run C1'|'run C2'|'run C8'|'run C9'|'run C6 file'|'run C6 dir'|'run C7'|'run C11 fd'|'run C11 reopen'|'run C8 a1'|'run C8 a2'|'run C8 b')
     [[ -f "$WORK/probe" && ! -L "$WORK/probe" && -f "$WORK/probe.sha256" && ! -L "$WORK/probe.sha256" ]] || { printf 'fail-run\n'; exit 6; }
     want=$(awk '{print $1; exit}' "$WORK/probe.sha256")
     got=$(/usr/bin/shasum -a 256 "$WORK/probe" | awk '{print $1}')
@@ -856,6 +858,16 @@ case "$cmd" in
         ;;
       'run C8')
         "$WORK/probe" c8 --dir "$MBX" --role guest --count 1 --timeout 50 || exit 6
+        ;;
+      'run C8 a1'|'run C8 a2')
+        [[ "$(id -un)" == "eval" ]] || { printf 'reject\n'; exit 2; }
+        phase=a1
+        if [[ "$cmd" == 'run C8 a2' ]]; then phase=a2; fi
+        "$WORK/probe" c8dual "$phase" --dir "$MBX" --role guest --timeout 50 || exit 6
+        ;;
+      'run C8 b')
+        [[ "$(id -un)" == "gcuprobe" ]] || { printf 'reject\n'; exit 2; }
+        "$WORK/probe" c8dual b --dir "$MBX" --role guest --timeout 50 || exit 6
         ;;
       'run C9')
         raw=$(dd if="$MBX/fill-mode" bs=16 count=1 2>/dev/null || true)
@@ -887,10 +899,11 @@ END_DISPATCHER
 }
 # END DISPATCHER
 emit_init() {
-  local digest=$1
-  printf '%s\n' 'set -eu' 'umask 077' 'd=/Users/eval/.s11m/work' \
+  local digest=$1 user=${2:-eval} pub=${3:-$ONCE_PUB}
+  case "$user" in eval|gcuprobe) ;; *) return 1 ;; esac
+  printf '%s\n' 'set -eu' 'umask 077' "d=/Users/${user}/.s11m/work" \
     'if [[ -e "$d" || -L "$d" ]]; then printf "fail-exists\n"; exit 1; fi' \
-    'mkdir -m 0700 -p /Users/eval/.s11m' 'mkdir -m 0700 "$d"' \
+    "mkdir -m 0700 -p /Users/${user}/.s11m" 'mkdir -m 0700 "$d"' \
     "cat > \"\$d/dispatcher\" <<'END_DISPATCHER'"
   write_dispatcher
   printf '%s\n' 'END_DISPATCHER' 'chmod 0700 "$d/dispatcher"' \
@@ -898,7 +911,7 @@ emit_init() {
     "[[ \"\$got\" == \"$digest\" ]] || { printf 'fail-digest\\n'; exit 1; }" \
     'ak=$HOME/.ssh/authorized_keys' \
     'if [[ -L "$ak" || ! -f "$ak" ]]; then printf "fail-ak\n"; exit 1; fi' \
-    "printf '%s\\n' 'restrict,command=\"/Users/eval/.s11m/work/dispatcher\" ${ONCE_PUB}' >> \"\$ak\"" \
+    "printf '%s\\n' 'restrict,command=\"/Users/${user}/.s11m/work/dispatcher\" ${pub}' >> \"\$ak\"" \
     "printf 'init-ok\\n'"
 }
 sole_running() {
@@ -915,7 +928,8 @@ write_known() {
   printf '%s %s\n' "$GUEST_IP" "$line" >"$kh"
 }
 fill_ssh() {
-  local key=$1 remote=$2 kh=$3
+  local key=$1 remote=$2 kh=$3 user=${4:-$GUEST_USER}
+  case "$user" in eval|gcuprobe) ;; *) return 1 ;; esac
   SSH_ARGV=(ssh -F /dev/null -T
     -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes
     -o "UserKnownHostsFile=${kh}" -o GlobalKnownHostsFile=/dev/null
@@ -923,20 +937,20 @@ fill_ssh() {
     -o RequestTTY=no -o PreferredAuthentications=publickey
     -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no
     -o PubkeyAuthentication=yes -o NumberOfPasswordPrompts=0
-    -i "$key" "${GUEST_USER}@${GUEST_IP}" "$remote")
+    -i "$key" "${user}@${GUEST_IP}" "$remote")
 }
 ssh_lab() {
-  local secs=$1 infile=$2 key=$3 remote=$4 kh=$WORKDIR/known_hosts
+  local secs=$1 infile=$2 key=$3 remote=$4 user=${5:-$GUEST_USER} kh=$WORKDIR/known_hosts
   sole_running || { RB_STATUS=1; RB_TIMED_OUT=0; RB_OVERFLOW=0; return 1; }
   write_known "$kh" || { add_reason pinned-host-key; RB_STATUS=1; return 1; }
-  fill_ssh "$key" "$remote" "$kh"
+  fill_ssh "$key" "$remote" "$kh" "$user" || { RB_STATUS=1; return 1; }
   run_bounded "$secs" "$WORKDIR/ssh.out" "$WORKDIR/ssh.err" "$infile" -- "${SSH_ARGV[@]}" || true
 }
 ssh_bg() {
   local key=$1 remote=$2 kh=$WORKDIR/known_hosts
   sole_running || return 1
   write_known "$kh" || return 1
-  fill_ssh "$key" "$remote" "$kh"
+  fill_ssh "$key" "$remote" "$kh" || return 1
   SSH_BG_OV=0; SSH_BG_AB=0
   : >"$WORKDIR/ssh.bg.out"; : >"$WORKDIR/ssh.bg.err"
   # Direct file capture: no asynchronous reader can finish after ssh exits, so the
@@ -945,7 +959,7 @@ ssh_bg() {
   SSH_BG_PID=$!
 }
 boot_ready_m() {
-  local name=$1 exec_done=0 guest_ip="" boot_until
+  local name=$1 exec_done=0 guest_ip="" boot_until rs
   boot_until=$((SECONDS + $(cap_secs 60)))
   S_SSH=no-address
   while [[ "$SECONDS" -lt "$boot_until" && "$REQUEST_CLEANUP" != 1 ]]; do
@@ -959,9 +973,16 @@ boot_ready_m() {
     fi
     if [[ "$S_SSH" == pending ]]; then
       if ! sole_running; then S_SSH=not-sole; break; fi
-      ssh_lab 15 /dev/null "$SSH_KEY" /usr/bin/true
-      if [[ "$RB_TIMED_OUT" == 1 || "$RB_OVERFLOW" == 1 || "$HALT" == 1 ]]; then S_SSH=timeout; break; fi
-      if [[ "$RB_STATUS" -eq 0 ]]; then S_SSH=connected; fi
+      rs=15
+      if [[ "${S11_TEST_MODE:-}" == 1 ]]; then
+        case "${S11_READY_SSH_SEC:-}" in ""|*[!0-9]*) ;; *) rs=$S11_READY_SSH_SEC ;; esac
+      fi
+      ssh_lab "$rs" /dev/null "$SSH_KEY" /usr/bin/true
+      if [[ "$RB_OVERFLOW" == 1 || "$HALT" == 1 ]]; then S_SSH=timeout; break; fi
+      # A slow first answer while the guest is still booting: the attempt was
+      # reaped, so try again inside the same boot budget instead of giving up.
+      if [[ "$RB_TIMED_OUT" == 1 ]]; then S_SSH=no-address
+      elif [[ "$RB_STATUS" -eq 0 ]]; then S_SSH=connected; fi
     fi
     if [[ "$S_SSH" == connected && "$exec_done" == 1 ]]; then S_COLL=ok; S_EXEC=$EXEC_RESULT; return 0; fi
     [[ "$SECONDS" -ge "$boot_until" ]] && break
@@ -982,6 +1003,7 @@ make_once_key() {
   ONCE_PUB=$(awk '$1=="ssh-ed25519" && $2 ~ /^[A-Za-z0-9+\/=]+$/ {print $1" "$2; exit}' "$dir/key.pub")
   [[ -n "$ONCE_PUB" ]] || return 1
   if has_meta "$ONCE_PUB"; then return 1; fi
+  ONCE_PATHS="${ONCE_PATHS:+$ONCE_PATHS }$ONCE_KEY"
 }
 # Every name the guest reads is planted before the VM. A lookup of a missing name sticks in virtiofs.
 # Guest reads host-write/hg-ping, host-write/gh-ready, host-write/gh-pong, and summary-host.
@@ -1053,6 +1075,14 @@ prepare_mailbox() {
       ;;
     C6)
       printf '%s\n' held >"$root/mailbox/c6-held" || return 1
+      ;;
+    C8)
+      if [[ "$C8_DUAL" == 1 ]]; then
+        mkdir -m 0700 "$root/mailbox/c8" || return 1
+        printf '%s\n' 'v=1 op=empty seq=0' >"$root/mailbox/c8/result-a1" || return 1
+        printf '%s\n' 'v=1 op=empty seq=0' >"$root/mailbox/c8/result-b" || return 1
+        printf '%s\n' 'v=1 op=empty seq=0' >"$root/mailbox/c8/result-a2" || return 1
+      fi
       ;;
     C7)
       local i=0
@@ -1354,6 +1384,7 @@ parse_fields() {
   local vis= rtt= slice= wslice= openus= writeus= fsyncus= renameus= dsync= readus= peer= digest= gate= retry=
   local boundary= planned= attempted= renamed= visible= part= dirsync= ops= created= elevated=
   local mode= resid=
+  local counted= a_steps= b_steps= guest_id= host_id=
   M_RECORD=$line; SHAPE_OK=0; M_MODE=""
   for tok in $line; do
     case "$tok" in
@@ -1375,12 +1406,17 @@ parse_fields() {
       ops) ops=$val ;; created) created=$val ;; elevated) elevated=$val ;;
       mode) mode=$val ;;
       resid_us) resid=$val ;;
+      counted) counted=$val ;;
+      a_steps) a_steps=$val ;;
+      b_steps) b_steps=$val ;;
+      guest_id) guest_id=$val ;;
+      host_id) host_id=$val ;;
       *) return 1 ;;
     esac
   done
   [[ "$v" == 1 ]] || return 1
   case "$reason" in
-    -|deadline|timeout|peer-not-ready|no-peer-summary|single-principal|no-non-admin-principal|principal-unknown|mapping-not-measured|torn|bad-pong|bad-part|bad-record|not-sole|init-failed|upload-failed|verify-failed|run-failed|probe-failed|skipped|quarantine|subject-policy|io|nofollow|replaced|partial-coverage|rollback|skip) ;;
+    -|deadline|timeout|peer-not-ready|no-peer-summary|single-principal|no-non-admin-principal|principal-unknown|mapping-not-measured|torn|bad-pong|bad-part|bad-record|not-sole|init-failed|upload-failed|verify-failed|run-failed|probe-failed|skipped|quarantine|subject-policy|io|nofollow|replaced|partial-coverage|rollback|skip|observed|cap|incomplete|a1-missing|b-missing|a2-missing|a1-malformed|b-malformed|a2-malformed|a1-timeout|b-timeout|a2-timeout|a1-ssh|b-ssh|a2-ssh) ;;
     *) return 1 ;;
   esac
   case "$verdict" in ok|failed|unknown|not-ack) ;; *) return 1 ;; esac
@@ -1405,6 +1441,11 @@ parse_fields() {
     c8)
       [[ "$nseen" -eq 9 && "$ops" == 0 && "$created" == 0 && "$elevated" == 0 && "$role" == host ]] || return 1
       case "$n" in ""|*[!0-9]*) return 1 ;; esac
+      ;;
+    c8d)
+      [[ "$nseen" -eq 12 && "$role" == host && "$verdict" == unknown && "$n" == 2 ]] || return 1
+      [[ -n "$counted" && -n "$a_steps" && -n "$b_steps" && -n "$guest_id" && -n "$host_id" && -n "$retry" ]] || return 1
+      c1_retry_ok "$retry" || return 1
       ;;
     c11)
       [[ "$nseen" -eq 10 && "$role" == host && -n "$mode" && -n "$n" && -n "$torn" && -n "$rtt" && -n "$resid" ]] || return 1
@@ -1535,8 +1576,104 @@ m_run_c2() {
   [[ "$S_STAGE" == V && "$VOL_PHASE" == quarantine ]] && return 1
   settle_host c2 || true
 }
+c8d_set() {
+  local reason=$1
+  M_VERDICT=unknown
+  M_REASON=$reason
+  M_OP=c8d
+  M_ROLE_REC=host
+  M_N=2
+  M_RECORD="v=1 op=c8d role=host verdict=unknown reason=${reason} n=2 counted=- a_steps=- b_steps=- guest_id=- host_id=- retry=absent:0,replaced:0"
+  SHAPE_OK=1
+}
+c8d_phase() {
+  local phase=$1 key=$2 user=$3
+  local left
+  left=$(m_left)
+  ssh_lab "$left" /dev/null "$key" "run C8 $phase" "$user"
+  snapg
+  if [[ "$G_TO" == 1 || "$G_RU" == 1 ]]; then
+    c8d_set "${phase}-timeout"
+    return 1
+  fi
+  if [[ "$G_OV" == 1 || "$G_AB" == 1 ]]; then
+    c8d_set "${phase}-malformed"
+    return 1
+  fi
+  # The dispatcher exits 6 when the probe returns 1 for verdict=unknown.
+  if [[ "$G_ST" != 6 ]]; then
+    c8d_set "${phase}-ssh"
+    return 1
+  fi
+  return 0
+}
+# One captured line from the host collector's private stdout. result-host is not a fallback.
+c8d_take_private() {
+  local raw=$WORKDIR/p8.out line n sz
+  [[ -f "$raw" && ! -L "$raw" ]] || { c8d_set probe-failed; return 1; }
+  sz=$(wc -c <"$raw" | tr -d ' ')
+  case "$sz" in ''|*[!0-9]*) c8d_set probe-failed; return 1 ;; esac
+  [[ "$sz" -ge 1 && "$sz" -le 4096 ]] || { c8d_set probe-failed; return 1; }
+  n=$(wc -l <"$raw" | tr -d ' ')
+  [[ "$n" == 1 ]] || { c8d_set probe-failed; return 1; }
+  IFS= read -r line <"$raw" || { c8d_set probe-failed; return 1; }
+  printf '%s\n' "$line" >"$WORKDIR/p8.one" || { IO_FAIL=1; c8d_set probe-failed; return 1; }
+  cmp -s "$WORKDIR/p8.one" "$raw" || { c8d_set probe-failed; return 1; }
+  parse_fields "$line" || { c8d_set probe-failed; return 1; }
+  [[ "$M_OP" == c8d && "$M_ROLE_REC" == host && "$M_VERDICT" == unknown && "$SHAPE_OK" == 1 ]] || { c8d_set probe-failed; return 1; }
+}
+# Archival copy only. A mismatch must not replace the private stdout record.
+c8d_archive_host() {
+  local src=$EXPORT_DIR/mailbox/result-host
+  [[ -f "$src" && ! -L "$src" ]] || return 0
+  head -c 4097 -- "$src" >"$WORKDIR/result-host.archive" 2>/dev/null || true
+}
+c8d_collect_host() {
+  local left
+  left=$(m_left)
+  run_bounded "$left" "$WORKDIR/p8.out" "$WORKDIR/p8.err" - -- "$M_PROBE" c8dual host --dir "$EXPORT_DIR/mailbox" --role host --timeout "$left" || true
+  snap1
+  if [[ "$H1_TO" == 1 || "$H1_RU" == 1 ]]; then
+    c8d_set deadline
+    return 1
+  fi
+  if [[ "$H1_OV" == 1 || "$H1_AB" == 1 || "$H1_ST" != 1 ]]; then
+    c8d_set probe-failed
+    return 1
+  fi
+  c8d_take_private || return 1
+  c8d_archive_host
+}
+c8d_vm_stopped() {
+  local line
+  [[ "$M_QUARANTINE" == 1 || "$HALT" == 1 || "$REAP_UNKNOWN" == 1 ]] && return 1
+  line=$(awk 'NR==1 { print; exit }' "$WORKDIR/cleanup.last" 2>/dev/null || true)
+  [[ "$line" == "ok ok yes" ]]
+}
+c8d_after_stop() {
+  [[ "$C8_DUAL" == 1 ]] || return 0
+  [[ "$C8_PHASES_OK" == 1 ]] || return 0
+  if c8d_vm_stopped; then
+    c8d_collect_host || true
+    return 0
+  fi
+  c8d_set quarantine
+}
+m_run_c8_dual() {
+  clear_snaps; arm_m_load
+  C8_PHASES_OK=0
+  c8d_phase a1 "$ONCE_KEY" eval || return 1
+  c8d_phase b "$ONCE_B_KEY" gcuprobe || return 1
+  c8d_phase a2 "$ONCE_KEY" eval || return 1
+  C8_PHASES_OK=1
+  return 0
+}
 m_run_c8() {
   local left
+  if [[ "$C8_DUAL" == 1 ]]; then
+    m_run_c8_dual
+    return
+  fi
   clear_snaps; arm_m_load
   left=$(m_left)
   ssh_lab "$left" /dev/null "$ONCE_KEY" "run C8"
@@ -1548,13 +1685,27 @@ m_run_c8() {
   settle_host c8 || true
 }
 m_measure() {
-  local digest sz
+  local digest sz once_a once_ap
   make_once_key || { M_VERDICT=unknown; M_REASON=init-failed; return 1; }
+  if [[ "$C8_DUAL" == 1 ]]; then
+    once_a=$ONCE_KEY
+    once_ap=$ONCE_PUB
+    make_once_key || { M_VERDICT=unknown; M_REASON=init-failed; return 1; }
+    ONCE_B_KEY=$ONCE_KEY
+    ONCE_B_PUB=$ONCE_PUB
+    ONCE_KEY=$once_a
+    ONCE_PUB=$once_ap
+  fi
   write_dispatcher >"$WORKDIR/dispatcher.body" || { IO_FAIL=1; M_VERDICT=unknown; M_REASON=init-failed; return 1; }
   digest=$(host_sha256_file "$WORKDIR/dispatcher.body") || { M_VERDICT=unknown; M_REASON=init-failed; return 1; }
   emit_init "$digest" >"$WORKDIR/init.body" || { M_VERDICT=unknown; M_REASON=init-failed; return 1; }
   ssh_lab 30 "$WORKDIR/init.body" "$SSH_KEY" 'true s11m.XXXXXX; cat >"$HOME/.s11m.init" && sh "$HOME/.s11m.init"'
   [[ "$RB_STATUS" -eq 0 ]] || { M_VERDICT=unknown; M_REASON=init-failed; return 1; }
+  if [[ "$C8_DUAL" == 1 ]]; then
+    emit_init "$digest" gcuprobe "$ONCE_B_PUB" >"$WORKDIR/init2.body" || { M_VERDICT=unknown; M_REASON=init-failed; return 1; }
+    ssh_lab 30 "$WORKDIR/init2.body" "$SECOND_KEY" 'true s11m.XXXXXX; cat >"$HOME/.s11m.init" && sh "$HOME/.s11m.init"' gcuprobe
+    [[ "$RB_STATUS" -eq 0 ]] || { M_VERDICT=unknown; M_REASON=init-failed; return 1; }
+  fi
   run_bounded 5 "$WORKDIR/sz.out" "$WORKDIR/sz.err" - -- wc -c "$M_PROBE" || true
   [[ "$RB_STATUS" -eq 0 && "$RB_TIMED_OUT" != 1 && "$RB_OVERFLOW" != 1 && "$REAP_UNKNOWN" != 1 ]] || { M_VERDICT=unknown; M_REASON=upload-failed; return 1; }
   sz=$(awk '{print $1; exit}' "$WORKDIR/sz.out")
@@ -1564,6 +1715,12 @@ m_measure() {
   digest=$(host_sha256_file "$M_PROBE") || { M_VERDICT=unknown; M_REASON=verify-failed; return 1; }
   ssh_lab 20 /dev/null "$ONCE_KEY" "verify $digest"
   [[ "$RB_STATUS" -eq 0 ]] || { M_VERDICT=unknown; M_REASON=verify-failed; return 1; }
+  if [[ "$C8_DUAL" == 1 ]]; then
+    ssh_lab 30 "$M_PROBE" "$ONCE_B_KEY" upload gcuprobe
+    [[ "$RB_STATUS" -eq 0 ]] || { M_VERDICT=unknown; M_REASON=upload-failed; return 1; }
+    ssh_lab 20 /dev/null "$ONCE_B_KEY" "verify $digest" gcuprobe
+    [[ "$RB_STATUS" -eq 0 ]] || { M_VERDICT=unknown; M_REASON=verify-failed; return 1; }
+  fi
   case "$M_CASE" in
     C1) m_run_c1 ;;
     C11) m_run_c11 ;;
@@ -1600,6 +1757,39 @@ write_c1_names() {
   done
 }
 name_allowed() { grep -F -x -q -- "$1" "$2"; }
+# lstat identity. Two numeric fields. Does not follow a symlink.
+dir_id() {
+  local out a b
+  [[ ! -L "$1" ]] || return 1
+  if ! out=$(/usr/bin/stat -c '%d %i' -- "$1" 2>/dev/null); then
+    out=$(/usr/bin/stat -f '%d %i' "$1" 2>/dev/null) || return 1
+  fi
+  case "$out" in *' '*) ;; *) return 1 ;; esac
+  a=${out%% *}
+  b=${out#* }
+  [[ "$b" != *' '* ]] || return 1
+  case "$a" in ''|*[!0-9]*) return 1 ;; esac
+  case "$b" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s %s\n' "$a" "$b"
+}
+# One level, no -L. Any child, a failed listing, or a replaced directory is unproved.
+prove_empty_dir() {
+  local dir=$1 id1 id2 raw=$WORKDIR/empty.raw
+  [[ -L "$dir" ]] && return 1
+  [[ -d "$dir" ]] || return 1
+  id1=$(dir_id "$dir") || return 1
+  run_bounded 10 "$raw" "$WORKDIR/empty.err" - -- bash -c 'set -o pipefail; set -f; find "$1" -mindepth 1 -maxdepth 1 -print0 | while IFS= read -r -d "" p; do printf "%s\0" "$p"; exit 1; done; exit $?' _ "$dir" || true
+  [[ "$RB_STATUS" -eq 0 && "$RB_TIMED_OUT" != 1 && "$RB_OVERFLOW" != 1 && "$RB_ABORTED" != 1 && "$REAP_UNKNOWN" != 1 ]] || return 1
+  [[ ! -s "$raw" ]] || return 1
+  id2=$(dir_id "$dir") || return 1
+  [[ "$id1" == "$id2" ]] || return 1
+}
+audit_fixed_empty() {
+  local path=$1
+  [[ -L "$path" ]] && return 1
+  [[ -e "$path" ]] || return 0
+  prove_empty_dir "$path"
+}
 scan_one() {
   local dir=$1 allow=$2 dirs=$3 raw=$WORKDIR/scan.raw path name count=0
   [[ -d "$dir" && ! -L "$dir" ]] || return 1
@@ -1638,8 +1828,15 @@ audit_export() {
       write_names "$WORKDIR/allow.evidence" progress progress.tmp
       ;;
     C8)
-      write_names "$WORKDIR/allow.root" result-guest result-host
-      : >"$WORKDIR/allow.dirs"
+      if [[ "$C8_DUAL" == 1 ]]; then
+        write_names "$WORKDIR/allow.root" result-guest result-host c8
+        write_names "$WORKDIR/allow.dirs" c8
+        write_names "$WORKDIR/allow.c8" result-a1 result-a1.tmp result-b result-b.tmp result-a2 result-a2.tmp a-file a-shared b-file a-file.ren a-shared.ren a-dir.ren b-file.ren a-dir
+        write_names "$WORKDIR/allow.c8dirs" a-dir a-dir.ren
+      else
+        write_names "$WORKDIR/allow.root" result-guest result-host
+        : >"$WORKDIR/allow.dirs"
+      fi
       ;;
     C11)
       write_names "$WORKDIR/allow.root" ip-hg ip-gh result-host result-guest
@@ -1654,6 +1851,10 @@ audit_export() {
   elif [[ "$M_CASE" == C2 ]]; then
     [[ -d "$mbx/data" ]] && { scan_one "$mbx/data" "$WORKDIR/allow.child" "$WORKDIR/allow.none" || return 1; }
     [[ -d "$mbx/evidence" ]] && { scan_one "$mbx/evidence" "$WORKDIR/allow.evidence" "$WORKDIR/allow.none" || return 1; }
+  elif [[ "$C8_DUAL" == 1 && -d "$mbx/c8" && ! -L "$mbx/c8" ]]; then
+    scan_one "$mbx/c8" "$WORKDIR/allow.c8" "$WORKDIR/allow.c8dirs" || return 1
+    audit_fixed_empty "$mbx/c8/a-dir" || return 1
+    audit_fixed_empty "$mbx/c8/a-dir.ren" || return 1
   fi
 }
 cleanup_export() {
@@ -1689,7 +1890,7 @@ cleanup_export() {
   if [[ "$M_CASE" == C2 && -f "$EXPORT_DIR/mailbox/boundary" && ! -L "$EXPORT_DIR/mailbox/boundary" ]]; then
     rm -f "$EXPORT_DIR/mailbox/boundary" || true
   fi
-  for d in host-write guest-write data evidence; do
+  for d in host-write guest-write data evidence c8; do
     if [[ -d "$EXPORT_DIR/mailbox/$d" && ! -L "$EXPORT_DIR/mailbox/$d" ]]; then
       rmdir "$EXPORT_DIR/mailbox/$d" 2>/dev/null || true
     fi
@@ -1717,6 +1918,7 @@ record_m_row() {
 }
 run_m_one() {
   local st=0
+  C8_PHASES_OK=0
   M_VERDICT=unknown; M_REASON=skipped; EXPORT_STATE=absent; EXPORT_DIR=""
   begin_stage M
   if ! prepare_export; then
@@ -1739,6 +1941,7 @@ run_m_one() {
     [[ "$S_SSH" == not-sole ]] && M_REASON=not-sole
   fi
   cleanup_owned
+  c8d_after_stop
   cleanup_export
   record_m_row
 }
@@ -3914,10 +4117,42 @@ run_recovery() {
   return 0
 }
 need_arg() { [[ $# -ge 2 ]] || { USAGE_REASON=usage; return 1; }; }
+second_key_ok() {
+  local f=$1 uid owner mode
+  uid=$(id -u)
+  [[ -L "$f" ]] && return 1
+  [[ -f "$f" && -r "$f" ]] || return 1
+  if owner=$(/usr/bin/stat -c '%u' -- "$f" 2>/dev/null); then
+    mode=$(/usr/bin/stat -c '%a' -- "$f" 2>/dev/null) || return 1
+  else
+    owner=$(/usr/bin/stat -f '%u' "$f" 2>/dev/null) || return 1
+    mode=$(/usr/bin/stat -f '%OLp' "$f" 2>/dev/null) || return 1
+  fi
+  [[ "$owner" == "$uid" ]] || return 1
+  case "$mode" in 600|0600) ;; *) return 1 ;; esac
+}
+wipe_once_keys() {
+  local p left=0 n=0
+  [[ -n "$ONCE_PATHS" ]] || return 0
+  for p in $ONCE_PATHS; do
+    n=$((n + 1))
+    rm -f -- "$p" "$p.pub" || true
+    if [[ -e "$p" || -L "$p" || -e "$p.pub" || -L "$p.pub" ]]; then left=1; fi
+  done
+  if [[ "${S11_TEST_MODE:-}" == 1 && -n "${S11_STUB_ROOT:-}" && -d "$S11_STUB_ROOT" ]]; then
+    if [[ "$left" == 0 ]]; then
+      printf 'removed %s\n' "$n" >"$S11_STUB_ROOT/once-wiped"
+    else
+      printf 'left\n' >"$S11_STUB_ROOT/once-wiped"
+    fi
+  fi
+}
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --stage) need_arg "$@" || return; case "$2" in A|B|C|M|V|R|all) STAGE=$2 ;; *) USAGE_REASON=usage; return ;; esac; shift 2 ;;
+      --golden) need_arg "$@" || return; case "$2" in macos-s2-eval|macos-s2-eval-c8) GOLDEN=$2 ;; *) USAGE_REASON=usage; return ;; esac; shift 2 ;;
+      --second-key) need_arg "$@" || return; SECOND_KEY=$2; shift 2 ;;
       --case) need_arg "$@" || return; case "$2" in C1|C2|C8|C11|C4|C9|C5|C6|C7|C10) M_CASE=$2 ;; *) USAGE_REASON=usage; return ;; esac; shift 2 ;;
       --fault) need_arg "$@" || return; case "$2" in F1|F2|F3|F4|F5) VOL_FAULT=$2 ;; *) USAGE_REASON=usage; return ;; esac; shift 2 ;;
       --receipt) need_arg "$@" || return; RECEIPT=$2; shift 2 ;;
@@ -3980,6 +4215,20 @@ parse_args() {
   else
     [[ -z "$M_CASE" && -z "$PINNED_KEY" && -z "$M_PROBE" && -z "$VOL_FAULT" && -z "$RECEIPT" ]] || USAGE_REASON=usage
   fi
+  [[ -z "$USAGE_REASON" ]] || return
+  if [[ "$STAGE" != M && "$GOLDEN" != macos-s2-eval ]]; then USAGE_REASON=usage; return; fi
+  if [[ -n "$SECOND_KEY" ]]; then
+    [[ "$STAGE" == M && "$M_CASE" == C8 && "$GOLDEN" == macos-s2-eval-c8 ]] || { USAGE_REASON=usage; return; }
+    case "$SECOND_KEY" in *$'\n'*|*$'\r'*|*$'\t'*) USAGE_REASON=usage; return ;; esac
+    case "$SECOND_KEY" in
+      /*) ;;
+      ./*) SECOND_KEY=$(pwd)/${SECOND_KEY#./} ;;
+      *) SECOND_KEY=$(pwd)/$SECOND_KEY ;;
+    esac
+    case "$SECOND_KEY" in *"/../"*|*/..) USAGE_REASON=usage; return ;; esac
+    second_key_ok "$SECOND_KEY" || { USAGE_REASON=usage; return; }
+    C8_DUAL=1
+  fi
 }
 precheck() {
   local gst
@@ -4023,7 +4272,7 @@ decide() {
 }
 on_exit() {
   trap '' INT TERM HUP EXIT
-  FINALIZING=1; cleanup_owned || true; cleanup_export || true; decide
+  FINALIZING=1; wipe_once_keys || true; cleanup_owned || true; cleanup_export || true; decide
   write_report || { [[ "$OUT_READY" == 1 ]] && say report-write-failed; [[ "$FINAL_EC" -eq 0 ]] && FINAL_EC=2; }
   if [[ "$IO_FAIL" == 1 && "$FINAL_EC" -eq 0 ]]; then FINAL_EC=2; fi
   [[ "$OUT_READY" == 1 ]] && printf 'status=%s\nreport=%s/report.json\n' "$STATUS" "$OUT"
@@ -4066,7 +4315,7 @@ main() {
   trap on_exit EXIT
   trap 'REQUEST_CLEANUP=1' INT TERM HUP
   if [[ -n "$USAGE_REASON" ]]; then
-    [[ "$USAGE_REASON" == help ]] && say 'usage: s11-0-probe.sh [--dry-run] [--stage A|B|C|M|V|R|all] [--case C1|C2|C8|C11|C4|C9|C5|C6|C7|C10] [--fault F1|F2|F3|F4|F5] [--receipt FILE] [--probe FILE] [--pinned-host-key FILE] [--endpoint-ip A.B.C.D|--endpoint-placeholder] [--lan-ip A.B.C.D] [--ssh-key FILE] [--tart-home DIR] [--out DIR]'
+    [[ "$USAGE_REASON" == help ]] && say 'usage: s11-0-probe.sh [--dry-run] [--stage A|B|C|M|V|R|all] [--case C1|C2|C8|C11|C4|C9|C5|C6|C7|C10] [--golden macos-s2-eval|macos-s2-eval-c8] [--second-key FILE] [--fault F1|F2|F3|F4|F5] [--receipt FILE] [--probe FILE] [--pinned-host-key FILE] [--endpoint-ip A.B.C.D|--endpoint-placeholder] [--lan-ip A.B.C.D] [--ssh-key FILE] [--tart-home DIR] [--out DIR]'
     add_reason "$USAGE_REASON"; PRECHECK_FAILED=1
     [[ -z "$OUT" ]] && exit 2
     prepare_out || exit 2

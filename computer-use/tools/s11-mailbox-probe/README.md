@@ -1,6 +1,6 @@
 # S11-0c 邮箱测量核心
 
-宿主编排在 `scripts/s11-0-probe.sh`（阶段 M 是普通目录，阶段 V 是限容卷）。这个二进制只测量一个目录。它不 clone，不做 SSH，也不调用 tart、hdiutil。做 C1、C2、C8、C11，C9 的 `fill`，以及 C6 的 `hold`、C7 的 `c7ops`。只用标准库。测试另计。
+宿主编排在 `scripts/s11-0-probe.sh`（阶段 M 是普通目录，阶段 V 是限容卷）。这个二进制只测量一个目录。它不 clone，不做 SSH，也不调用 tart、hdiutil。做 C1、C2、C8、C8 双主体、C11，C9 的 `fill`，以及 C6 的 `hold`、C7 的 `c7ops`。只用标准库。测试另计。
 
 阶段 M 的导出目录是宿主上的普通私有目录。阶段 V 把同一套槽位放在限容 HFSX 卷的 `mailbox` 上。卷的创建和删除只在 bash 里做。
 
@@ -13,6 +13,7 @@ s11-mailbox-probe writer --dir <绝对目录> --role host|guest --count N --time
 s11-mailbox-probe reader --dir <绝对目录> --role host|guest --count N --timeout SEC
 s11-mailbox-probe c2 file-sync|dir-sync|rename --dir <绝对目录> --role host|guest --count N --timeout SEC
 s11-mailbox-probe c8 --dir <绝对目录> --role host|guest --count N --timeout SEC
+s11-mailbox-probe c8dual a1|b|a2|host --dir <绝对目录> --role guest|host --timeout SEC
 s11-mailbox-probe fill --dir <绝对目录> --role guest --mode data|small --timeout SEC
 s11-mailbox-probe hold --dir <绝对目录> --role guest --kind file|dir --secs SEC
 s11-mailbox-probe c7ops --dir <绝对目录> --role guest --ms MILLISEC
@@ -31,7 +32,7 @@ C1 是乒乓：先 host→guest，再 guest→host，各 `N` 轮。每个方向�
 
 C11 不改名字、不 `rename`。邮箱根上要先有两个 64 字节文件 `ip-hg` 和 `ip-gh`。bash 在 VM 启动前，用有界执行器在私有导出目录里以 `O_EXCL|O_NOFOLLOW` 直接创建这两个全 0 文件，不经过临时文件再移动或复制。宿主写 `ip-hg`、读 `ip-gh`；访客反过来。记录固定 64 字节：`v=1 seq=<十进制> crc=<8 位小写十六进制>`，左对齐，空格补齐，末字节是换行。crc 是 seq 十进制 ASCII（无前导 0）的 SHA-256 前 8 个十六进制字符，例如 seq 1 的 crc 是 `6b86b273`。`seq=0` 的规范记录只用作访客就绪，写在预建的 `ip-gh` 上。crc 不符或 seq 解析不出是撕裂，计入 `torn` 后重读，不算失败；seq 回退或跳号是 `failed`（`rollback` / `skip`）。`--mode fd` 读方打开一次并一直持有 fd，每 5 毫秒 `pread` 64 字节；`--mode reopen` 每次轮询都打开、读取、关闭。写方每次 `pwrite` 64 字节后 `fsync`。第 1 轮开始前，访客先把 `ip-gh` 写成 seq=0，宿主读到这条就绪记录后才发布 seq=1 并开始该轮计时；这段等待不计入 8 个往返样本，一直等不到则是 `unknown` / `peer-not-ready`。往返从这次 `pwrite` 之前算起，到读到同号 pong 为止，包含写入、`fsync`、访客反应和读回，记在写出 ping 的宿主自己的单调时钟上，不和访客对时。`fsync` 返回之后到读到 pong 的残差另记为 `resid_us`，不代替 `rtt_us`。单轮上限 5 秒，截止在该轮开始时定下，读到合法记录之后、以及访客写完 pong 并 `fsync` 之后都按原来的截止复查，过点不算这一轮成功，也不把截止往后推。整条命令另有 `--timeout`。宿主结果行是 `v=1 op=c11 role=host mode=<fd|reopen> n=… torn=… rtt_us=… resid_us=… verdict=… reason=…`。访客另报 `polls`（每轮从开始读到看见新 seq 的次数，含撕裂）和 `gap_us`（上次 pong 的 `fsync` 返回到看见下一个 ping）。宿主编排只接受访客的一行摘要：`v=1 op=c11 role=guest`、模式与本子例一致、轮数和 polls/gap 互相符合、裁决只是 `ok|unknown|failed`。访客的数字不替换宿主测得的 `n`、`torn`、`rtt_us`、`resid_us`。摘要缺失或畸形则该子例是 `unknown`；访客写明 `rollback` 或 `skip` 则仍是 `failed`。
 
-C2 的三个边界都是“写者在该点退出”。file-sync 完成的重命名是 `N-1`，第三次只 fsync 文件 `part`，不重命名，也不 fsync 数据目录；进度写在旁边的 `evidence` 目录。C2 的结论是 `not-ack` 或失败，不会报 `ok`。内容不对的 `part` 是 `failed` / `bad-part`。C8 只数非管理员主体。0 个是 `unknown` / `no-non-admin-principal`（`n=0`）。1 个是 `unknown` / `single-principal`。两个及以上是 `unknown` / `mapping-not-measured`。数不清是 `unknown` / `principal-unknown`。不建账户，不提权。
+C2 的三个边界都是“写者在该点退出”。file-sync 完成的重命名是 `N-1`，第三次只 fsync 文件 `part`，不重命名，也不 fsync 数据目录；进度写在旁边的 `evidence` 目录。C2 的结论是 `not-ack` 或失败，不会报 `ok`。内容不对的 `part` 是 `failed` / `bad-part`。C8 只数非管理员主体。0 个是 `unknown` / `no-non-admin-principal`（`n=0`）。1 个是 `unknown` / `single-principal`。两个及以上是 `unknown` / `mapping-not-measured`。数不清是 `unknown` / `principal-unknown`。不建账户，不提权。`c8dual` 在预建的 `c8/` 里按 a1、b、a2 测两个主体的 create/chmod/chown/rename（read、write、unlink 只记 errno，不占每人 12 次的名额）。客机阶段写 `c8/result-a1`、`result-b`、`result-a2`；宿主读完后把两侧身份写到邮箱根的 `result-host`。完整且格式正确是 `unknown` / `observed`。阶段缺失、畸形或超时是 `unknown` 和 `a1-missing`、`b-malformed`、`a2-timeout` 这类 reason。不会报 `ok` 或 `failed`。`a1`/`a2` 的角色必须是 guest，`host` 的角色必须是 host。
 
 退出码：`ok` 和 `not-ack` 是 0，其它测量结果是 1，用法错误是 2。
 

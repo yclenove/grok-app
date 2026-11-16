@@ -88,6 +88,7 @@ pub fn execute(args: &[String]) -> Result<i32, &'static str> {
         "c2" => c2_host(&opt),
         "c8" if opt.role == "guest" => c8_guest(&opt),
         "c8" => c8_host(&opt),
+        "c8dual" => c8dual::run(&opt),
         "fill" => c9_fill(&opt),
         "hold" => hold_cmd(&opt),
         "c7ops" => c7ops_cmd(&opt),
@@ -104,6 +105,16 @@ fn parse(args: &[String]) -> Result<Opt, &'static str> {
         "writer" => ("writer", "-", &args[1..]),
         "reader" => ("reader", "-", &args[1..]),
         "c8" => ("c8", "-", &args[1..]),
+        "c8dual" => {
+            let boundary = match args.get(1).map(String::as_str).unwrap_or("") {
+                "a1" => "a1",
+                "b" => "b",
+                "a2" => "a2",
+                "host" => "host",
+                _ => return Err("usage"),
+            };
+            ("c8dual", boundary, &args[2..])
+        }
         "fill" => ("fill", "-", &args[1..]),
         "hold" => ("hold", "-", &args[1..]),
         "c7ops" => ("c7ops", "-", &args[1..]),
@@ -200,6 +211,17 @@ fn parse(args: &[String]) -> Result<Opt, &'static str> {
             };
             let timeout = u64::from(timeout.ok_or("usage")?);
             ("-", mode, count.ok_or("usage")?, 0, timeout.saturating_mul(1000))
+        }
+        "c8dual" => {
+            if kind.is_some() || secs.is_some() || per_ms.is_some() || mode_flag.is_some() || count.is_some() {
+                return Err("usage");
+            }
+            match (boundary, role) {
+                ("a1" | "b" | "a2", "guest") | ("host", "host") => {}
+                _ => return Err("usage"),
+            }
+            let timeout = u64::from(timeout.ok_or("usage")?);
+            (boundary, "-", 1, 0, timeout.saturating_mul(1000))
         }
         _ => {
             if kind.is_some() || secs.is_some() || per_ms.is_some() {
@@ -536,6 +558,7 @@ fn bare_unknown(opt: &Opt, reason: &str) -> String {
     match opt.cmd {
         "c2" => c2_unknown(opt, reason, &opt.count.to_string(), "-", "-", "-", "absent"),
         "c8" => c8_line(opt.role, "unknown", reason, "0"),
+        "c8dual" => c8dual::failure_line(reason),
         "fill" => c9_line(opt, &crate::fill::Report { bytes: 0, files: 0, batches: 0, enospc: false }),
         "c11" => c11::unknown_line(opt, reason),
         _ => c1_unknown(opt, reason, 0, 0, "-", &Clock::new()),
@@ -603,6 +626,9 @@ fn open_root(opt: &Opt) -> Result<Dir, i32> {
     }
 }
 fn deadline_only(opt: &Opt) -> i32 {
+    if opt.cmd == "c8dual" {
+        return c8dual::deadline(opt);
+    }
     let line = late_line(opt);
     if let Ok(dir) = Dir::open_path(&opt.dir) {
         return finish(&dir, &slot(opt), &line, "unknown", opt.end, &line);
@@ -651,6 +677,8 @@ enum Stop {
 }
 #[path = "c11.rs"]
 mod c11;
+#[path = "c8dual.rs"]
+mod c8dual;
 #[rustfmt::skip]
 mod c1 {
     use super::{c1_line, child_dir, decode, digest_of, field, finish, leaf, numeric, open_root, peer_role, rec_text, slot, store, unk, wait_more, C1_KEYS, Clock, Exch, Fail, Opt, ROUND_WAIT, Retry, SLOW_US, Stop};
