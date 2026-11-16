@@ -113,7 +113,7 @@ pub struct InheritedStop {
 impl InheritedStop {
     pub(crate) fn from_outcome(row: &TaskOutcome) -> Option<Self> {
         let environment = row.assurance.environment.as_ref();
-        if !row.assurance.cleanup_failed && environment.is_none_or(|gate| gate.complete()) {
+        if !row.assurance.cleanup_failed && environment.is_none_or(|gate| !gate.blocks_run()) {
             return None;
         }
         Some(Self {
@@ -121,9 +121,12 @@ impl InheritedStop {
             group: row.group.clone(),
             repeat: row.repeat,
             cleanup_failed: row.assurance.cleanup_failed,
-            environment_refusal: environment.map(|gate| {
-                gate.refusal
-                    .unwrap_or(crate::disposable::Refusal::CriticalUnknown)
+            environment_refusal: environment.and_then(|gate| {
+                gate.contract().map(|report| {
+                    report
+                        .refusal
+                        .unwrap_or(crate::disposable::Refusal::CriticalUnknown)
+                })
             }),
         })
     }
@@ -140,9 +143,10 @@ pub struct Assurance {
     /// False for setup failures and rows skipped after an earlier failure.
     #[serde(default)]
     pub client_started: bool,
-    /// ADR 0017 §4 gate and cleanup evidence. None for local fake-only tasks.
+    /// ADR 0017 §4 gate, or the string `unverified` when the operator opted in.
+    /// None for local fake-only tasks that did not set the opt-in.
     #[serde(default)]
-    pub environment: Option<crate::disposable::EnvironmentReport>,
+    pub environment: Option<crate::disposable::EnvironmentRecord>,
     /// Run stopped by an earlier task; this row performed no checks or cleanup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited_stop: Option<InheritedStop>,
@@ -208,6 +212,9 @@ pub(crate) fn assurance_for(cfg: &RunConfig) -> Assurance {
     Assurance {
         attestation_provided: cfg.attest_disposable_desktop,
         driver_mode: driver_mode(cfg),
+        environment: cfg
+            .unverified_environment
+            .then(crate::disposable::EnvironmentRecord::unverified),
         ..Assurance::default()
     }
 }
@@ -231,7 +238,7 @@ impl TaskOutcome {
                 .assurance
                 .environment
                 .as_ref()
-                .is_some_and(|environment| !environment.complete())
+                .is_some_and(crate::disposable::EnvironmentRecord::blocks_run)
         {
             RunStatus::NotRun
         } else {

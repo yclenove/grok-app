@@ -86,6 +86,12 @@ pub struct ReleaseEvidence {
     pub signed_and_notarized: bool,
     /// Red-team violations. A-β and A-1.0 require zero.
     pub red_team_violations: u64,
+    /// `l6` rates and the L6 layer were measured without isolation evidence.
+    ///
+    /// They stay reference-only and cannot satisfy section 8 L6. Missing on
+    /// older files, which means the rates are ordinary runner evidence.
+    #[serde(default)]
+    pub l6_unverified: bool,
 }
 
 /// Highest section 8 tier the evidence actually meets.
@@ -184,6 +190,11 @@ pub fn judge_release(evidence: &ReleaseEvidence) -> ReleaseDecision {
         return closed("performance data cannot replace the eval runner");
     }
     let mut reasons = Vec::new();
+    if evidence.l6_unverified {
+        reasons.push(crate::report::UNVERIFIED_BANNER.to_string());
+        reasons
+            .push("unverified L6 results are reference only and are not pass evidence".to_string());
+    }
     let alpha = alpha_met(evidence, &mut reasons);
     let beta_ok = beta_extra(evidence, &mut reasons);
     let formal_ok = formal_extra(evidence, &mut reasons);
@@ -252,12 +263,29 @@ fn note(reasons: &mut Vec<String>, pass: bool, reason: &str) -> bool {
 }
 
 fn layer_pass(evidence: &ReleaseEvidence, platform: &str, layer: &str) -> bool {
+    if evidence.l6_unverified && layer == "L6" {
+        return false;
+    }
     evidence
         .layers
         .get(platform)
         .and_then(|rows| rows.get(layer))
         .copied()
         == Some(LayerStatus::Pass)
+}
+
+/// L6 rates count only when the measurement is isolation evidence.
+fn note_l6(
+    evidence: &ReleaseEvidence,
+    reasons: &mut Vec<String>,
+    pass: bool,
+    reason: &str,
+) -> bool {
+    if evidence.l6_unverified {
+        false
+    } else {
+        note(reasons, pass, reason)
+    }
 }
 
 fn layers_pass(evidence: &ReleaseEvidence, platform: &str, start: u8, end: u8) -> bool {
@@ -283,7 +311,8 @@ fn alpha_met(evidence: &ReleaseEvidence, reasons: &mut Vec<String>) -> bool {
         layers_pass(evidence, "macos", 1, 4),
         "macos L1-L4 are not all pass",
     );
-    let native = note(
+    let native = note_l6(
+        evidence,
         reasons,
         at_least(
             rate(evidence, "macos").map(|item| item.native_bp),
@@ -330,7 +359,8 @@ fn beta_extra(evidence: &ReleaseEvidence, reasons: &mut Vec<String>) -> bool {
         layers_pass(evidence, "linux", 1, 5),
         "linux L1-L5 are not all pass",
     );
-    let rates = note(
+    let rates = note_l6(
+        evidence,
         reasons,
         PLATFORMS.iter().all(|platform| {
             let rates = rate(evidence, platform);
@@ -355,7 +385,8 @@ fn formal_extra(evidence: &ReleaseEvidence, reasons: &mut Vec<String>) -> bool {
             .all(|platform| layers_pass(evidence, platform, 6, 7)),
         "L6-L7 are not all pass",
     );
-    let overall = note(
+    let overall = note_l6(
+        evidence,
         reasons,
         at_least(
             rate(evidence, "macos").map(|item| item.overall_bp),

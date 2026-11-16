@@ -66,6 +66,15 @@ impl ClientProgram {
 
 /// Resolve only after the same admission decision used by the runner/helper.
 pub(crate) fn resolve_client(cfg: &RunConfig) -> Result<ClientProgram, Error> {
+    if crate::boundary::allows_unverified_local_real(cfg) {
+        if let Some(path) = &cfg.grok_bin {
+            return Ok(ClientProgram::External(path.clone()));
+        }
+        if cfg.builtin_fake {
+            return Ok(ClientProgram::BuiltinFake);
+        }
+        return Err(Error::msg("no client binary and no model credentials"));
+    }
     admit_launch(
         cfg.grok_bin.as_deref(),
         cfg.gcu_bin.as_deref(),

@@ -181,9 +181,10 @@ pub struct AbTrial {
     /// Why a row did not run. Empty when the oracle ran.
     #[serde(default)]
     pub reason: String,
-    /// Normalized ADR 0017 boundary evidence, without provider identities or paths.
+    /// Normalized ADR 0017 boundary evidence, or the string `unverified`.
+    /// No provider identities or paths.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub environment_contract: Option<crate::disposable::EnvironmentReport>,
+    pub environment_contract: Option<crate::disposable::EnvironmentRecord>,
     /// Stop evidence inherited from an earlier task/arm/repeat; not a local check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited_stop: Option<crate::InheritedStop>,
@@ -195,7 +196,7 @@ impl AbTrial {
             || self
                 .environment_contract
                 .as_ref()
-                .is_some_and(|environment| !environment.complete())
+                .is_some_and(crate::disposable::EnvironmentRecord::blocks_run)
         {
             RunStatus::NotRun
         } else {
@@ -339,7 +340,7 @@ pub fn not_run_report(tasks: &[Task], id: &ReportId) -> AbReport {
                     tool_result_bytes: 0,
                     violations: Vec::new(),
                     reason: "no client binary and no model credentials".into(),
-                    environment_contract: Some(crate::disposable::unavailable_report()),
+                    environment_contract: Some(crate::disposable::unavailable_report().into()),
                     inherited_stop: None,
                 });
             }

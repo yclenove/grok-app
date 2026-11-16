@@ -7,6 +7,9 @@
 //! exclusion is not proof the process is evaluation-only. Isolated `GROK_HOME`
 //! is not an environment boundary. An OS sandbox, a lifetime barrier, and
 //! client version pinning are not implemented (ADR 0017).
+//! `--unverified-environment` is an operator opt-in for a self-prepared
+//! one-shot machine. It does not provide an isolation proof, and reports from
+//! that run are marked unverified.
 
 use anyhow::Context;
 use clap::Parser;
@@ -14,7 +17,7 @@ use gcu_eval::{
     block_on, builtin_fake_agent_exit, builtin_fake_gcu_exit, bundled_tasks_dir, compare_trials,
     host_platform, judge_release, load_tasks, parse_approval, parse_release_evidence, run_tasks,
     trials_from_summary, write_release_report, write_reports, RunConfig, RunStatus, SuiteReport,
-    INTERNAL_FAKE_AGENT, INTERNAL_FAKE_GCU,
+    INTERNAL_FAKE_AGENT, INTERNAL_FAKE_GCU, UNVERIFIED_BANNER,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -34,8 +37,10 @@ pub(crate) struct Cli {
     /// Model id recorded on the report. `fake` does not call a network API.
     #[arg(long, default_value = "fake")]
     model: String,
-    /// Client binary. Absent clients are `not_run`. Any file that exists needs
-    /// `--attest-disposable-desktop`, including one named `eval-fake-agent`.
+    /// Client binary. Absent clients are `not_run`. An existing file stays
+    /// `not_run` unless `--unverified-environment` is set for `--env local`.
+    /// `--attest-disposable-desktop` is not evidence, including for a file
+    /// named `eval-fake-agent`.
     #[arg(long)]
     grok: Option<PathBuf>,
     /// Run the built-in fake agent. Takes no path. Conflicts with `--grok`.
@@ -50,7 +55,8 @@ pub(crate) struct Cli {
     /// Report directory. Omitted reports are not written into the repo.
     #[arg(long)]
     out: Option<PathBuf>,
-    /// `local` is fake-only. `desktop` records the unavailable disposable provider.
+    /// `local` is fake-only unless `--unverified-environment` is set. `desktop`
+    /// records the unavailable disposable provider.
     #[arg(long, default_value = "local")]
     env: String,
     /// Override each task budget, in milliseconds.
@@ -86,14 +92,19 @@ pub(crate) struct Cli {
     /// Scripted client behavior. Hidden; tests and the fake agent use it.
     #[arg(long, hide = true)]
     behavior: Option<String>,
-    /// `fake` (default) uses the fake driver. `real` remains not_run: no trusted
-    /// disposable provider or native S2/S4 integration is installed.
+    /// `fake` (default) uses the fake driver. `real` stays not_run unless
+    /// `--unverified-environment` is set on `--env local`.
     #[arg(long, default_value = "fake")]
     driver: String,
     /// Legacy declaration, recorded for compatibility. Never boundary evidence
     /// and never enables real/external clients, even their tool preflight.
     #[arg(long)]
     attest_disposable_desktop: bool,
+    /// Only for a one-shot machine the operator prepared themselves. Does not
+    /// provide an isolation proof. Reports are marked unverified. An
+    /// environment variable cannot set this flag.
+    #[arg(long)]
+    unverified_environment: bool,
     /// Fixture app started for each task when `--driver real`.
     #[arg(long)]
     fixture: Option<PathBuf>,
@@ -202,6 +213,7 @@ fn dispatch() -> Result<u8, Stop> {
         fixture_bin: real.fixture_bin,
         auth_seed: real.auth_seed,
         attest_disposable_desktop: cli.attest_disposable_desktop,
+        unverified_environment: cli.unverified_environment,
         builtin_fake: cli.builtin_fake,
         builtin_gcu: cli.builtin_fake && cli.gcu.is_none(),
         grok_bin: cli.grok.clone(),
@@ -217,6 +229,9 @@ fn dispatch() -> Result<u8, Stop> {
         run_local,
         ..RunConfig::default()
     };
+    if cli.unverified_environment {
+        println!("{UNVERIFIED_BANNER}");
+    }
     let report = block_on(run_tasks(&tasks, &cfg)).map_err(|err| Stop::Run(err.into()))?;
     for task in &report.tasks {
         print_row(task);
@@ -304,6 +319,7 @@ fn core_ab(cli: &Cli) -> Result<u8, Stop> {
             fixture_bin: real.fixture_bin,
             auth_seed: real.auth_seed,
             attest_disposable_desktop: cli.attest_disposable_desktop,
+            unverified_environment: cli.unverified_environment,
             builtin_fake: cli.builtin_fake,
             builtin_gcu: cli.builtin_fake && cli.gcu.is_none(),
             grok_bin: cli.grok.clone(),
@@ -320,6 +336,9 @@ fn core_ab(cli: &Cli) -> Result<u8, Stop> {
         };
         block_on(run_ab(&tasks, &cfg, &id)).map_err(|err| Stop::Run(err.into()))?
     };
+    if cli.unverified_environment && cli.ab_report.is_none() {
+        println!("{UNVERIFIED_BANNER}");
+    }
     let decision = decide(&report).map_err(|err| Stop::Run(err.into()))?;
     println!(
         "core_ab {} success={} rounds={} tokens={} red_team={}",

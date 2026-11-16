@@ -189,14 +189,82 @@ pub(crate) fn admit_launch(
     }
 }
 
+/// Real local client or driver the operator explicitly left unverified.
+///
+/// Scoped engines stay on the provider gate. `--env desktop` stays refused.
+/// Fake-only runs (no real driver and no external client) are unchanged.
+#[must_use]
+pub(crate) fn allows_unverified_local_real(cfg: &RunConfig) -> bool {
+    cfg.unverified_environment
+        && cfg.run_local
+        && cfg.fake_scope.is_none()
+        && (cfg.real_driver || cfg.grok_bin.is_some())
+}
+
+/// Client process for this run. The unverified opt-in is not a provider.
+pub(crate) fn admit_client_for_run(
+    cfg: &RunConfig,
+    program: &Path,
+) -> Result<AdmittedLaunch, &'static str> {
+    if allows_unverified_local_real(cfg) {
+        admit_unverified(ProcessRole::Client, program)
+    } else {
+        admit_client(program)
+    }
+}
+
+/// Fixture process for this run. The unverified opt-in is not a provider.
+pub(crate) fn admit_fixture_for_run(
+    cfg: &RunConfig,
+    program: &Path,
+) -> Result<AdmittedLaunch, &'static str> {
+    if allows_unverified_local_real(cfg) {
+        admit_unverified(ProcessRole::Fixture, program)
+    } else {
+        admit_fixture(program)
+    }
+}
+
+/// Operator opt-in for a client or fixture. Scoped backends never use this path.
+///
+/// This does not flip the provider gate. [`admit_client`] stays closed.
+fn admit_unverified(role: ProcessRole, program: &Path) -> Result<AdmittedLaunch, &'static str> {
+    match role {
+        ProcessRole::Client | ProcessRole::Fixture => Ok(AdmittedLaunch {
+            program: program.to_path_buf(),
+            role,
+        }),
+        ProcessRole::Backend => Err(EXTERNAL_GCU_REFUSED),
+    }
+}
+
+/// Windows real driver stays `not_run`. The operator flag is not an input.
+///
+/// `host_windows` is `cfg!(windows)` in the runner. Tests pass `true` to cover
+/// the ACL refusal without a Windows host.
+#[must_use]
+pub(crate) fn windows_real_refusal(host_windows: bool, real_driver: bool) -> Option<&'static str> {
+    if host_windows && real_driver {
+        Some(WINDOWS_REAL_NOT_RUN)
+    } else {
+        None
+    }
+}
+
 /// Why this launch must not start, when the client is external or the driver is real.
+///
+/// `unverified` skips the attestation demand. Red-team tasks stay `not_run`.
 pub(crate) fn real_launch_block(
     real_client: bool,
     attested: bool,
     red_team: bool,
+    unverified: bool,
 ) -> Option<&'static str> {
     if !real_client {
         return None;
+    }
+    if unverified {
+        return red_team.then_some(REAL_RED_TEAM_NOT_RUN);
     }
     if !attested {
         return Some(ATTEST_REQUIRED);
@@ -224,7 +292,10 @@ mod tests {
             ..cfg()
         };
         assert!(launches_real_client(&named));
-        assert_eq!(real_launch_block(true, false, false), Some(ATTEST_REQUIRED));
+        assert_eq!(
+            real_launch_block(true, false, false, false),
+            Some(ATTEST_REQUIRED)
+        );
         let exe = RunConfig {
             grok_bin: Some(PathBuf::from("/tmp/eval-fake-agent.exe")),
             ..cfg()
@@ -240,14 +311,19 @@ mod tests {
             ..cfg()
         };
         assert!(launches_real_client(&builtin));
-        assert!(real_launch_block(false, false, false).is_none());
+        assert!(real_launch_block(false, false, false, false).is_none());
         let real = RunConfig {
             builtin_fake: true,
             real_driver: true,
             ..cfg()
         };
         assert!(launches_real_client(&real));
-        assert!(real_launch_block(true, true, true).is_some());
+        assert!(real_launch_block(true, true, true, false).is_some());
+        assert!(real_launch_block(true, false, false, true).is_none());
+        assert_eq!(
+            real_launch_block(true, false, true, true),
+            Some(REAL_RED_TEAM_NOT_RUN)
+        );
     }
 
     #[test]
@@ -313,11 +389,83 @@ mod tests {
             Err(ATTEST_REQUIRED)
         );
         assert!(admit_launch(None, None, false, false).is_ok());
-        assert_eq!(real_launch_block(true, false, false), Some(ATTEST_REQUIRED));
+        assert_eq!(
+            real_launch_block(true, false, false, false),
+            Some(ATTEST_REQUIRED)
+        );
         assert_eq!(
             admit_launch(None, Some(Path::new("/tmp/eval-fake-gcu")), false, false),
             Err(EXTERNAL_GCU_REFUSED)
         );
+    }
+
+    #[test]
+    fn unverified_opt_in_does_not_open_the_provider_gate_or_windows() {
+        let path = Path::new("eval-fake-agent");
+        let allowed = RunConfig {
+            unverified_environment: true,
+            run_local: true,
+            real_driver: true,
+            grok_bin: Some(path.into()),
+            ..cfg()
+        };
+        assert!(allows_unverified_local_real(&allowed));
+        assert!(admit_client_for_run(&allowed, path).is_ok());
+        assert!(admit_fixture_for_run(&allowed, path).is_ok());
+        assert!(admit_client(path)
+            .unwrap_err()
+            .contains("provider_unavailable"));
+        assert!(admit_scoped_backend(path)
+            .unwrap_err()
+            .contains("provider_unavailable"));
+        assert!(!provider_gate_allows_process(false));
+        let desktop = RunConfig {
+            run_local: false,
+            ..allowed.clone()
+        };
+        assert!(!allows_unverified_local_real(&desktop));
+        assert!(admit_client_for_run(&desktop, path).is_err());
+        let scoped = RunConfig {
+            fake_scope: Some(gcu_host_protocol::scope::Scope {
+                engine_instance: "fake".into(),
+                desktop_session: "fake".into(),
+                control_lease: "fake".into(),
+                targets: vec![],
+            }),
+            ..allowed.clone()
+        };
+        assert!(!allows_unverified_local_real(&scoped));
+        let fake = RunConfig {
+            unverified_environment: true,
+            run_local: true,
+            builtin_fake: true,
+            ..cfg()
+        };
+        assert!(!allows_unverified_local_real(&fake));
+        assert_eq!(windows_real_refusal(true, true), Some(WINDOWS_REAL_NOT_RUN));
+        assert!(windows_real_refusal(false, true).is_none());
+        assert!(windows_real_refusal(true, false).is_none());
+        assert_eq!(
+            windows_real_refusal(true, allowed.real_driver),
+            Some(WINDOWS_REAL_NOT_RUN)
+        );
+    }
+
+    #[test]
+    fn unverified_environment_keeps_windows_real_driver_not_run() {
+        let cfg = RunConfig {
+            unverified_environment: true,
+            real_driver: true,
+            run_local: true,
+            grok_bin: Some(PathBuf::from("client")),
+            ..cfg()
+        };
+        assert!(allows_unverified_local_real(&cfg));
+        assert_eq!(
+            windows_real_refusal(true, cfg.real_driver),
+            Some(WINDOWS_REAL_NOT_RUN)
+        );
+        assert_eq!(windows_real_refusal(true, true), Some(WINDOWS_REAL_NOT_RUN));
     }
 
     #[test]

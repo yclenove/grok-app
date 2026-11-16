@@ -31,6 +31,7 @@ async fn execute_ready(
         real_client,
         cfg.attest_disposable_desktop,
         task.category == "red_team",
+        cfg.unverified_environment,
     ) {
         return blank(&task.id, &task.category, cfg, RunStatus::NotRun, reason);
     }
@@ -83,7 +84,7 @@ async fn execute_ready(
         }
         ClientProgram::External(path) => {
             // Recheck admission at command construction, including preflight.
-            let launch = match crate::boundary::admit_client(path) {
+            let launch = match crate::boundary::admit_client_for_run(cfg, path) {
                 Ok(launch) => launch,
                 Err(reason) => {
                     outcome.status = RunStatus::NotRun;

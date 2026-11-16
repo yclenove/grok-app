@@ -229,8 +229,9 @@ pub struct RunConfig {
     pub arm_script: Option<bool>,
     /// Use the real `gcu` driver and a real fixture app instead of the fake driver and scene.
     ///
-    /// Always `not_run` until a trusted disposable provider and native S2/S4
-    /// integration exist. The legacy attestation flag cannot enable this path.
+    /// `not_run` unless [`RunConfig::unverified_environment`] is set on a local
+    /// run. The legacy attestation flag cannot enable this path. Windows stays
+    /// `not_run`.
     pub real_driver: bool,
     /// Trusted S3 fake-only manifest, sent exclusively over inherited control.
     /// Runner compositions needing an external S3 engine remain `not_run`.
@@ -244,6 +245,12 @@ pub struct RunConfig {
     /// Operator attestation that this process is on a one-shot isolated desktop with egress
     /// control. Default false. An environment variable cannot set this. It is not proof.
     pub attest_disposable_desktop: bool,
+    /// Operator opt-in for a self-prepared one-shot machine.
+    ///
+    /// Command line only. It does not provide an isolation proof. When set, rows
+    /// are marked `unverified`. Those results are not release L6 evidence.
+    /// Red-team tasks, Windows real drivers, and missing binaries stay `not_run`.
+    pub unverified_environment: bool,
     /// Select the compiled in-process fake client. There is no fake executable slot.
     /// Any supplied `grok_bin` or `gcu_bin` is external and requires the
     /// disposable provider, even when this flag is set.
@@ -284,6 +291,7 @@ impl Default for RunConfig {
             fixture_bin: None,
             auth_seed: None,
             attest_disposable_desktop: false,
+            unverified_environment: false,
             builtin_fake: false,
             builtin_gcu: false,
             preflight: crate::client_tools::PreflightCache::default(),
@@ -354,14 +362,9 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
     let real_client = crate::boundary::launches_real_client(cfg);
     // Owner-only ACLs are not implemented. Real mode must not pretend a temp
     // directory is private. Fake mode may still run and does not claim `0700`.
-    #[cfg(windows)]
-    if cfg.real_driver {
-        return skipped(
-            task,
-            cfg,
-            RunStatus::NotRun,
-            crate::boundary::WINDOWS_REAL_NOT_RUN,
-        );
+    // The unverified opt-in is not an argument of this check.
+    if let Some(reason) = crate::boundary::windows_real_refusal(cfg!(windows), cfg.real_driver) {
+        return skipped(task, cfg, RunStatus::NotRun, reason);
     }
     let program = match crate::launch::resolve_client(cfg) {
         Ok(program) => program,
@@ -374,6 +377,7 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
         real_client,
         cfg.attest_disposable_desktop,
         task.category == "red_team",
+        cfg.unverified_environment,
     ) {
         return skipped(task, cfg, RunStatus::NotRun, reason);
     }
@@ -427,7 +431,7 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
             }
         }
         match cfg.fixture_bin.as_deref().map(|bin| {
-            crate::boundary::admit_fixture(bin)
+            crate::boundary::admit_fixture_for_run(cfg, bin)
                 .map_err(Error::msg)
                 .and_then(|launch| crate::prep::Fixture::start(launch, &held.env))
         }) {
@@ -536,7 +540,9 @@ fn desktop_row(cfg: &RunConfig) -> TaskOutcome {
         DESKTOP_NOT_RUN,
     );
     row.env_destroyed = true;
-    row.assurance.environment = Some(crate::disposable::unavailable_report());
+    if !cfg.unverified_environment {
+        row.assurance.environment = Some(crate::disposable::unavailable_report().into());
+    }
     row
 }
 
