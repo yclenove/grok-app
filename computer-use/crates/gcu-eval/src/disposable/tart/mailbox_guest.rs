@@ -37,7 +37,8 @@ pub struct MailboxGuestChannel<C: HostClock> {
     /// Grant reference fixed to the first inventory that reported this sample.
     ///
     /// A later inventory with the same `sample_ms` keeps this value. The host
-    /// validity is `sample_ms + 2000` and does not move when the timestamp repeats.
+    /// validity is `sample_ms` plus [`super::mailbox::LEASE_WINDOW_MS`] and does
+    /// not move when the timestamp repeats.
     pinned: Option<LeaseRequest>,
     effect: Option<SideOp>,
     /// Side rows this attempt actually published.

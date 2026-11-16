@@ -56,7 +56,7 @@ guest 只含夹具、评测工具和必要系统组件；模型无管理员权�
 
 拟议上限：宿主单调钟控制；安装检查/每个查询 5s，clone 60s，启动就绪 120s，每个探针 2s（整组 60s），bootstrap/ACK 每阶段 5s，owner 登录等待 5min；准备总计 ≤10min。任务预算为 `min(task.max_seconds, 15min)`；清理总计 ≤60s，其中 revoke/guest drain ≤10s、stop+确认 ≤20s、delete+确认 ≤20s、回执 ≤10s。每个子进程的超时含 kill/reap，输出有界（单命令 ≤1MiB）；不能只给外层 future 超时而留下阻塞 IO。外部硬截止为预留的准备+任务+清理预算，不随重试延长。
 
-3s scope 租约不变；guest supervisor 在同一受控事件循环按 ≤1s 调度 Renew，长命令用截止时间轮询，不能阻塞续租、Stop 或释放。宿主每 ≤1s 发送绑定 run/instance/递增序号的 lease；guest supervisor 对其存活设置 ≤3s 的固定截止，到期终止模型树，迟到帧不能复活。S3 scope 租约本身只撤 gcu 权限，不能冒充客户端父死回收。新 provider 不加 observer 线程、共享生命周期管理器或后台自动恢复。现有调用方/controller 作为一次性外层 owner 持有 provider 子进程与 VM 清理账本；顺序等待带截止的事件，provider 死亡时接手，**不能只靠 provider 的 Drop**，不安装常驻 daemon。
+3s scope 租约不变；guest supervisor 在同一受控事件循环按 ≤1s 调度 Renew，长命令用截止时间轮询，不能阻塞续租、Stop 或释放。宿主每 ≤1s 发送绑定 run/instance/递增序号的 lease；guest supervisor 对其存活设置固定截止，到期终止模型树，迟到帧不能复活。（2026-11-15 所有者决定修订，见 ADR 0019 “M4a 调度可行性”：截止为 grant 引用的访客样本时间 `g+5s`，不从收到消息时起算；到期后最后 ≤1s 撤权/释放/杀净树，宿主失联后访客 ≤6s 停树。原定 ≤3s 在实测约 1s 的宿主→访客可见延迟下没有可行调度。）S3 scope 租约本身只撤 gcu 权限，不能冒充客户端父死回收。新 provider 不加 observer 线程、共享生命周期管理器或后台自动恢复。现有调用方/controller 作为一次性外层 owner 持有 provider 子进程与 VM 清理账本；顺序等待带截止的事件，provider 死亡时接手，**不能只靠 provider 的 Drop**，不安装常驻 daemon。
 
 ADR 0017 §3 / ADR 0013 的 Stop 常量全部不变：100ms 锁存、500ms 释放、5s native、4750ms driver，以及既有平台常量/重试额度。上述 VM 超时不是新的 Stop 预算；scope/网络/清理等待不得占住 Stop 或释放所需的锁。
 非正常控制断线在 VM 外锁存持久 Stop；持久状态无法确认也拒绝下一次分配。清理、宿主重启或新 clone 不能清锁存，仍须真实用户恢复。
@@ -65,7 +65,7 @@ ADR 0017 §3 / ADR 0013 的 Stop 常量全部不变：100ms 锁存、500ms 释�
 | --- | --- |
 | provider 子进程崩溃/取消 | 外层 owner 收 EOF，关闭控制、停止/删除指定 VM；即使清理成功，本次仍 `not_run/provider_crash` |
 | guest 崩溃/重启、boot id 改变、Tart/Softnet 退出 | session/ACK 立即无效；外层 stop/delete，不认领重启的 guest；`not_run` |
-| 外层 owner 也死亡 | guest 控制存活租约到期，停止模型树并撤 scope；不声称 VM 已删除；回执 cleanup=unknown，下一启动先回收 |
+| 外层 owner 也死亡 | guest 控制存活租约到期（宿主失联后 ≤6s，见 §2 修订），停止模型树并撤 scope；不声称 VM 已删除；回执 cleanup=unknown，下一启动先回收 |
 | 宿主崩溃/断电 | 无法及时写清理证明；禁止自动开机续跑 VM；重启后先回收孤儿，旧 attempt 永久 `not_run` |
 
 幂等清理只处理宿主受保护账本拥有的精确 clone 身份，先查状态再 stop/delete；权威库存查询成功且确认该资源不存在才可视为已删除，查询失败/不完整不是“已消失”。登记须先于 clone，覆盖 clone 成功但回复丢失的窗口。下次启动对未封存记录逐个核对 VM 配置与身份、回收并追加 recovery 回执；不按前缀猜删、不删 golden/外部 VM、不重启孤儿。身份歧义、锁竞争、回收失败均隔离并禁止新 attempt。APFS 删除是逻辑销毁，不声称 SSD 安全擦除；禁 clone 快照/备份，服务端凭据短期失效兜底。
@@ -230,7 +230,7 @@ H1/H2 的具体组件若需另造通道或包过滤器，先拆独立设计卡�
 
 - **H1**：宿主到 guest 的具体通道未定。接口不假设 SSH、virtio、共享盘或网关端口。取决于 **S11-0**。
 - **H2**：宿主出站 guard 是否需要、以及哪一个实现，取决于 **S11-0**。`SoftnetFlags` 只描述 §5 的字段形状，不证明策略生效。
-- 状态机（S11b）、真实适配器、网络探针（S11c）都没有实现。长操作的完成等待，以及有界轮询或让出以保证 ≤1s 续租和 ≤3s guest 存活，留给 S11b 明确。固定操作可以只确认已经发起，由有界轮询取结果。本卡不为此选择传输、后台线程或状态机。
+- 状态机（S11b）、真实适配器、网络探针（S11c）都没有实现。长操作的完成等待，以及有界轮询或让出以保证 ≤1s 续租和 ≤3s guest 存活（后者已于 2026-11-15 修订为 `g+5s` / ≤6s 停树，见 §2），留给 S11b 明确。固定操作可以只确认已经发起，由有界轮询取结果。本卡不为此选择传输、后台线程或状态机。
 - `accepting_provider_linked` / `scoped_provider_ack` 仍恒拒绝。本模块不铸造 `AdmittedLaunch`。
 
 S11b 在 S11-0 给出通道事实之前只应接这些 fake，不得选定真实传输。fake 通过不改变矩阵的 native 状态。
@@ -302,7 +302,7 @@ S11b 在 S11-0 给出通道事实之前只应接这些 fake，不得选定真实
 1. 邮箱放在**容量受限的专用卷**上（每个 attempt 新建一个小稀疏镜像并挂载，容量上限例如 16 MiB，attempt 结束卸载并删除），不是宿主任何现有目录；guest 无法写满宿主磁盘，也无法看到宿主其它文件。
 2. 宿主读取只用 `openat`+`O_NOFOLLOW`，`fstat` 确认普通文件、大小 ≤ 固定上限、名字在固定白名单内；遇到符号链接、硬链接异常、多余文件、超大文件一律判协议违规（`not_run`），不跟随、不解析名字。
 3. 消息为固定版本化操作（inventory / probe / bootstrap / login / run / lease / revoke），每条带 run_id 与单调序号；宿主写入的内容和 guest 写入的内容分在两个子目录（宿主只写前者、只读后者；guest 内可信 supervisor 只写后者），宿主对 guest 子目录里的内容不假设任何结构。
-4. 租约：宿主每 ≤1 秒写入递增的 lease 文件；guest 内可信 supervisor 把过期 ≤3 秒作为终止模型树的条件（沿用 §2）；宿主死亡后租约不再更新，guest 自行终止，VM 另由 §2 的外层回收流程处理。
+4. 租约：宿主每 ≤1 秒写入递增的 lease 文件；guest 内可信 supervisor 把租约过期作为终止模型树的条件（沿用 §2；2026-11-15 修订为样本时间 `g+5s` 到期、宿主失联后 ≤6 秒停树）；宿主死亡后租约不再更新，guest 自行终止，VM 另由 §2 的外层回收流程处理。
 5. 邮箱不是共享宿主目录：ADR §1 的“永不提供宿主共享目录”仍成立，此处是唯一例外，且仅限上述专用卷。
 6. 模型进程不得访问邮箱（guest 内权限/沙箱，S11e 需证明）；模型的网络仍只有 Softnet 的端点 /32。
 

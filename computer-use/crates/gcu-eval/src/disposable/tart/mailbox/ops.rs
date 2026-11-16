@@ -21,7 +21,11 @@ pub const MAX_JSON_ARRAY: usize = 16;
 pub const MAX_POLLS: u64 = 2048;
 
 /// Guest lease window. `until_ms` is `sample_ms` plus this, with no wrap.
-pub const LEASE_WINDOW_MS: u64 = 2000;
+///
+/// 5000 ms (`g+5s`, owner decision 2026-11-15). The next 1 s revokes, releases,
+/// and stops the tree, so the guest is down by 6 s. This is not a Stop constant
+/// and not the 3 s S3 scope lease.
+pub const LEASE_WINDOW_MS: u64 = 5000;
 
 /// The seven guest operations. Names are the file stems.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -375,7 +379,7 @@ pub struct LeaseRequest {
     pub sample_ms: u64,
 }
 
-/// Lease terminal. `until_ms` must be the sent `sample_ms + 2000`.
+/// Lease terminal. `until_ms` must be the sent `sample_ms` plus [`LEASE_WINDOW_MS`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeaseTerminal {
     /// Echo of the grant.

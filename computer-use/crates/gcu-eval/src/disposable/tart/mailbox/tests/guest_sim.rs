@@ -29,8 +29,8 @@ use super::super::super::mailbox_guest::MailboxGuestChannel;
 use super::super::super::manifest::Digest;
 use super::super::super::output::{BoundedOutput, CallError};
 use super::super::super::schedule::{
-    attempt_window_ms, prove, ScheduleError, ACCEPT_AGE_MS, EXTRA_SAMPLES, GRANT_GAP_MS,
-    ONE_WAY_MS, POLL_BYTE_BUDGET, RENEW_MS, ROUND_TRIP_MAX_MS, STEP_MS,
+    attempt_window_ms, prove, prove_model, CycleModel, ScheduleError, ACCEPT_AGE_MS, EXTRA_SAMPLES,
+    GRANT_GAP_MS, ONE_WAY_MS, POLL_BYTE_BUDGET, RENEW_MS, ROUND_TRIP_MAX_MS, STEP_MS,
 };
 use super::super::codec::{decode_frame, decode_reply};
 use super::super::ops::{
@@ -619,11 +619,13 @@ fn asymmetric_900_100_records_age_and_stops_the_tree() {
     let Some(accept) = accepts.first().copied() else {
         panic!("lease 1 was not accepted");
     };
+    let grant_end = 900 + LEASE_WINDOW_MS;
     let age = accept.host_ms.saturating_sub(900);
-    if accepts.len() != 1 || accept.host_ms != 2_000 || age != 1_100 || accept.until_ms != 2_900 {
+    if accepts.len() != 1 || accept.host_ms != 2_000 || age != 1_100 || accept.until_ms != grant_end
+    {
         panic!("lease 1 age {age} accepts {accepts:?}");
     }
-    if guest.stop_deadline() != Some(2_900) || guest.stopped() {
+    if guest.stop_deadline() != Some(grant_end) || guest.stopped() {
         panic!(
             "stop {:?} stopped {}",
             guest.stop_deadline(),
@@ -640,7 +642,7 @@ fn asymmetric_900_100_records_age_and_stops_the_tree() {
     let ReplyResult::Lease(term) = acked.result else {
         panic!("lease 1 ack: {acked:?}");
     };
-    if term.until_ms != 2_900 || term.sample_ms != 900 || term.inventory_request_seq != 1 {
+    if term.until_ms != grant_end || term.sample_ms != 900 || term.inventory_request_seq != 1 {
         panic!("host observed {term:?}");
     }
 
@@ -650,9 +652,9 @@ fn asymmetric_900_100_records_age_and_stops_the_tree() {
         panic!("lease 2 was not published");
     }
 
-    advance_to(&rig, 2_900);
+    advance_to(&rig, grant_end);
     step(&guest);
-    if !guest.stopped() || guest.acks() != 1 || guest.stop_deadline() != Some(2_900) {
+    if !guest.stopped() || guest.acks() != 1 || guest.stop_deadline() != Some(grant_end) {
         panic!(
             "tree did not stop at the first grant: stopped {} acks {} deadline {:?}",
             guest.stopped(),
@@ -660,7 +662,7 @@ fn asymmetric_900_100_records_age_and_stops_the_tree() {
             guest.stop_deadline()
         );
     }
-    advance_to(&rig, 3_100);
+    advance_to(&rig, grant_end + 200);
     step(&guest);
     if guest.acks() != 1 || guest.accepts().len() != 1 || guest.samples().len() != 2 {
         panic!(
@@ -673,7 +675,7 @@ fn asymmetric_900_100_records_age_and_stops_the_tree() {
 }
 
 #[test]
-fn observed_1023_misses_the_guest_deadline() {
+fn observed_1023_meets_the_guest_deadline() {
     let mut rig = Rig::open();
     let guest = SyncGuest::new(&rig, 0);
     guest.schedule();
@@ -688,6 +690,7 @@ fn observed_1023_misses_the_guest_deadline() {
             sample_ms: 0,
             host_ms: 0,
         })
+        || guest.stop_deadline() != Some(LEASE_WINDOW_MS)
     {
         panic!("sample {:?}", guest.samples());
     }
@@ -702,25 +705,67 @@ fn observed_1023_misses_the_guest_deadline() {
         panic!("grant did not use the observed sample");
     }
 
-    advance_to(&rig, 1_999);
+    advance_to(&rig, 2_000);
+    step(&guest);
+    if guest.stopped() || guest.acks() != 0 {
+        panic!("old 2000 ms mark stopped the tree or accepted an invisible grant");
+    }
+    advance_to(&rig, 2_145);
     step(&guest);
     if guest.stopped() || guest.acks() != 0 {
         panic!("grant was treated as visible before 2146 ms");
     }
-    advance_to(&rig, 2_000);
+    advance_to(&rig, 2_146);
     step(&guest);
-    if !guest.stopped() || guest.acks() != 0 || guest.stop_deadline() != Some(2_000) {
+    let Some(accept) = guest.accepts().first().copied() else {
+        panic!("grant visible at 2146 ms was not accepted inside {LEASE_WINDOW_MS} ms");
+    };
+    if guest.stopped()
+        || guest.acks() != 1
+        || guest.accepts().len() != 1
+        || accept.host_ms != 2_146
+        || accept.sample_ms != 0
+        || accept.until_ms != LEASE_WINDOW_MS
+        || guest.stop_deadline() != Some(LEASE_WINDOW_MS)
+    {
         panic!(
-            "1023 ms legs: stopped {} acks {} deadline {:?}",
+            "1023 ms legs missed the window: stopped {} acks {} deadline {:?} accept {accept:?}",
             guest.stopped(),
             guest.acks(),
             guest.stop_deadline()
         );
     }
-    advance_to(&rig, 2_146);
-    step(&guest);
-    if guest.acks() != 0 || !guest.accepts().is_empty() {
-        panic!("grant visible at 2146 ms was accepted after the stop");
+}
+
+#[test]
+fn old_2000_window_still_misses_measured_cycle() {
+    let window = attempt_window_ms();
+    let age = ACCEPT_AGE_MS;
+    let gap = GRANT_GAP_MS;
+    let count = window / RENEW_MS + 1 + EXTRA_SAMPLES;
+    if age != 2_146 || gap != 1_923 || age + gap != 4_069 || LEASE_WINDOW_MS != 5_000 {
+        panic!("model inputs age {age} gap {gap} window {LEASE_WINDOW_MS}");
+    }
+    match prove_model(CycleModel {
+        window_ms: window,
+        grant_ms: 2_000,
+        age_ms: age,
+        gap_ms: gap,
+    }) {
+        Err(ScheduleError::Infeasible {
+            window_ms,
+            count: got,
+        }) if window_ms == window && got == count => {}
+        other => panic!("old 2000 ms window was not rejected: {other:?}"),
+    }
+    match prove(window) {
+        Ok(proof)
+            if proof.window_ms == window
+                && proof.age_ms == age
+                && proof.gap_ms == gap
+                && proof.slack_ms == 931
+                && proof.inventory_count == count => {}
+        other => panic!("5000 ms window was not proved: {other:?}"),
     }
 }
 
@@ -745,15 +790,16 @@ fn jitter_slips_accept_age_by_one_step() {
     let Some(accept) = guest.accepts().first().copied() else {
         panic!("jitter did not accept");
     };
+    let grant_end = 900 + LEASE_WINDOW_MS;
     let age = accept.host_ms.saturating_sub(900);
     if guest.accepts().len() != 1
         || accept.host_ms != 2_100
         || age != 1_200
-        || accept.until_ms != 2_900
+        || accept.until_ms != grant_end
     {
         panic!("jitter age {age} {:?}", guest.accepts());
     }
-    if guest.stop_deadline() != Some(2_900) {
+    if guest.stop_deadline() != Some(grant_end) {
         panic!("jitter moved the stop {:?}", guest.stop_deadline());
     }
 }
@@ -878,8 +924,8 @@ fn short_delay_window_keeps_grant_continuity() {
     }
 
     // Forty filesystem cycles stand in for the attempt. The closed form is the
-    // full 1_560_000 ms window. Short 100 ms legs fit inside 2000 ms. The
-    // measured 1023 ms one-way bound, counted in each direction, does not.
+    // full 1_560_000 ms window. The measured 1023 ms one-way bound fits the
+    // 5000 ms grant: age 2146 + gap 1923 = 4069, margin 931 ms.
     let window = attempt_window_ms();
     let periodic = window / RENEW_MS + 1;
     let count = periodic + EXTRA_SAMPLES;
@@ -892,26 +938,28 @@ fn short_delay_window_keeps_grant_continuity() {
         || age != ACCEPT_AGE_MS
         || GRANT_GAP_MS != 1_923
         || gap != GRANT_GAP_MS
+        || age + gap != 4_069
+        || LEASE_WINDOW_MS - (age + gap) != 931
     {
-        panic!("measured age {ACCEPT_AGE_MS} gap {GRANT_GAP_MS}");
+        panic!("measured age {ACCEPT_AGE_MS} gap {GRANT_GAP_MS} window {LEASE_WINDOW_MS}");
     }
     let single = ROUND_TRIP_MAX_MS + STEP_MS + RENEW_MS + STEP_MS;
-    if single != 2_023 || single <= LEASE_WINDOW_MS || age + gap < LEASE_WINDOW_MS {
-        panic!("measured cycle fits: single {single} sum {}", age + gap);
+    if single != 2_023 || single > LEASE_WINDOW_MS || age + gap >= LEASE_WINDOW_MS {
+        panic!("measured cycle misses: single {single} sum {}", age + gap);
     }
     if HG + SERVICE + GH + PERIOD >= LEASE_WINDOW_MS {
         panic!("representative delays do not fit inside the grant");
     }
     match prove(window) {
-        Err(ScheduleError::Infeasible {
-            window_ms,
-            count: got,
-        }) if window_ms == window && got == count => {}
-        other => panic!("full window returned a proof: {other:?}"),
-    }
-    match prove(1) {
-        Err(ScheduleError::Infeasible { .. }) => {}
-        other => panic!("short window returned a proof: {other:?}"),
+        Ok(proof)
+            if proof.window_ms == window
+                && proof.inventory_count == count
+                && proof.lease_count == count
+                && proof.age_ms == age
+                && proof.gap_ms == gap
+                && proof.slack_ms == 931
+                && proof.margin == MAX_POLLS - count => {}
+        other => panic!("full window was not proved: {other:?}"),
     }
 }
 
@@ -949,7 +997,8 @@ fn repeated_sample_timestamp_pins_grant_request() {
 
     assert_pending(&ok(rig.lease(seq_of(1))), Op::Lease);
     let published = lease_request_of(&rig.host(Op::Lease));
-    if published != pin || rig.channel.host_grant_end_ms() != Some(7_000) {
+    let grant_end = pin.sample_ms + LEASE_WINDOW_MS;
+    if published != pin || rig.channel.host_grant_end_ms() != Some(grant_end) {
         panic!(
             "published {published:?} end {:?}",
             rig.channel.host_grant_end_ms()
@@ -957,7 +1006,7 @@ fn repeated_sample_timestamp_pins_grant_request() {
     }
     rig.publish_guest(
         Op::Lease,
-        &lease_frame(1, pin.inventory_request_seq, pin.sample_ms, 7_000),
+        &lease_frame(1, pin.inventory_request_seq, pin.sample_ms, grant_end),
     );
     let acked = decode_reply_of(&ok(rig.lease(seq_of(1))));
     let ReplyResult::Lease(term) = acked.result else {
@@ -965,8 +1014,8 @@ fn repeated_sample_timestamp_pins_grant_request() {
     };
     if term.inventory_request_seq != pin.inventory_request_seq
         || term.sample_ms != pin.sample_ms
-        || term.until_ms != 7_000
-        || rig.channel.host_grant_end_ms() != Some(7_000)
+        || term.until_ms != grant_end
+        || rig.channel.host_grant_end_ms() != Some(grant_end)
         || rig.channel.pinned_grant() != Some(pin)
     {
         panic!(
@@ -977,7 +1026,7 @@ fn repeated_sample_timestamp_pins_grant_request() {
 
     assert_pending(&ok(rig.lease(seq_of(2))), Op::Lease);
     let second = lease_request_of(&rig.host(Op::Lease));
-    if second != pin || rig.channel.host_grant_end_ms() != Some(7_000) {
+    if second != pin || rig.channel.host_grant_end_ms() != Some(grant_end) {
         panic!(
             "second grant {second:?} end {:?}",
             rig.channel.host_grant_end_ms()
@@ -988,7 +1037,8 @@ fn repeated_sample_timestamp_pins_grant_request() {
     rig.publish_guest(Op::Inventory, &plain_terminal(lower, "boot1", 4_999));
     let err = err_of(rig.inventory());
     assert_failed(&err, b"sample");
-    if rig.channel.pinned_grant() != Some(pin) || rig.channel.host_grant_end_ms() != Some(7_000) {
+    if rig.channel.pinned_grant() != Some(pin) || rig.channel.host_grant_end_ms() != Some(grant_end)
+    {
         panic!("lower sample moved the pin or the host end");
     }
 }
