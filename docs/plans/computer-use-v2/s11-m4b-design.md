@@ -1,6 +1,6 @@
 # S11-M4b：machine 集成设计
 
-修订记录：2026-11-15 round-1；补齐 D1/D3～D5 及回归，D2 按 controller 决策移除 ACK 工作门。
+修订记录：2026-11-15 round-1 补齐 D1/D3～D5 并移除 ACK 工作门；round-2 controller 决定以既有 `RENEW_MS=800ms` 为 inventory 最小发布间隔、每个 fresh pin 仅触发一份下一服务 step 内优先发布的 lease，关闭 D2-r2 请求数开放问题（[review-r2](reviews/2026-11-15-s11-m4b-design-review-r2.md)）。
 日期：2026-11-15；状态：待独立设计审阅，本文不授权真实接线。
 基线：`3e3c390b`（M3、M4a、C11、`g+5s` 已合并）。下文源码路径相对 `computer-use/`，`tart/` 指 `crates/gcu-eval/src/disposable/tart/`。
 依据：[ADR 0019 §3/§6](../../../computer-use/docs/adr/0019-tart-mailbox-channel.md)、[M4 一审](reviews/2026-11-13-s11-m4-review.md)、[二审](reviews/2026-11-13-s11-m4-review-r2.md)、[M4a 三审](reviews/2026-11-13-s11-m4a-review-r3.md)。
@@ -137,14 +137,23 @@ Tart boot 是另一个域。start 后先取得精确归属的 running status T�
 
 ## 8. 租约服务与 step 交错
 
-reserve 在任何资源副作用前调用 `schedule::prove(attempt_window_ms())`，合并下列 guest/machine 两个不等式及请求数门并保存 proof；任一不满足即在分配前失败。缩短预算可用更短窗口，不能用测试参数扩大真实可见性界限。
-采用 M4a 当前常量：两单向界各 1023ms、step 100ms、发布周期 800ms。guest 侧：age=2146ms、gap=1923ms，`2146+1923=4069<5000`，余量 931ms。
-machine 侧：一个在途 inventory，下一请求最迟在两腿加服务后发布，`1023+1023+2×100=2246<5000ms`；相邻 `h_pre+5000ms` 保守窗口重叠 ≥2754ms。回复验收才换 pin，组合 trace 必须证明实际换 pin 前旧 host end 未到，不能靠尚未返回的请求延长。
-最长窗口 1,560,000ms：每流 1951 个周期位置 + 最多 8 次离格完成/消费采样 = 1959≤2048，余 89；probe 不逐项新发 inventory。离格额度单独保存，优先复用周期采样，不能靠加快采样耗尽 cap。
-该算式是可行性门，不是“每 800ms 必有新样本”的证据：adapter 同时只能开一个 inventory；未完成则只 poll，完成后按 due 尽快发下一请求，不重发或追补一串漏掉的 tick。
-首 inventory 绑定 boot 后至 revoke 开始前，在各公开步都运行租约服务（不只 Running）；800ms 的 `schedule::due(last_publication_done, now)` 分别控制新 inventory 与 lease，计入 100ms 服务偏移。
-lease 可覆盖未 ACK 的旧 lease，seq 连续增加；poll 同 seq 不计新请求。grant 使用 adapter 的完整 pinned `(inventory_request_seq,g)`；同 g 不换引用/不延 end，下降或加法溢出拒绝。
-guest 只认真实已生成样本，截止固定 `g+5000`，不从 ACK/收到时刻起租；旧截止到达永久停止，最后 ≤1s 撤权/释放/杀树，总 ≤6s。S3 scope 3s 独立。
+reserve 在任何资源副作用前调用 `schedule::prove(attempt_window_ms())`，保存联合 guest/machine 时限与请求数 proof；任一不满足即在分配前失败。M4b-2 更新 `schedule.rs`，按下述实际调度和实测常量计算联合界，不能沿用独立 lease cadence 的 age/gap 算式。
+production prove 只用既有实测常量：两单向可见性界各 `1023ms`、共享 step `100ms`、`RENEW_MS=800ms`、guest 窗口 `5000ms`；不把单向上界当下界。模型注入仍仅限 test-only/`cfg(test)`，不得放宽实测常量或开放生产 model 入口；缩短预算可用更短窗口。
+
+inventory 至多一个在途；未完成只 poll，不重发、不追补漏掉的 tick。第 k 份回复验收后，下份请求在 **max（验收后的下一服务 step，前份 inventory 的不可变 `h_pre_k+800ms`）** 到点的服务片发布，计入至多 `100ms` 服务偏移。首次请求按原绑定流程发布；完成/consume 采样优先复用周期请求，额外采样也遵守串行与最小间隔，不绕过门。
+此 floor 锚定实际发布开始前的 `h_pre`，不以 poll、回复验收、lease 或 ACK 重置，也不改用 `h_done`。发布完成及计数仍依 §7 的真实 accounting；未派发拒绝不推进锚点，发布不确定即 unknown/quarantine。
+首 inventory 绑定 boot 后至 revoke 开始前，所有公开步都服务租约。每个 fresh pin 创建**唯一优先 grant 义务**：验收片有剩余预算可立即发布，否则须在下一服务 step 内发布；发布/服务成本共用该片 `100ms`，不得等独立 `800ms` lease tick。普通阶段和旧 lease ACK poll 不能挤掉该义务；不能按后续 tick 重试填补不确定发布。
+lease 精确引用该 pin 的完整 `(inventory_request_seq,g)`，每个 fresh pin 恰好一份，永不为同 pin 再发第二份。记录待办及唯一实发 lease seq，跨 poll 不重建；同 g 保留完整旧 pin/锚点，不创建义务、不延 end；g 下降或加法溢出拒绝。新 pin 的 lease 可覆盖未 ACK 的旧 lease，实发 seq 连续增加，poll 同 seq 不计新请求。
+
+联合时限按这套事件驱动服务计算：
+
+- 串行周期界 `C=1023+1023+2×100=2246ms`；连续样本间隔界 `D=max(C,800+100)=2246ms`，包含 floor 到点的服务 slip。
+- fresh 样本到其 grant 对 guest 可见的年龄界 `A=1023+100+1023=2146ms`；下份 grant 最迟在 `sample_k+D+A=sample_k+4392ms` 可见，严格早于 `sample_k+5000ms`，余量 `608ms`。
+- host 必须收到并验收替换 pin 后才能换 end；从旧 `h_pre_k` 到下一 pin 验收的保守界 `D+C=2×2246=4492<5000ms`，余量 `508ms`。相邻发布锚点窗口重叠 `5000−2246=2754ms`，不能把它当已返回替换的余量，未返回请求也不能延长旧 end。
+
+请求数用**间隔下界**而非周期上界计算：`N_inventory ≤ floor(W/800)+1+8`；按 ADR §3 保守计两端点周期位置及最多 8 次额外首样本/完成/consume 采样，离格额度单独保存，probe 不逐项新发 inventory。`W=1,560,000ms` 时为 `1951+8=1959≤2048`，余 `89`；每个 fresh pin 只有一份 lease，故 `N_lease≤N_inventory≤1959`，两流各≤2048。
+最小间隔即使在快速可见性下也成立；`2246ms` 只用于时限上界，不能用 `ceil(W/2246)` 证明请求数。gate 须以实测常量联合检查 `D+A<5000`、`D+C<5000` 及两流计数；更短 grant、模型外抖动、算术溢出或计数超限均拒绝，不以运行时 cap 关闭冒充完整窗口可行性。
+guest 只认真实已生成样本，截止固定 `g+5000`，不从 ACK/收到时刻起租；替换必须严格先于旧 guest end，恰在 end 到达亦失败。旧截止到达永久停止，最后 ≤1s 撤权/释放/杀树，总 ≤6s。S3 scope 3s 独立。
 
 按 controller 的 D2 决策，移除“confirmed coverage 须 current ACK 才可工作”：ADR §3 的 lease terminal/确认“不产生 owner/scope/准入/清理证明”；guest 自行执行固定 `g+5000` 与 ≤6s 停树。
 ACK 仅作完整性检查：保留 ≤2048 项实发 grant/ACK 摘要表，terminal 必须精确等于某个已发 grant（含引用与 end）；过时但一致的 ACK（含首次见到）只丢弃、不延长任何东西，未发/改内容即失败。首次 ACK 尚未到、被覆盖或 pending 均不单独阻塞工作，ACK 也不更新 pin/host end。
@@ -152,13 +161,13 @@ host/guest 单调时钟不共用 epoch：最新 pin 的保守 `host_end = h_pre+
 bootstrap/login/run 的 host 工作门为：`now < 最新 pin.host_end`、调度 proof 仍成立且未耗尽（含各流 2048 cap/离格额度）、owner/Stop 允许；身份及原 op/phase/attempt 门照旧。clone/卷准备/start/绑定 inventory 是前置阶段，按其原 owner/身份门执行。
 已有 pin 后，换新 pin、每次发布/读取/解析/采纳前后先查旧 host end；到期永久禁普通工作/续租，转撤权，晚样本/ACK 不复活。无新样本、预算/计数耗尽或模型外抖动/丢失导致门失败亦如此；仅 ACK 延迟或缺席不构成到期。长 login、max-task 使用同一门。
 
-每片顺序：旧截止/owner/Stop → 优先 revoke/释放或取消 → 适用的 due lease/待办 inventory → 当前阶段一片。租约 IO 用掉的时间不能再供阶段单独花 100ms。
-仅在共享剩余预算内推进下一项；保留服务轮转位置，不能让 pending lease 的 poll 永久饿死 inventory，也不能让慢查询/连续 probe/4s stop 阻止服务。VM 退出后不再写邮箱。
+每片顺序：旧截止/owner/Stop → 优先 revoke/释放或取消 → fresh-pin grant 义务/待办 inventory → 当前阶段一片。租约 IO 用掉的时间不能再供阶段单独花 100ms。
+仅在共享剩余预算内推进下一项，保留义务与服务轮转位置并兑现下一 step 发布界；不能让旧 lease 的 poll 永久饿死 inventory，也不能让慢查询/连续 probe/4s stop 阻止服务。若无法兑现 proof 则失败关闭，VM 退出后不再写邮箱。
 
 ## 9. 离线验收与评审可核对项
 
 fake runner/guest **在每次 begin/poll 内**把 IO 成本计入同一个 FakeClock；另给锁、ledger、解析、服务、note 成本。总耗时大于片的工作必须逐片扣剩余成本，不能永远以“101ms 放不下”原地拒绝，也不能只在测试外部跳时钟。
-每条 trace 记录 step 起止、各 call_end、实发与 poll、proof/Stop 检查、采纳/消费、kill/reap 顺序、inventory 的 h_pre/h_done、换 pin/host end、样本生成/guest 接受时间及 ACK 判定。合作式路径每步 ≤100ms；另注入违约超时，断言返回后无后续 IO/采纳，并 fail-closed，不把它计为满足时限。
+每条 trace 记录 step 起止、各 call_end、实发与 poll、proof/Stop 检查、采纳/消费、kill/reap 顺序、inventory 的 h_pre/h_done/floor 到点、换 pin/host end、fresh-pin grant 义务创建/唯一发布、样本生成/guest 接受时间及 ACK 判定，并核对真实发布完成计数。合作式路径每步 ≤100ms；另注入违约超时，断言返回后无后续 IO/采纳，并 fail-closed，不把它计为满足时限。
 
 | 对应义务 | 必须有的回归（检查行为和最终回执） |
 | --- | --- |
@@ -174,17 +183,32 @@ fake runner/guest **在每次 begin/poll 内**把 IO 成本计入同一个 FakeC
 | D5 -1 独立可达 | 仅 M4b-1 经 public reserve/clone/start/isolate 到 normalized guest 操作；多片真实扣费 pending→accepted，分别注入丢结果/Stop/owner 到期并完成有权清理；bootstrap/login/run 均覆盖，无 phase setter/空记账/legacy 即时成功/-2 代码；迁移后既有 suite 编译 |
 | R2-7 | 两行 recovery：A 完成，B 已 StartIssued 但 list 缺名且未证退出；在每阶段暂停，B 不继承 A 游标/期限，禁止 seal；新 attempt 亦从零开始 |
 | R2-8 | 撤权前 inventory 已 pending，短 revoke end 内开始复用读、IO 中跨 end；不得 revoke_ok/note/consume；另测迟到首 drain 与连续非终态超过 10s |
-| R2-11 | 数千次未派发拒绝/pending poll 后计数与发布时间不动，随后成功发布只 +1；发布后读失败仍 +1；正常 machine 服务走到请求 2049 明确关闭 |
+| R2-11 | 数千次未派发拒绝/pending poll 后计数与发布时间不动，随后成功发布只 +1；发布后读失败仍 +1；test-only 耗尽负例走到第 2049 个必需请求时，machine 在发布前明确关闭，不充当完整窗口正例 |
 | D1 发布锚点 | Attempt+真实 adapter：rename t=1、guest 采样 t=2、延迟 fsync/校验于 t=80 成功，h_pre=0/h_done=80、完成计数恰 +1；无更新 pin（含同 g）且暂扣替换 ACK 时，工作/采纳须于 t=5000 关闭，不能到 5080；poll/ACK 不改锚点，完成不明隔离 |
 | R2-12 | pre-start A，guest B，Tart T（B≠T）走到成功 scored seal；分别替换 guest/Tart token 均拒绝；绑定夹取期间 T 变化/缺失也拒绝 |
 | 机器消费/R2-9 衔接 | Attempt+真实 MailboxGuestChannel：ready 成功后才消费；login/missing、failed/unknown/cancelled、late、错身份/未发/future seq 不消费；active+revoke 同时验收、重复确认/合法下一项 |
 | ADR 片内到期/不复活 | 锁/发布/解析/消费/取消时到期，保留原 end；新样本、旧 ACK、新 owner proof 均不能越过已到期边界复活，unknown 无评分 |
 
 组合测试使用实际 adapter 和时钟驱动 guest 状态机：读真实七操作请求、生成连续样本、保留 active+revoke、核对 consume，exclusive tmp→rename；时钟推进即检查不可逆过期/整树终止，不能只在收到 lease 时检查。
-覆盖 long-login 与完整 1,560,000ms 窗口成功 trace，核对实际发布≤1959/各流≤2048、guest 年龄/间隙、host pin/end 连续、终止≤6s；不能用即时常量 ACK 或清私有 in-flight 位代替。
-D2 必须组合 Attempt、真实 adapter、自主时钟 guest，重复 900+100ms 与 1023+1023ms 两种周期（含服务成本）：分配前 guest/machine/count gate 均成功，trace 须持续工作、pin/end 无断档，不能以慢路径提前关闭代替可行性证据。
-显式在首次 ACK 前覆盖 lease，断言尚无 current ACK 时门仍通过并发生有权工作；一致旧 ACK 丢弃、首个/替换 ACK 均不授予或延长覆盖，未发/改内容失败。每轮记录 gate 判定与 trace 一致，核对 2246ms 发布界及 ≥2754ms 窗口重叠。
+覆盖 long-login 与完整 `1,560,000ms` 窗口成功 trace：持续有权工作，核对真实发布 `N_lease≤N_inventory≤1959`、两流各≤2048、guest 年龄/间隔、host pin/end 无断档及终止≤6s；不能用即时常量 ACK、清私有 in-flight 位或提前安全关闭代替成功 witness。
+D2-r2 负控须在 test-only 旧调度下重现 [review-r2 表](reviews/2026-11-15-s11-m4b-design-review-r2.md)：独立 lease `800ms` cadence、两腿各 `1023ms`、100ms 服务网格、正发布成本及明确相位（inventory 发布后 1ms 加可见腿，首 lease 于 2103ms 完成，后续 due 落在服务检查后）。逐项核对：
+
+| inventory h_pre | guest g | host 验收 pin | 首份引用此 pin 的 lease 发布 | guest 见该 lease | 旧 guest end |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 1024 | 2101 | 2101 | 3125 | — |
+| 2200 | 3224 | 4301 | 4800 | 5824 | 6024 |
+| 4400 | 5424 | 6501 | 6600 | 7624 | 8224 |
+| 6600 | 7624 | 8701 | 9300 | 10324 | 10424 |
+| 8800 | 9824 | 10901 | 11100 | 12124 | 12624 |
+| 11000 | 12024 | 13101 | 13800 | 14824 | 14824 |
+
+负控在 `14824ms` 因严格旧截止而不可逆停机，即使 host 已换 pin、其 end 仍为 `16000ms`、owner/Stop 允许、计数未耗尽；同 pin 重发 lease 不延 guest end。
+D2 正例必须组合 Attempt、真实 adapter、自主时钟 guest，分别对 `900+100ms` 和 `1023+1023ms` 两腿做服务/发布相位 sweep，含正发布/解析/服务成本及 due 恰落服务检查之后的相位；使用 §8 的 floor 与 fresh-pin 义务，分配前 guest/machine/count gate 均成功。
+每个相位均跑完整窗口：相邻样本≤2246ms、样本到 grant 可见≤2146ms、下份 grant≤`sample_k+4392ms` 且**严格早于旧 guest end**；每份 lease 精确引用实际 pin 的 `(inventory_request_seq,g)`，每个 fresh pin 恰一份、同 g 不再发，义务在下一 step 内完成。host 换 pin 必须在旧 `h_pre+5000ms` 前，保守替换≤4492ms（余508ms）；2754ms 只作发布窗口重叠检查。
+D2 计数另给两腿各 `1ms` 的 fast-visibility 全窗 trace，保留正发布成本及 100ms 服务网格、每轮严格更新样本；验收快不能把请求加速到每200ms。直接核对相邻 inventory `h_pre` 至少800ms、周期位置≤1951，计入 ADR §3 最多8次额外首样本/完成/consume 后≤1959，lease≤inventory；统计真实成功发布而非 poll 次数或慢路径周期推算。
+显式在首次 ACK 前以**新 pin 的 lease**覆盖旧 lease，断言尚无 current ACK 时门仍通过并发生有权工作；一致旧 ACK 丢弃、首个/替换 ACK 均不授予或延长覆盖，未发/改内容失败。每轮记录联合 gate 与实际 trace 一致，测试模型仍仅 test-only；较短 grant、时限等号/超界及计数超限必须在分配前失败。
 另测服务 jitter、ENOENT、跳过 lease 版本、lost ACK 和 g 相同/下降；界内且新 pin 连续的 ACK 丢失不单独阻工，模型外丢样本/抖动、耗尽或真实错误仍按旧 host end/原 end 及时关闭、不复活；这些负例与可行性成功 trace 分开。
+guest-expiry 负控独立丢弃 lease 投递，同时继续新 inventory、host 换 pin、有效 owner 及普通派发尝试；自主 guest 时钟越过旧 `g+5000` 即不可逆撤权，最后1s内释放/杀树（总≤6s），不能以 host 门先失败作为触发条件。再投递迟到 lease、普通请求及合法 ACK，均无到期后普通效果、scope 恢复或树复活。
 保留 M4a 单读 128KiB（含最终稳定帧/失败字节）、R3 截止/字节修复回归；重读和全 attempt 字节统计不能误算成请求数或 attempt 字节上限。
 代码交付需 fmt、`cargo test -p gcu-eval`（含 tart_offline）、Linux/Windows clippy及 macOS 离线测试；检查七方法/v1、精确 lexical exemptions、唯一 permit 构造及无新依赖/线程/启用开关。离线成功不记真实时限已验收。
 
