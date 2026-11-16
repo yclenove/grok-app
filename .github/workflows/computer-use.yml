@@ -105,6 +105,15 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo clippy --locked --workspace --all-targets --features gcu-driver-linux/pipewire -- -D warnings
 
+      # The release binary assembles these routes; keep them compiling.
+      - name: cargo clippy (Linux native release features)
+        if: runner.os == 'Linux'
+        run: cargo clippy --locked -p gcu-cli --all-targets --features gcu-driver-linux/pipewire,gcu-cli/native-x11,gcu-cli/native-wayland -- -D warnings
+
+      - name: cargo clippy (Windows native release features)
+        if: runner.os == 'Windows'
+        run: cargo clippy --locked -p gcu-cli --all-targets --features gcu-cli/native-windows -- -D warnings
+
       - name: cargo clippy (Linux script + eval-autoapprove)
         if: runner.os == 'Linux'
         run: cargo clippy --locked -p gcu-cli -p gcu-mcp -p gcu-script --all-targets --features gcu-cli/script,gcu-cli/eval-autoapprove -- -D warnings
