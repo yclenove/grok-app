@@ -127,8 +127,11 @@ jobs:
         run: |
           set -euo pipefail
           extra=()
+          # Assemble the native driver on every platform; without these the installed
+          # gcu exits 2 instead of driving the desktop (Windows/Linux).
           if [[ "$RUNNER_OS" == macOS ]]; then extra=(--features macos-webview); fi
-          if [[ "$RUNNER_OS" == Linux ]]; then extra=(--features gcu-driver-linux/pipewire); fi
+          if [[ "$RUNNER_OS" == Linux ]]; then extra=(--features gcu-driver-linux/pipewire,native-x11,native-wayland); fi
+          if [[ "$RUNNER_OS" == Windows ]]; then extra=(--features native-windows); fi
           cargo auditable build --locked --release -p gcu-cli --target "$GCU_TARGET" "${extra[@]}"
           cargo run --locked -q -p xtask -- release --stage --tag "$(cat target/release-tag)" --target "$GCU_TARGET" --output target/cu-stage --repository "$RELEASE_REPOSITORY"
       - name: macOS Developer ID and notarization (optional)
@@ -154,6 +157,8 @@ jobs:
           set -euo pipefail
           extra=()
           if [[ "$RUNNER_OS" == macOS ]]; then extra=(--features macos-webview); fi
+          if [[ "$RUNNER_OS" == Linux ]]; then extra=(--features gcu-driver-linux/pipewire,native-x11,native-wayland); fi
+          if [[ "$RUNNER_OS" == Windows ]]; then extra=(--features native-windows); fi
           cargo cyclonedx --format json --target "$GCU_TARGET" --manifest-path crates/gcu-cli/Cargo.toml "${extra[@]}"
           python3 packages/archive.py
       - name: Debian and RPM packages
