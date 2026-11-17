@@ -5,13 +5,17 @@
 
 #[cfg(unix)]
 use gcu_eval::write_reports;
+#[cfg(not(windows))]
+use gcu_eval::UNVERIFIED_BANNER;
 use gcu_eval::{
     block_on, bundled_tasks_dir, host_platform, load_tasks, run_tasks, RunConfig, RunStatus, Task,
-    TaskOutcome, UNVERIFIED_BANNER,
+    TaskOutcome,
 };
 #[cfg(unix)]
 use std::path::Path;
+#[cfg(not(windows))]
 use std::path::PathBuf;
+#[cfg(not(windows))]
 use std::process::Command;
 #[cfg(unix)]
 use std::time::Duration;
@@ -33,6 +37,7 @@ fn scratch(label: &str) -> PathBuf {
     path
 }
 
+#[cfg(not(windows))]
 fn eval_bin() -> &'static str {
     env!("CARGO_BIN_EXE_gcu-eval")
 }
@@ -65,6 +70,9 @@ fn assert_unverified(row: &TaskOutcome) {
     );
 }
 
+// Windows refuses the real driver earlier for its ACL reason, so these
+// non-Windows refusal reasons are never reached there (covered separately).
+#[cfg(not(windows))]
 #[test]
 fn unverified_environment_still_refuses_missing_binaries_and_desktop() {
     let task = named("native-form-01");
@@ -131,6 +139,9 @@ fn unverified_environment_still_refuses_missing_binaries_and_desktop() {
         .is_some_and(|record| !record.is_unverified()));
 }
 
+// Windows refuses the real driver earlier for its ACL reason, so these
+// non-Windows refusal reasons are never reached there (covered separately).
+#[cfg(not(windows))]
 #[test]
 fn unverified_environment_keeps_red_team_not_run() {
     let task = named("redteam-side-01");
@@ -146,6 +157,9 @@ fn unverified_environment_keeps_red_team_not_run() {
     assert_unverified(&row);
 }
 
+// Windows refuses the real driver earlier for its ACL reason, so these
+// non-Windows refusal reasons are never reached there (covered separately).
+#[cfg(not(windows))]
 #[test]
 fn environment_variable_cannot_enable_unverified_environment() {
     let args = [
