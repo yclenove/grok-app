@@ -30,6 +30,10 @@ ignore = [
     "RUSTSEC-2026-0370",
     "RUSTSEC-2026-0371",
     "RUSTSEC-2026-0372",
+    # RUSTSEC-2026-0543: chrono is unmaintained (informational, no vulnerability).
+    # Transitive only, through rmcp 3.9 and schemars 1.2; no safe upgrade today.
+    # Exit: rmcp and schemars drop chrono (or move to jiff/time), then delete this.
+    "RUSTSEC-2026-0543",
 ]
 
 [licenses]
