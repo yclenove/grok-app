@@ -535,8 +535,18 @@ impl ActionRouter {
             )
             .await
             .map_err(|e| CallError::from_driver(&e))?;
-        let id = if let Some(id) = window {
-            id.into()
+        let id = if let Some(query) = window {
+            // Models often pass the title list_windows showed; accept it.
+            let windows = self
+                .native(
+                    session,
+                    &cancel,
+                    false,
+                    self.driver.list_windows(Some(&app)),
+                )
+                .await
+                .map_err(|e| CallError::from_driver(&e))?;
+            window_id_for(&windows, query)
         } else {
             self.native(session, &cancel, false, self.driver.key_window(&app))
                 .await
@@ -592,6 +602,69 @@ impl Drop for CancelOnDrop {
 }
 pub(crate) use super::wire::{error, outcome, result};
 
+/// An exact id wins; otherwise one title equal to `query` (any case), then one
+/// title containing it. Anything else passes through as an id.
+fn window_id_for(windows: &[gcu_protocol::WindowInfo], query: &str) -> String {
+    if windows.iter().any(|w| w.id == query) {
+        return query.into();
+    }
+    let needle = query.to_lowercase();
+    let exact: Vec<_> = windows
+        .iter()
+        .filter(|w| w.title.to_lowercase() == needle)
+        .collect();
+    if let [only] = exact.as_slice() {
+        return only.id.clone();
+    }
+    let partial: Vec<_> = windows
+        .iter()
+        .filter(|w| !needle.is_empty() && w.title.to_lowercase().contains(&needle))
+        .collect();
+    match partial.as_slice() {
+        [only] if exact.is_empty() => only.id.clone(),
+        _ => query.into(),
+    }
+}
+
 pub(crate) fn window_lock_key(win: &WindowRef) -> String {
     format!("{}:{}:{}", win.app.info.id.len(), win.app.info.id, win.id)
+}
+
+#[cfg(test)]
+mod window_query_tests {
+    use super::window_id_for;
+    use gcu_protocol::{Rect, WindowInfo};
+
+    fn win(id: &str, title: &str) -> WindowInfo {
+        WindowInfo {
+            id: id.into(),
+            title: title.into(),
+            frame: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 10.0,
+                h: 10.0,
+            },
+            scale: 1.0,
+            on_current_desktop: None,
+        }
+    }
+
+    #[test]
+    fn window_query_takes_an_id_or_one_matching_title() {
+        let windows = [win("cg:1:9", "GCU Fixture"), win("cg:2:9", "Fixture Log")];
+        assert_eq!(window_id_for(&windows, "cg:2:9"), "cg:2:9");
+        assert_eq!(window_id_for(&windows, "gcu fixture"), "cg:1:9");
+        assert_eq!(window_id_for(&windows, "Log"), "cg:2:9");
+        // Two partial matches stay ambiguous and pass through unchanged.
+        assert_eq!(window_id_for(&windows, "fixture"), "fixture");
+        assert_eq!(
+            window_id_for(&[win("a", "Doc"), win("b", "Doc 2")], "doc"),
+            "a"
+        );
+        assert_eq!(
+            window_id_for(&[win("a", "One"), win("b", "Done")], "on"),
+            "on"
+        );
+    }
 }
