@@ -301,6 +301,7 @@ pub(crate) async fn run_agent(
         Arc::new(MacAudit::load().await.map_err(super::helper_failure)?);
     let uid = current_uid();
     let (host, idle_ms) = load_host(mode).await?;
+    let _pump = (!fake).then(pump_main_run_loop);
     let registry = Arc::new(SessionRegistry::new());
     let (driver, control) = if fake {
         (Arc::new(fake_driver(scene)?) as Arc<dyn Driver>, None)
@@ -518,6 +519,29 @@ fn fake_driver(scene: &str) -> Result<gcu_driver_fake::FakeDriver, Failure> {
             })
         })
         .map_err(|_| Failure::arguments("Unknown or invalid fake scene"))
+}
+
+/// NSWorkspace updates `runningApplications` from main run loop sources, and
+/// this agent's main thread runs Tokio, not a run loop. Without a pump the app
+/// list froze at first use, so a relaunched app (new pid) was unreachable. The
+/// current-thread runtime runs this task on the main thread.
+fn pump_main_run_loop() -> AbortOnDrop {
+    AbortOnDrop(tokio::spawn(async {
+        loop {
+            // SAFETY: reads an immutable CoreFoundation constant.
+            let mode = unsafe { core_foundation::runloop::kCFRunLoopDefaultMode };
+            // Returns at once when no source is ready.
+            core_foundation::runloop::CFRunLoop::run_in_mode(mode, Duration::ZERO, false);
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }))
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Password-database home for the effective uid, not `$HOME`.
