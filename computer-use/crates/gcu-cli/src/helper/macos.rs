@@ -492,7 +492,29 @@ fn fake_driver(scene: &str) -> Result<gcu_driver_fake::FakeDriver, Failure> {
 }
 
 fn socket_path(uid: u32) -> PathBuf {
-    super::identity::ordinary_socket(&std::env::temp_dir(), uid)
+    super::identity::ordinary_socket(&user_temp_dir(), uid)
+}
+
+/// The per-user temp dir from `confstr`, not `$TMPDIR`. Launch Services starts
+/// the agent with the login TMPDIR, while an MCP client may give `gcu mcp` its
+/// own; both sides must still meet at one socket.
+fn user_temp_dir() -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    let mut buf = vec![0u8; 1024];
+    // SAFETY: `buf` is writable for `buf.len()` bytes; confstr writes at most
+    // that many, NUL included, and returns the needed size (0 on error).
+    let needed = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    if needed == 0 || needed > buf.len() {
+        return std::env::temp_dir();
+    }
+    buf.truncate(needed - 1);
+    PathBuf::from(std::ffi::OsString::from_vec(buf))
 }
 
 fn current_uid() -> u32 {
