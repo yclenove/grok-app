@@ -17,6 +17,10 @@ pub async fn release_stopped(api: &dyn EventApi, ledger: &InputLedger, guards: &
     if !guards.is_stopped() {
         return;
     }
+    release_bounded(api, ledger, guards).await;
+}
+
+async fn release_bounded(api: &dyn EventApi, ledger: &InputLedger, guards: &Guards) {
     let deadline = guards.clock.now() + RELEASE_DEADLINE;
     tokio::select! {
         biased;
@@ -78,8 +82,11 @@ pub async fn supervise(
     let mut listener_was_ready = false;
     while !quit.is_cancelled() {
         let ready = guards.stop_available();
-        if listener_was_ready && !ready {
-            guards.request_stop();
+        if listener_was_ready && !ready && !ledger.is_empty() {
+            // A late heartbeat (load, App Nap, sleep) is not a user Stop. Foreground
+            // input already fails closed until the listener is healthy, so release
+            // held input without latching a Stop that only a manual resume clears.
+            release_bounded(api.as_ref(), &ledger, &guards).await;
         }
         listener_was_ready = ready;
         if guards.is_stopped() && !ledger.is_empty() {
