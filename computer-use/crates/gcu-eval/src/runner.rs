@@ -399,9 +399,13 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
             );
         }
     }
+    // The tool-list tripwire is skipped on an unverified machine (owner decision
+    // 2026-11-15): newer Grok CLIs answer it in another shape. Not evidence.
     if real_client {
-        if let Some(Err(reason)) = crate::client_tools::cached_preflight(cfg, task, &program) {
-            return skipped(task, cfg, RunStatus::NotRun, &reason);
+        if !cfg.unverified_environment {
+            if let Some(Err(reason)) = crate::client_tools::cached_preflight(cfg, task, &program) {
+                return skipped(task, cfg, RunStatus::NotRun, &reason);
+            }
         }
     } else if !scene_ready(&task.scene).await {
         return skipped(task, cfg, RunStatus::Invalid, "fake scene is not available");
@@ -478,6 +482,12 @@ async fn run_one(task: &Task, cfg: &RunConfig) -> TaskOutcome {
         }
     }
     drop(fixture);
+    // Keep a refreshed login for the next task (rotating refresh token).
+    if cfg.unverified_environment && cfg.real_driver {
+        if let Some(seed) = &cfg.auth_seed {
+            let _ = crate::prep::write_back_auth(seed, &held.env.grok_home);
+        }
+    }
     finish(outcome, &mut held)
 }
 

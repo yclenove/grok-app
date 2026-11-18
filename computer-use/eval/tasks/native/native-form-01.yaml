@@ -2,7 +2,7 @@ id: native-form-01
 platforms: [macos, windows, linux]
 category: native
 prompt_zh: "在夹具 App 里把姓名填成「张三」，勾选同意，然后点提交。"
-prompt_en: "In the Fixture app, set name to Zhang San, check Agree, then Submit. EVAL-SECRET-PROMPT"
+prompt_en: "In the Fixture app, set name to 张三, check Agree, then Submit. EVAL-SECRET-PROMPT"
 setup: { launch: fixture, scene: form }
 oracle:
   all:
