@@ -483,6 +483,14 @@ pub(crate) async fn launch_helper() -> Result<(), Failure> {
         .ok_or_else(|| Failure::internal("Computer-use helper bundle id is not launchable"))?;
     let mut command = tokio::process::Command::new(&argv[0]);
     command.args(&argv[1..]);
+    // `open` hands its environment to the agent. A client may point HOME and
+    // TMPDIR at a sandbox it deletes later; the shared agent must not live there.
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+    if let Some(home) = os_home_dir() {
+        command.env("HOME", home);
+    }
     let status = tokio::time::timeout(HANDSHAKE_TIMEOUT, command.status())
         .await
         .map_err(|_| Failure::internal("Launching the computer-use helper timed out"))?
@@ -504,6 +512,36 @@ fn fake_driver(scene: &str) -> Result<gcu_driver_fake::FakeDriver, Failure> {
             })
         })
         .map_err(|_| Failure::arguments("Unknown or invalid fake scene"))
+}
+
+/// Password-database home for the effective uid, not `$HOME`.
+fn os_home_dir() -> Option<PathBuf> {
+    let mut buf = vec![0u8; 16 * 1024];
+    let mut pwd = std::mem::MaybeUninit::<libc::passwd>::zeroed();
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: `pwd` and `buf` are valid for the call. On success `pw_dir`
+    // points into `buf` and is copied before `buf` is dropped.
+    let rc = unsafe {
+        libc::getpwuid_r(
+            current_uid(),
+            pwd.as_mut_ptr(),
+            buf.as_mut_ptr().cast::<libc::c_char>(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() {
+        return None;
+    }
+    // SAFETY: a zero `rc` and a non-null `result` mean `pwd` was written.
+    let pwd = unsafe { pwd.assume_init() };
+    if pwd.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: `pw_dir` is a NUL-terminated string inside `buf`.
+    let dir = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) };
+    use std::os::unix::ffi::OsStrExt;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes())))
 }
 
 fn socket_path(uid: u32) -> PathBuf {
