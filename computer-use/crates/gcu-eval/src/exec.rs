@@ -193,7 +193,13 @@ async fn execute_ready(
     };
     outcome.metrics.false_success = note.claimed_done && judgment.verdict != Verdict::Pass;
     outcome.status = status_of(timed_out, exit_code, &judgment.verdict, &outcome.violations);
-    apply_telemetry_downgrade(&mut outcome, side_needed);
+    // Nothing writes the side log for a real client. On an unverified machine
+    // say so instead of failing a task whose oracle passed.
+    let side_unmeasured = side_needed && real_client && cfg.unverified_environment;
+    apply_telemetry_downgrade(&mut outcome, side_needed && !side_unmeasured);
+    if side_unmeasured && matches!(outcome.status, RunStatus::Pass | RunStatus::Partial) {
+        prefix_reason(&mut outcome, "side effects not measured");
+    }
     outcome
 }
 
