@@ -135,7 +135,17 @@ async fn execute_ready(
     let exit_code = finished.exit_code;
     outcome.metrics.duration_ms = elapsed_ms(started);
     let note = read_note(&env.transcript, &mut outcome);
-    let calls = read_calls(&env.tool_log, &mut outcome);
+    let mut calls = read_calls(&env.tool_log, &mut outcome);
+    // The real client writes no producer log; its session events list the MCP calls.
+    if real_client && outcome.assurance.tool_telemetry != TelemetryState::Available {
+        if let Some(events) = client_events(&env.grok_home) {
+            calls = calls_from_events(&events);
+            outcome.assurance.tool_telemetry = TelemetryState::Available;
+            if cfg.unverified_environment {
+                keep_client_session(&events, &task.id);
+            }
+        }
+    }
     fill_calls(&mut outcome, &calls);
     let mut spec = task.oracle.clone();
     for path in &cfg.watch_files {
@@ -469,6 +479,75 @@ fn read_calls(path: &Path, outcome: &mut TaskOutcome) -> Vec<LoggedCall> {
         });
     }
     calls
+}
+
+/// `sessions/<cwd>/<id>/events.jsonl` of the one client session in `grok_home`.
+fn client_events(grok_home: &Path) -> Option<PathBuf> {
+    let mut found = None;
+    for cwd in std::fs::read_dir(grok_home.join("sessions"))
+        .ok()?
+        .flatten()
+    {
+        let Ok(sessions) = std::fs::read_dir(cwd.path()) else {
+            continue;
+        };
+        for session in sessions.flatten() {
+            let events = session.path().join("events.jsonl");
+            if events.is_file() {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(events);
+            }
+        }
+    }
+    found
+}
+
+fn calls_from_events(path: &Path) -> Vec<LoggedCall> {
+    let ReadCap::Bytes(bytes) = read_capped(path) else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let mut calls = Vec::new();
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let field = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
+        if field("type") != Some("mcp_tool_call_completed")
+            || field("server_name") != Some("grok-computer-use")
+        {
+            continue;
+        }
+        let Some(name) = field("tool_name") else {
+            continue;
+        };
+        let ok = value.get("success").and_then(serde_json::Value::as_bool) == Some(true);
+        calls.push(LoggedCall {
+            name: name.to_string(),
+            result: if ok { "ok" } else { "error" }.to_string(),
+            result_bytes: 0,
+        });
+    }
+    calls
+}
+
+/// Debug aid on an unverified machine: `GCU_EVAL_KEEP_CLIENT_DIR` keeps the
+/// client's events and chat history per task. Best effort.
+fn keep_client_session(events: &Path, task_id: &str) {
+    let Some(dir) = std::env::var_os("GCU_EVAL_KEEP_CLIENT_DIR") else {
+        return;
+    };
+    let dir = PathBuf::from(dir).join(task_id);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    if let Some(session) = events.parent() {
+        for name in ["events.jsonl", "chat_history.jsonl"] {
+            let _ = std::fs::copy(session.join(name), dir.join(name));
+        }
+    }
 }
 
 fn result_bytes(value: &serde_json::Value) -> u64 {

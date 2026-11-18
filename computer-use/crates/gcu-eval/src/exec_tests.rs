@@ -119,3 +119,33 @@ fn real_client_builtins_count_as_disabled_tools() {
         assert!(!matches!(class_of(name), Class::Disabled), "{name}");
     }
 }
+
+#[test]
+fn client_session_events_yield_the_gcu_calls_only() {
+    let home = std::env::temp_dir().join(format!("gcu-exec-ev-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    let session = home.join("sessions/%2Fwork/0001");
+    std::fs::create_dir_all(&session).unwrap();
+    let lines = [
+        r#"{"type":"mcp_tool_call_started","server_name":"grok-computer-use","tool_name":"list_apps"}"#,
+        r#"{"type":"mcp_tool_call_completed","server_name":"grok-computer-use","tool_name":"list_apps","success":true}"#,
+        r#"{"type":"tool_completed","tool_name":"use_tool","outcome":"success"}"#,
+        r#"{"type":"mcp_tool_call_completed","server_name":"other","tool_name":"x","success":true}"#,
+        r#"{"type":"mcp_tool_call_completed","server_name":"grok-computer-use","tool_name":"click","success":false}"#,
+        "not json",
+    ];
+    std::fs::write(session.join("events.jsonl"), lines.join("\n")).unwrap();
+    let events = client_events(&home).unwrap();
+    let calls = calls_from_events(&events);
+    let got: Vec<_> = calls
+        .iter()
+        .map(|call| (call.name.as_str(), call.result.as_str()))
+        .collect();
+    assert_eq!(got, [("list_apps", "ok"), ("click", "error")]);
+    // A second session is ambiguous, so the log stays unmeasured.
+    let other = home.join("sessions/%2Fwork/0002");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("events.jsonl"), "").unwrap();
+    assert!(client_events(&home).is_none());
+    let _ = std::fs::remove_dir_all(&home);
+}
