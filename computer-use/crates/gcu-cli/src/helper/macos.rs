@@ -491,6 +491,12 @@ pub(crate) async fn launch_helper() -> Result<(), Failure> {
     if let Some(home) = os_home_dir() {
         command.env("HOME", home);
     }
+    // Eval debug builds read the approval mode in the agent; release rejects it.
+    if cfg!(all(feature = "eval-autoapprove", debug_assertions)) {
+        if let Some(mode) = std::env::var_os("GCU_APPROVAL") {
+            command.env("GCU_APPROVAL", mode);
+        }
+    }
     let status = tokio::time::timeout(HANDSHAKE_TIMEOUT, command.status())
         .await
         .map_err(|_| Failure::internal("Launching the computer-use helper timed out"))?
