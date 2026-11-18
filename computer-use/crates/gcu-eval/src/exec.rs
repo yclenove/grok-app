@@ -548,7 +548,11 @@ fn keep_client_session(events: &Path, task_id: &str) {
             let _ = std::fs::copy(session.join(name), dir.join(name));
         }
         // sessions/<cwd>/<id> -> grok_home/logs/mcp/<server>.stderr.log
-        if let Some(home) = session.parent().and_then(Path::parent).and_then(Path::parent) {
+        if let Some(home) = session
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+        {
             let log = home.join("logs/mcp/grok-computer-use.stderr.log");
             let _ = std::fs::copy(log, dir.join("mcp.stderr.log"));
         }
