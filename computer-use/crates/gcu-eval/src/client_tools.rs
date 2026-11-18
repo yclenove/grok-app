@@ -84,6 +84,7 @@ struct PreflightKey {
     builtin_fake: bool,
     builtin_gcu: bool,
     attested: bool,
+    unverified: bool,
     profile: String,
     model: String,
     approval: String,
@@ -220,6 +221,7 @@ fn preflight_key(program: &ClientProgram, cfg: &RunConfig, task: &Task) -> Prefl
         builtin_fake: cfg.builtin_fake,
         builtin_gcu: cfg.builtin_gcu,
         attested: cfg.attest_disposable_desktop,
+        unverified: cfg.unverified_environment,
         profile: cfg.mcp_profile.clone().unwrap_or_default(),
         model: cfg.model.clone(),
         approval,
@@ -256,7 +258,7 @@ pub(crate) async fn preflight_once(
     if let Some(done) = cfg.preflight.lock().get(&key).cloned() {
         return done;
     }
-    let result = run_preflight(program, work, env, &cfg.model).await;
+    let result = run_preflight(program, cfg, work, env).await;
     cfg.preflight.lock().insert(key, result.clone());
     result
 }
@@ -354,17 +356,17 @@ fn is_expected(name: &str) -> bool {
 
 async fn run_preflight(
     program: &ClientProgram,
+    cfg: &RunConfig,
     work: &Path,
     env: &BTreeMap<String, String>,
-    model: &str,
 ) -> Result<(), String> {
     let ClientProgram::External(path) = program else {
         return Err("the fake client runs in process".into());
     };
-    let launch = crate::boundary::admit_client(path).map_err(str::to_string)?;
+    let launch = crate::boundary::admit_client_for_run(cfg, path).map_err(str::to_string)?;
     let mut command = crate::boundary::tokio_command(launch);
     command
-        .args(preflight_args(model))
+        .args(preflight_args(&cfg.model))
         .env_clear()
         .envs(env)
         .current_dir(work);

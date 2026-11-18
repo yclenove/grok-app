@@ -197,7 +197,13 @@ async fn relocated_checks(root: &Path) {
                 assert_eq!(row.assurance.state_telemetry, TelemetryState::Unknown);
                 assert_eq!(row.assurance.transcript_telemetry, TelemetryState::Unknown);
                 if index == 0 {
-                    let gate = row.assurance.environment.as_ref().unwrap();
+                    let gate = row
+                        .assurance
+                        .environment
+                        .as_ref()
+                        .unwrap()
+                        .contract()
+                        .unwrap();
                     assert_eq!(gate.refusal, Some(Refusal::ProviderUnavailable));
                     assert!(!gate.complete());
                     assert!(row.assurance.inherited_stop.is_none());

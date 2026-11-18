@@ -98,7 +98,13 @@ async fn check() {
                     assert!(row.env_destroyed);
                     assert_eq!(row.assurance.tool_telemetry, TelemetryState::Unknown);
                     if index == 0 {
-                        let gate = row.assurance.environment.as_ref().unwrap();
+                        let gate = row
+                            .assurance
+                            .environment
+                            .as_ref()
+                            .unwrap()
+                            .contract()
+                            .unwrap();
                         assert_eq!(gate.refusal, Some(Refusal::ProviderUnavailable));
                         assert!(!gate.complete());
                         assert!(row.assurance.inherited_stop.is_none());

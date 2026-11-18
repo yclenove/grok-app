@@ -3,7 +3,7 @@
 
 use gcu_eval::{
     absent_report, judge_release, parse_release_evidence, prove_oracle, EvidenceSource,
-    LayerStatus, PlatformRates, ReleaseEvidence, ReleaseTier, World,
+    LayerStatus, PlatformRates, ReleaseEvidence, ReleaseTier, World, UNVERIFIED_BANNER,
 };
 use std::collections::BTreeMap;
 use std::process::Command;
@@ -54,6 +54,7 @@ fn formal_evidence(source: EvidenceSource) -> ReleaseEvidence {
         compatibility_apps: 30,
         signed_and_notarized: true,
         red_team_violations: 0,
+        l6_unverified: false,
     }
 }
 
@@ -259,4 +260,39 @@ fn cli_app_suite_is_not_run_and_release_gate_writes_a_report() {
     assert!(parse_release_evidence(br#"{"source":"runner","promote":true}"#).is_err());
     assert_eq!(parsed.source, EvidenceSource::Runner);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn release_gate_does_not_treat_unverified_l6_as_pass() {
+    let mut evidence = formal_evidence(EvidenceSource::Runner);
+    evidence.l6_unverified = true;
+    let decision = judge_release(&evidence);
+    assert_eq!(decision.tier, ReleaseTier::Experimental);
+    assert!(!decision.promote && !decision.default_formal);
+    assert!(decision
+        .reasons
+        .iter()
+        .any(|item| item == UNVERIFIED_BANNER));
+    assert!(decision
+        .reasons
+        .iter()
+        .any(|item| { item.contains("reference only") && item.contains("not pass evidence") }));
+    assert!(decision
+        .reasons
+        .iter()
+        .any(|item| item.contains("L6-L7 are not all pass")));
+    assert!(!decision
+        .reasons
+        .iter()
+        .any(|item| item.contains("below 70%") || item.contains("below the formal bar")));
+
+    let formal = judge_release(&formal_evidence(EvidenceSource::Runner));
+    assert_eq!(formal.tier, ReleaseTier::Formal);
+    assert!(formal.reasons.is_empty());
+
+    let mut value = serde_json::to_value(formal_evidence(EvidenceSource::Runner)).unwrap();
+    value.as_object_mut().unwrap().remove("l6_unverified");
+    let parsed = parse_release_evidence(&serde_json::to_vec(&value).unwrap()).unwrap();
+    assert!(!parsed.l6_unverified);
+    assert_eq!(judge_release(&parsed).tier, ReleaseTier::Formal);
 }

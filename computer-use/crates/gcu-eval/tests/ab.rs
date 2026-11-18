@@ -474,7 +474,7 @@ fn refused_launches_keep_not_run_provenance_and_environment_evidence() {
             assert_eq!(trial.status, RunStatus::NotRun);
             assert!(trial.rounds.is_none() && trial.tokens_in.is_none());
             if let Some(environment) = &trial.environment_contract {
-                assert!(!environment.complete());
+                assert!(!environment.contract().unwrap().complete());
                 assert!(trial.inherited_stop.is_none());
             } else {
                 let stop = trial.inherited_stop.as_ref().unwrap();
@@ -674,7 +674,7 @@ fn auto_approval_feature_does_not_promote_desktop_provenance() {
     for trial in report.trials {
         assert_eq!(trial.status, RunStatus::NotRun);
         if let Some(environment) = &trial.environment_contract {
-            assert!(!environment.complete());
+            assert!(!environment.contract().unwrap().complete());
         } else {
             assert_eq!(
                 trial.inherited_stop.as_ref().unwrap().environment_refusal,

@@ -7,6 +7,9 @@ use crate::runner::{SuiteReport, TaskOutcome, TelemetryState};
 use crate::Error;
 use std::path::{Path, PathBuf};
 
+/// Printed on stdout and at the top of a summary when the operator opted in.
+pub const UNVERIFIED_BANNER: &str = "UNVERIFIED ENVIRONMENT: results are not isolation evidence";
+
 /// Files written for one suite.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportPaths {
@@ -45,7 +48,7 @@ pub fn write_reports(dir: &Path, report: &SuiteReport) -> Result<ReportPaths, Er
         write_json(&dir.join(name), &task_body(task))?;
     }
     let summary_json = dir.join("summary.json");
-    write_json(&summary_json, &summary_body(report))?;
+    write_summary(&summary_json, report)?;
     let html = dir.join("summary.html");
     std::fs::write(&html, render_html(report))
         .map_err(|err| Error::msg(format!("write {}: {err}", html.display())))?;
@@ -125,7 +128,13 @@ pub fn render_html(report: &SuiteReport) -> String {
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>gcu-eval</title>",
     );
     body.push_str("<style>body{font-family:sans-serif}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px;text-align:left}</style>");
-    body.push_str("</head><body><h1>gcu-eval</h1>");
+    body.push_str("</head><body>");
+    if suite_unverified(report) {
+        body.push_str("<p><strong>");
+        body.push_str(UNVERIFIED_BANNER);
+        body.push_str("</strong></p>");
+    }
+    body.push_str("<h1>gcu-eval</h1>");
     body.push_str("<p>Isolated GROK_HOME is not an environment boundary. Real evaluation remains stopped: no trusted disposable provider is installed. checked machine evidence and attested external evidence are both required; critical unknown and failed cleanup are not_run (ADR 0017).</p>");
     push_p(&mut body, "model", &report.model);
     push_p(&mut body, "platform", &report.platform);
@@ -217,6 +226,15 @@ fn fmt_num(value: f64) -> String {
     format!("{value:.4}")
 }
 
+fn suite_unverified(report: &SuiteReport) -> bool {
+    report.tasks.iter().any(|task| {
+        task.assurance
+            .environment
+            .as_ref()
+            .is_some_and(crate::disposable::EnvironmentRecord::is_unverified)
+    })
+}
+
 fn summary_body(report: &SuiteReport) -> serde_json::Value {
     serde_json::json!({
         "model": report.model,
@@ -232,6 +250,29 @@ fn summary_body(report: &SuiteReport) -> serde_json::Value {
         },
         "tasks": report.tasks.iter().map(task_body).collect::<Vec<_>>(),
     })
+}
+
+/// `serde_json::Map` is a `BTreeMap` here, so a field cannot be forced first.
+/// The notice is written as the first line of the object instead.
+fn write_summary(path: &Path, report: &SuiteReport) -> Result<(), Error> {
+    let mut bytes = serde_json::to_vec_pretty(&summary_body(report))
+        .map_err(|err| Error::msg(format!("json: {err}")))?;
+    if suite_unverified(report) {
+        let notice = serde_json::to_string(UNVERIFIED_BANNER)
+            .map_err(|err| Error::msg(format!("json: {err}")))?;
+        let line = format!("  \"notice\": {notice},\n");
+        let header = b"{\n";
+        if !bytes.starts_with(header) {
+            return Err(Error::msg("summary json is not an object"));
+        }
+        let mut out = Vec::with_capacity(bytes.len() + line.len());
+        out.extend_from_slice(header);
+        out.extend_from_slice(line.as_bytes());
+        out.extend_from_slice(&bytes[header.len()..]);
+        bytes = out;
+    }
+    std::fs::write(path, bytes)
+        .map_err(|err| Error::msg(format!("write {}: {err}", path.display())))
 }
 
 /// Read trials back from a summary written by [`write_reports`].

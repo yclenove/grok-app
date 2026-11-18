@@ -329,6 +329,88 @@ impl CleanupReceipt {
     }
 }
 
+/// Operator mark. The JSON value is the string `unverified`.
+///
+/// This is not [`EvidenceState::Checked`] and not [`EvidenceState::Attested`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnverifiedEnvironment;
+
+impl Serialize for UnverifiedEnvironment {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str("unverified")
+    }
+}
+
+impl<'de> Deserialize<'de> for UnverifiedEnvironment {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value == "unverified" {
+            Ok(Self)
+        } else {
+            Err(serde::de::Error::custom(
+                "environment status must be unverified",
+            ))
+        }
+    }
+}
+
+/// Row environment evidence.
+///
+/// A contract report stays the ADR 0017 object. The operator opt-in serializes
+/// as the string `unverified` and is not isolation evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EnvironmentRecord {
+    /// Operator-prepared machine. Not a contract report.
+    Unverified(UnverifiedEnvironment),
+    /// ADR 0017 contract report.
+    Contract(EnvironmentReport),
+}
+
+impl EnvironmentRecord {
+    /// The operator mark.
+    #[must_use]
+    pub fn unverified() -> Self {
+        Self::Unverified(UnverifiedEnvironment)
+    }
+
+    /// Contract report, when this value is one.
+    #[must_use]
+    pub fn contract(&self) -> Option<&EnvironmentReport> {
+        match self {
+            Self::Contract(report) => Some(report),
+            Self::Unverified(_) => None,
+        }
+    }
+
+    /// True for the operator mark.
+    #[must_use]
+    pub fn is_unverified(&self) -> bool {
+        matches!(self, Self::Unverified(_))
+    }
+
+    /// Incomplete contract evidence keeps the row `not_run`. The operator mark does not.
+    #[must_use]
+    pub fn blocks_run(&self) -> bool {
+        match self {
+            Self::Unverified(_) => false,
+            Self::Contract(report) => !report.complete(),
+        }
+    }
+}
+
+impl From<EnvironmentReport> for EnvironmentRecord {
+    fn from(report: EnvironmentReport) -> Self {
+        Self::Contract(report)
+    }
+}
+
 /// Contract report. Passing this contract alone never enables real evaluation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvironmentReport {
@@ -577,11 +659,18 @@ pub(crate) fn unavailable_report() -> EnvironmentReport {
     .1
 }
 
-/// The runnable local surface is fake-only. No flag can substitute a provider.
+/// The runnable local surface is fake-only, except an explicit unverified opt-in.
+///
+/// `--unverified-environment` on `--env local` lets a real driver or real client
+/// pass this gate. It does not install a provider. Scoped engines, `--env desktop`,
+/// and a fake driver with only an external backend stay refused.
 pub(crate) fn refuse_unsupported_launch(
     task: &crate::tasks::Task,
     cfg: &crate::RunConfig,
 ) -> Option<crate::TaskOutcome> {
+    if crate::boundary::allows_unverified_local_real(cfg) {
+        return None;
+    }
     if cfg.run_local
         && crate::boundary::admit_launch(
             cfg.grok_bin.as_deref(),
@@ -596,7 +685,7 @@ pub(crate) fn refuse_unsupported_launch(
     let mut row = crate::runner::blank(&task.id, &task.category, cfg, crate::RunStatus::NotRun,
         "environment_contract: provider_unavailable; --attest-disposable-desktop is not evidence; real evaluation remains stopped");
     row.env_destroyed = true; // Nothing was allocated, including no credential copy.
-    row.assurance.environment = Some(unavailable_report());
+    row.assurance.environment = Some(unavailable_report().into());
     Some(row)
 }
 

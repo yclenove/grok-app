@@ -11,8 +11,10 @@
 //! homes, including the OS account home, `GROK_HOME`, `CODEX_HOME`, absolute
 //! `GEMINI_*` and `CLAUDE_*` values, and `~/.grok-app` (`agent-home`,
 //! `agent-home-official`). A pathname check is not proof of an evaluation-only
-//! identity. A Unix process group is not an OS sandbox. Real mode stays
-//! unavailable until an external isolation boundary (ADR 0017) exists.
+//! identity. A Unix process group is not an OS sandbox.
+//! `--unverified-environment` runs a real client on a one-shot machine the
+//! operator prepared. That switch does not provide isolation evidence, and
+//! its rows are not section 8 L6 pass evidence.
 //! Client version pinning and an offline tool-policy check are not implemented.
 
 #![deny(missing_docs)]
@@ -68,7 +70,9 @@ pub use release::{
     COMPATIBILITY_FLOOR, NATIVE_PREVIEW_BP, OVERALL_MAC_BP, OVERALL_OTHER_BP, SECURITY_ITEMS,
     SECURITY_PREVIEW,
 };
-pub use report::{escape_html, render_html, trials_from_summary, write_reports, ReportPaths};
+pub use report::{
+    escape_html, render_html, trials_from_summary, write_reports, ReportPaths, UNVERIFIED_BANNER,
+};
 pub use runner::{
     block_on, bundled_tasks_dir, child_env_keys, host_platform, parse_approval, path_under_configs,
     run_tasks, user_config_dirs, ApprovalMode, Assurance, DesktopProvider, EnvProvider,

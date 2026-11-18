@@ -298,7 +298,7 @@ fn expiry_during_prepare_or_authentication_refuses_at_final_admission() {
                 crate::RunStatus::Pass,
                 "",
             );
-            row.assurance.environment = Some(report);
+            row.assurance.environment = Some(report.into());
             assert_eq!(row.status_for_report(), crate::RunStatus::NotRun);
         }
     }
@@ -632,7 +632,7 @@ fn json_html_and_ab_reports_render_all_rows_and_sanitized_cleanup() {
         crate::RunStatus::NotRun,
         "offline fake evidence",
     );
-    row.assurance.environment = Some(environment);
+    row.assurance.environment = Some(environment.into());
     let report = crate::SuiteReport {
         model: "fake".into(),
         platform: cfg.platform,
@@ -722,7 +722,7 @@ fn critical_unknown_or_incomplete_receipt_never_renders_or_scores_as_pass() {
             crate::RunStatus::Pass,
             "",
         );
-        row.assurance.environment = Some(environment);
+        row.assurance.environment = Some(environment.into());
         assert!(!row.scored());
         assert_eq!(crate::summarize(&[row.clone()]).passed, 0);
         assert_eq!(
@@ -785,7 +785,13 @@ fn runner_gate_stops_the_whole_suite_without_local_fallback_or_credential_copy()
                 assert!(row.home.is_empty() && row.grok_home.is_empty());
                 if index == 0 {
                     assert_eq!(
-                        row.assurance.environment.as_ref().unwrap().refusal,
+                        row.assurance
+                            .environment
+                            .as_ref()
+                            .unwrap()
+                            .contract()
+                            .unwrap()
+                            .refusal,
                         Some(Refusal::ProviderUnavailable)
                     );
                     assert!(row.assurance.inherited_stop.is_none());
@@ -842,7 +848,13 @@ fn runner_gate_stops_the_whole_suite_without_local_fallback_or_credential_copy()
         assert_eq!(trial.status, crate::RunStatus::NotRun);
         if index == 0 {
             assert_eq!(
-                trial.environment_contract.as_ref().unwrap().refusal,
+                trial
+                    .environment_contract
+                    .as_ref()
+                    .unwrap()
+                    .contract()
+                    .unwrap()
+                    .refusal,
                 Some(Refusal::ProviderUnavailable)
             );
         } else {
@@ -860,4 +872,26 @@ fn runner_gate_stops_the_whole_suite_without_local_fallback_or_credential_copy()
     assert_eq!(parsed.trials[0].status, crate::RunStatus::NotRun);
     assert_eq!(parsed.trials[1].status, crate::RunStatus::NotRun);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unverified_mark_serializes_as_its_own_status() {
+    let record = EnvironmentRecord::unverified();
+    let json = serde_json::to_value(&record).unwrap();
+    assert_eq!(json, serde_json::json!("unverified"));
+    let back: EnvironmentRecord = serde_json::from_value(json).unwrap();
+    assert!(back.is_unverified());
+    assert!(back.contract().is_none());
+    assert!(!back.blocks_run());
+    let report = unavailable_report();
+    let wrapped = EnvironmentRecord::from(report.clone());
+    let object = serde_json::to_value(&wrapped).unwrap();
+    assert!(object.is_object());
+    assert_ne!(object, serde_json::json!("unverified"));
+    assert!(object.get("refusal").is_some());
+    let parsed: EnvironmentRecord = serde_json::from_value(object).unwrap();
+    assert!(!parsed.is_unverified());
+    assert_eq!(parsed.contract().unwrap().refusal, report.refusal);
+    assert!(serde_json::from_str::<EnvironmentRecord>("\"checked\"").is_err());
+    assert!(serde_json::from_str::<EnvironmentRecord>("\"attested\"").is_err());
 }
