@@ -407,6 +407,11 @@ impl ActionRouter {
             Ok(f) => f,
             Err(code) => return self.failure(session, action, code, &win).await,
         };
+        // A real driver retires the previous read's handles on every read; aim
+        // the request at the same element in the recheck read.
+        if let Ok(again) = route::plan(call, &gate, &before, self.driver.capabilities()) {
+            plan.request = again.request;
+        }
         let epoch = self.binding_epoch(&approved);
         return crate::scope::with_attempt(epoch, async {
             if let Err(code) = self.check_boundary(session).await {
