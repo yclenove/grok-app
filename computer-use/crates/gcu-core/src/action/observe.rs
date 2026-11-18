@@ -104,6 +104,20 @@ impl ActionRouter {
             )
             .await
             .map_err(|e| CallError::from_driver(&e))?;
+        if mode != ScreenshotMode::Explicit(false) && raw.incomplete.is_some() {
+            // An app may still be building its tree on first access; give it
+            // one more read before a screenshot is refused as handoff_required.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            raw = self
+                .native(
+                    session,
+                    &cancel,
+                    false,
+                    self.driver.snapshot_tree(win, opts, &cancel),
+                )
+                .await
+                .map_err(|e| CallError::from_driver(&e))?;
+        }
         if let Some(root) = &mut raw.root {
             refresh_tree(root, Fingerprint::default(), 0);
         }
