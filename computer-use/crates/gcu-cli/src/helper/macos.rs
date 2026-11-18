@@ -424,8 +424,8 @@ pub(crate) async fn run_stdio_proxy(
     let uid = current_uid();
     let path = socket_path(uid);
     let control = Arc::new(Sigterm);
-    for _ in 0..3 {
-        let config = ClientConfig {
+    let attach = || {
+        client_attach(ClientConfig {
             path: path.clone(),
             audit: Arc::clone(&audit),
             uid,
@@ -434,12 +434,25 @@ pub(crate) async fn run_stdio_proxy(
             turn_idle_secs,
             control: Arc::clone(&control) as Arc<dyn super::client::ProcessControl>,
             handshake_timeout: HANDSHAKE_TIMEOUT,
-        };
-        match client_attach(config).await {
+        })
+    };
+    for _ in 0..3 {
+        match attach().await {
             Ok(ClientAttach::Ready(stream)) => return bridge_stdio(stream).await,
             Ok(ClientAttach::Replaced { .. }) | Err(HelperError::Absent | HelperError::Version) => {
                 launch_helper().await?;
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                // A cold start (first launch, fresh signature checks) takes
+                // seconds: wait for the socket rather than relaunching at once.
+                let launched = tokio::time::Instant::now();
+                while launched.elapsed() < HANDSHAKE_TIMEOUT {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    match attach().await {
+                        Ok(ClientAttach::Ready(stream)) => return bridge_stdio(stream).await,
+                        Err(HelperError::Absent) => {}
+                        Ok(ClientAttach::Replaced { .. }) | Err(HelperError::Version) => break,
+                        Err(error) => return Err(super::helper_failure(error)),
+                    }
+                }
             }
             Err(error) => return Err(super::helper_failure(error)),
         }
@@ -463,8 +476,10 @@ async fn bridge_stdio(stream: tokio::net::UnixStream) -> Result<u8, Failure> {
 }
 
 pub(crate) async fn launch_helper() -> Result<(), Failure> {
-    let bundle = current_bundle_id();
-    let argv = launch_command(bundle)
+    // Start this exact bundle: a bundle id resolves to any registered copy.
+    let argv = super::auth::own_app_path()
+        .and_then(|app| super::auth::launch_command_at(&app))
+        .or_else(|| launch_command(current_bundle_id()))
         .ok_or_else(|| Failure::internal("Computer-use helper bundle id is not launchable"))?;
     let mut command = tokio::process::Command::new(&argv[0]);
     command.args(&argv[1..]);
