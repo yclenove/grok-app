@@ -56,6 +56,24 @@ impl State {
     pub(super) fn resolve_running(&mut self, query: &AppQuery) -> Result<Option<AppRef>> {
         MacGate::engine(self.api.engine_euid()?)?;
         let running_apps = self.api.running_apps()?;
+        // Models shorten names ("Fixture" for "gcu-fixture"). With no exact
+        // match, one partial name match stands in as that app's own path.
+        let mut query = query.clone();
+        if !running_apps
+            .iter()
+            .any(|app| apps::matches_running(app, &query.0))
+        {
+            let partial: Vec<_> = running_apps
+                .iter()
+                .filter(|app| apps::matches_running_partly(app, &query.0))
+                .collect();
+            if let [only] = partial.as_slice() {
+                if let Some(path) = fact_path(&only.bundle_path, &only.executable_path) {
+                    query = AppQuery::from(path);
+                }
+            }
+        }
+        let query = &query;
         let mut running = Vec::new();
         for app in &running_apps {
             if !apps::matches_running(app, &query.0) {
