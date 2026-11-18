@@ -62,7 +62,8 @@ async fn execute_ready(
     let approval = child_approval(task, cfg);
     outcome.approval_mode = approval.unwrap_or("").to_string();
     let env_map = child_env(task, cfg, env, approval);
-    if real_client {
+    // Skipped on an unverified machine, like the cached check in the runner.
+    if real_client && !cfg.unverified_environment {
         let checked = Instant::now();
         if let Err(reason) =
             crate::client_tools::preflight_once(&program, cfg, task, &env.work, &env_map).await
