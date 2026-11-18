@@ -63,6 +63,27 @@ impl ActionRouter {
         mode: ScreenshotMode,
         opts: &TreeOpts,
     ) -> Result<Fresh, CallError> {
+        // The UI may change between the reads that bracket a capture. That is
+        // not the caller's stale state, so read again before reporting it.
+        let mut retries = 2;
+        loop {
+            match self.read_once(session, win, mode, opts).await {
+                Err(CallError::Code(ErrorCode::StaleScreenshot | ErrorCode::StaleGeometry))
+                    if retries > 0 =>
+                {
+                    retries -= 1;
+                }
+                other => return other,
+            }
+        }
+    }
+    async fn read_once(
+        &self,
+        session: &Session,
+        win: &WindowRef,
+        mode: ScreenshotMode,
+        opts: &TreeOpts,
+    ) -> Result<Fresh, CallError> {
         let producing = crate::scope::expected_epoch().or_else(|| {
             self.lease.as_ref().and_then(|lease| {
                 lease
