@@ -148,7 +148,7 @@ impl ActionRouter {
                 .await
                 .map_err(|e| CallError::from_driver(&e))?;
             captured_at = self.epoch.elapsed();
-            let after = self
+            let mut after = self
                 .native(
                     session,
                     &cancel,
@@ -171,6 +171,12 @@ impl ActionRouter {
                 return Err(ErrorCode::StaleGeometry.into());
             }
             capture = Some(shot);
+            // Same content, but a real driver retired the first read's handles
+            // when it took this one; later actions must carry these.
+            if let Some(root) = &mut after.root {
+                refresh_tree(root, Fingerprint::default(), 0);
+            }
+            raw = after;
         } else {
             captured_at = self.epoch.elapsed();
         }
