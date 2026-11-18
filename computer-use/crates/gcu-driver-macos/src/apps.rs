@@ -174,6 +174,17 @@ pub fn matches_running(app: &RunningApp, query: &str) -> bool {
         || file_name(&app.bundle_path).is_some_and(|name| eq(name.trim_end_matches(".app"), &query))
 }
 
+/// Looser fallback for a name query: the display or executable name contains
+/// it ("Fixture" for "gcu-fixture"). Callers accept it only when one app matches.
+pub fn matches_running_partly(app: &RunningApp, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    if query.chars().count() < 3 || query.contains('/') {
+        return false;
+    }
+    app.localized_name.to_lowercase().contains(&query)
+        || file_name(&app.executable_path).is_some_and(|name| name.to_lowercase().contains(&query))
+}
+
 /// Build a resolved row. `pid` is set for a running process and absent for Spotlight.
 pub fn resolved_from(facts: BundleFacts, pid: Option<u32>, hidden: bool) -> Result<ResolvedApp> {
     let name = display_name(

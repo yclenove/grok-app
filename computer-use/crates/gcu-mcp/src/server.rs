@@ -313,6 +313,18 @@ impl Server {
                 let _: ListAppsParams = params::parse(arguments)?;
                 let produced = this.results.opened_stamp();
                 let apps = this.router.list_apps(&this.session).await?;
+                // Signing identity is for authorization, not the model; it made
+                // a normal desktop's list overflow the result budget.
+                let apps: Vec<_> = apps
+                    .into_iter()
+                    .map(|app| {
+                        let mut row = json!({"id": app.id, "name": app.name});
+                        if let Some(pid) = app.pid {
+                            row["pid"] = pid.into();
+                        }
+                        row
+                    })
+                    .collect();
                 Ok(this
                     .results
                     .discovery(json!({"apps": apps}), produced)

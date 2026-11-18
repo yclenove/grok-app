@@ -9,7 +9,9 @@ use block2::RcBlock;
 use gcu_core::driver::{DriverError, Result};
 use objc2::msg_send;
 use objc2::rc::{autoreleasepool, Retained};
-use objc2_app_kit::{NSRunningApplication, NSWorkspace, NSWorkspaceOpenConfiguration};
+use objc2_app_kit::{
+    NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace, NSWorkspaceOpenConfiguration,
+};
 use objc2_foundation::{NSArray, NSBundle, NSError, NSString, NSURL};
 use sha2::{Digest, Sha256};
 use std::{
@@ -26,6 +28,11 @@ const MAX_HASH_BYTES: u64 = 512 * 1024 * 1024;
 pub(super) fn running_apps() -> Result<Vec<RunningApp>> {
     let mut out = Vec::new();
     for app in running_applications() {
+        // Daemons and agents with no UI cannot be operated; listing them only
+        // buries the user's apps for the model.
+        if app.activationPolicy() == NSApplicationActivationPolicy::Prohibited {
+            continue;
+        }
         if let Some(row) = running_from(&app) {
             out.push(row);
         }
