@@ -301,6 +301,7 @@ pub(crate) async fn run_agent(
         Arc::new(MacAudit::load().await.map_err(super::helper_failure)?);
     let uid = current_uid();
     let (host, idle_ms) = load_host(mode).await?;
+    let _pump = (!fake).then(pump_main_run_loop);
     let registry = Arc::new(SessionRegistry::new());
     let (driver, control) = if fake {
         (Arc::new(fake_driver(scene)?) as Arc<dyn Driver>, None)
@@ -424,8 +425,8 @@ pub(crate) async fn run_stdio_proxy(
     let uid = current_uid();
     let path = socket_path(uid);
     let control = Arc::new(Sigterm);
-    for _ in 0..3 {
-        let config = ClientConfig {
+    let attach = || {
+        client_attach(ClientConfig {
             path: path.clone(),
             audit: Arc::clone(&audit),
             uid,
@@ -434,12 +435,25 @@ pub(crate) async fn run_stdio_proxy(
             turn_idle_secs,
             control: Arc::clone(&control) as Arc<dyn super::client::ProcessControl>,
             handshake_timeout: HANDSHAKE_TIMEOUT,
-        };
-        match client_attach(config).await {
+        })
+    };
+    for _ in 0..3 {
+        match attach().await {
             Ok(ClientAttach::Ready(stream)) => return bridge_stdio(stream).await,
             Ok(ClientAttach::Replaced { .. }) | Err(HelperError::Absent | HelperError::Version) => {
                 launch_helper().await?;
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                // A cold start (first launch, fresh signature checks) takes
+                // seconds: wait for the socket rather than relaunching at once.
+                let launched = tokio::time::Instant::now();
+                while launched.elapsed() < HANDSHAKE_TIMEOUT {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    match attach().await {
+                        Ok(ClientAttach::Ready(stream)) => return bridge_stdio(stream).await,
+                        Err(HelperError::Absent) => {}
+                        Ok(ClientAttach::Replaced { .. }) | Err(HelperError::Version) => break,
+                        Err(error) => return Err(super::helper_failure(error)),
+                    }
+                }
             }
             Err(error) => return Err(super::helper_failure(error)),
         }
@@ -463,11 +477,27 @@ async fn bridge_stdio(stream: tokio::net::UnixStream) -> Result<u8, Failure> {
 }
 
 pub(crate) async fn launch_helper() -> Result<(), Failure> {
-    let bundle = current_bundle_id();
-    let argv = launch_command(bundle)
+    // Start this exact bundle: a bundle id resolves to any registered copy.
+    let argv = super::auth::own_app_path()
+        .and_then(|app| super::auth::launch_command_at(&app))
+        .or_else(|| launch_command(current_bundle_id()))
         .ok_or_else(|| Failure::internal("Computer-use helper bundle id is not launchable"))?;
     let mut command = tokio::process::Command::new(&argv[0]);
     command.args(&argv[1..]);
+    // `open` hands its environment to the agent. A client may point HOME and
+    // TMPDIR at a sandbox it deletes later; the shared agent must not live there.
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+    if let Some(home) = os_home_dir() {
+        command.env("HOME", home);
+    }
+    // Eval debug builds read the approval mode in the agent; release rejects it.
+    if cfg!(all(feature = "eval-autoapprove", debug_assertions)) {
+        if let Some(mode) = std::env::var_os("GCU_APPROVAL") {
+            command.env("GCU_APPROVAL", mode);
+        }
+    }
     let status = tokio::time::timeout(HANDSHAKE_TIMEOUT, command.status())
         .await
         .map_err(|_| Failure::internal("Launching the computer-use helper timed out"))?
@@ -491,8 +521,83 @@ fn fake_driver(scene: &str) -> Result<gcu_driver_fake::FakeDriver, Failure> {
         .map_err(|_| Failure::arguments("Unknown or invalid fake scene"))
 }
 
+/// NSWorkspace updates `runningApplications` from main run loop sources, and
+/// this agent's main thread runs Tokio, not a run loop. Without a pump the app
+/// list froze at first use, so a relaunched app (new pid) was unreachable. The
+/// current-thread runtime runs this task on the main thread.
+fn pump_main_run_loop() -> AbortOnDrop {
+    AbortOnDrop(tokio::spawn(async {
+        loop {
+            // SAFETY: reads an immutable CoreFoundation constant.
+            let mode = unsafe { core_foundation::runloop::kCFRunLoopDefaultMode };
+            // Returns at once when no source is ready.
+            core_foundation::runloop::CFRunLoop::run_in_mode(mode, Duration::ZERO, false);
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }))
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Password-database home for the effective uid, not `$HOME`.
+fn os_home_dir() -> Option<PathBuf> {
+    let mut buf = vec![0u8; 16 * 1024];
+    let mut pwd = std::mem::MaybeUninit::<libc::passwd>::zeroed();
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: `pwd` and `buf` are valid for the call. On success `pw_dir`
+    // points into `buf` and is copied before `buf` is dropped.
+    let rc = unsafe {
+        libc::getpwuid_r(
+            current_uid(),
+            pwd.as_mut_ptr(),
+            buf.as_mut_ptr().cast::<libc::c_char>(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() {
+        return None;
+    }
+    // SAFETY: a zero `rc` and a non-null `result` mean `pwd` was written.
+    let pwd = unsafe { pwd.assume_init() };
+    if pwd.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: `pw_dir` is a NUL-terminated string inside `buf`.
+    let dir = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) };
+    use std::os::unix::ffi::OsStrExt;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes())))
+}
+
 fn socket_path(uid: u32) -> PathBuf {
-    super::identity::ordinary_socket(&std::env::temp_dir(), uid)
+    super::identity::ordinary_socket(&user_temp_dir(), uid)
+}
+
+/// The per-user temp dir from `confstr`, not `$TMPDIR`. Launch Services starts
+/// the agent with the login TMPDIR, while an MCP client may give `gcu mcp` its
+/// own; both sides must still meet at one socket.
+fn user_temp_dir() -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    let mut buf = vec![0u8; 1024];
+    // SAFETY: `buf` is writable for `buf.len()` bytes; confstr writes at most
+    // that many, NUL included, and returns the needed size (0 on error).
+    let needed = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    if needed == 0 || needed > buf.len() {
+        return std::env::temp_dir();
+    }
+    buf.truncate(needed - 1);
+    PathBuf::from(std::ffi::OsString::from_vec(buf))
 }
 
 fn current_uid() -> u32 {

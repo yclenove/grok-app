@@ -63,6 +63,27 @@ impl ActionRouter {
         mode: ScreenshotMode,
         opts: &TreeOpts,
     ) -> Result<Fresh, CallError> {
+        // The UI may change between the reads that bracket a capture. That is
+        // not the caller's stale state, so read again before reporting it.
+        let mut retries = 2;
+        loop {
+            match self.read_once(session, win, mode, opts).await {
+                Err(CallError::Code(ErrorCode::StaleScreenshot | ErrorCode::StaleGeometry))
+                    if retries > 0 =>
+                {
+                    retries -= 1;
+                }
+                other => return other,
+            }
+        }
+    }
+    async fn read_once(
+        &self,
+        session: &Session,
+        win: &WindowRef,
+        mode: ScreenshotMode,
+        opts: &TreeOpts,
+    ) -> Result<Fresh, CallError> {
         let producing = crate::scope::expected_epoch().or_else(|| {
             self.lease.as_ref().and_then(|lease| {
                 lease
@@ -83,6 +104,20 @@ impl ActionRouter {
             )
             .await
             .map_err(|e| CallError::from_driver(&e))?;
+        if mode != ScreenshotMode::Explicit(false) && raw.incomplete.is_some() {
+            // An app may still be building its tree on first access; give it
+            // one more read before a screenshot is refused as handoff_required.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            raw = self
+                .native(
+                    session,
+                    &cancel,
+                    false,
+                    self.driver.snapshot_tree(win, opts, &cancel),
+                )
+                .await
+                .map_err(|e| CallError::from_driver(&e))?;
+        }
         if let Some(root) = &mut raw.root {
             refresh_tree(root, Fingerprint::default(), 0);
         }
@@ -113,7 +148,7 @@ impl ActionRouter {
                 .await
                 .map_err(|e| CallError::from_driver(&e))?;
             captured_at = self.epoch.elapsed();
-            let after = self
+            let mut after = self
                 .native(
                     session,
                     &cancel,
@@ -136,6 +171,12 @@ impl ActionRouter {
                 return Err(ErrorCode::StaleGeometry.into());
             }
             capture = Some(shot);
+            // Same content, but a real driver retired the first read's handles
+            // when it took this one; later actions must carry these.
+            if let Some(root) = &mut after.root {
+                refresh_tree(root, Fingerprint::default(), 0);
+            }
+            raw = after;
         } else {
             captured_at = self.epoch.elapsed();
         }

@@ -134,7 +134,7 @@ pub(crate) fn check(gate: &Gate, fresh: &Fresh) -> Result<(), ErrorCode> {
             .raw
             .root
             .as_ref()
-            .and_then(|root| by_handle(root, &element.handle))
+            .and_then(|root| by_handle(root, element))
             .ok_or(ErrorCode::StaleElement)?;
         // Fingerprints include name + native identifier + ancestor path. Compare
         // exact role/frame too, since fingerprints quantize physical frames.
@@ -150,7 +150,7 @@ pub(crate) fn check(gate: &Gate, fresh: &Fresh) -> Result<(), ErrorCode> {
             .raw
             .root
             .as_ref()
-            .and_then(|root| by_handle(root, &element.handle))
+            .and_then(|root| by_handle(root, element))
             .ok_or(ErrorCode::StaleScreenshot)?;
         if live.fingerprint != element.fingerprint
             || live.role != element.role
@@ -169,13 +169,46 @@ pub(crate) fn check(gate: &Gate, fresh: &Fresh) -> Result<(), ErrorCode> {
     }
     Ok(())
 }
-fn by_handle<'a>(root: &'a RawNode, handle: &crate::model::NativeHandle) -> Option<&'a RawNode> {
-    if root.handle.ptr_eq(handle) {
-        return Some(root);
+fn by_handle<'a>(root: &'a RawNode, element: &IndexedElement) -> Option<&'a RawNode> {
+    let mut nodes = Vec::new();
+    collect(root, &mut nodes);
+    live_match(nodes, |node: &&'a RawNode| *node, element)
+}
+
+fn collect<'a>(node: &'a RawNode, out: &mut Vec<&'a RawNode>) {
+    out.push(node);
+    for child in &node.children {
+        collect(child, out);
     }
-    root.children
-        .iter()
-        .find_map(|child| by_handle(child, handle))
+}
+
+/// The node in a fresh read that is the snapshot `element`. Drivers that reuse
+/// handles match by handle. Real drivers mint new handles on every read, so
+/// otherwise take the one node with the same identity: fingerprint (name,
+/// identifier, ancestor path, quantized frame) plus exact role and frame.
+pub(crate) fn live_match<'a, T>(
+    nodes: Vec<T>,
+    raw: impl Fn(&T) -> &'a RawNode,
+    element: &IndexedElement,
+) -> Option<T> {
+    let mut same = Vec::new();
+    for node in nodes {
+        let live = raw(&node);
+        if live.handle.ptr_eq(&element.handle) {
+            return Some(node);
+        }
+        if live.fingerprint == element.fingerprint
+            && live.role == element.role
+            && live.frame == element.frame
+        {
+            same.push(node);
+        }
+    }
+    if same.len() == 1 {
+        same.pop()
+    } else {
+        None
+    }
 }
 pub(crate) fn element_index(action: &BatchStep) -> Option<u32> {
     match action {
@@ -200,5 +233,69 @@ fn coordinates(action: &BatchStep) -> (Vec<(f64, f64)>, Option<&str>) {
             a.screenshot_id.as_deref(),
         ),
         _ => (Vec::new(), None),
+    }
+}
+
+#[cfg(test)]
+mod live_match_tests {
+    use super::{by_handle, IndexedElement};
+    use crate::model::{Fingerprint, NativeHandle, NodeFlags, RawNode, Role, States};
+    use gcu_protocol::Rect;
+
+    fn node(name: &str, fingerprint: u64, children: Vec<RawNode>) -> RawNode {
+        RawNode {
+            role: Role::Button,
+            native_role: "AXButton".into(),
+            subrole: None,
+            name: Some(name.into()),
+            value: None,
+            description: None,
+            placeholder: None,
+            help: None,
+            identifier: None,
+            states: States::default(),
+            actions: Default::default(),
+            frame: Some(Rect {
+                x: 1.0,
+                y: 2.0,
+                w: 3.0,
+                h: 4.0,
+            }),
+            text_extras: None,
+            url: None,
+            children,
+            handle: NativeHandle::new(name.to_string()),
+            fingerprint: Fingerprint(fingerprint),
+        }
+    }
+
+    fn element(of: &RawNode) -> IndexedElement {
+        IndexedElement {
+            handle: of.handle.clone(),
+            fingerprint: of.fingerprint,
+            role: of.role,
+            frame: of.frame,
+            flags: NodeFlags::default(),
+            parent: None,
+        }
+    }
+
+    #[test]
+    fn a_fresh_read_with_new_handles_still_finds_the_element() {
+        let before = node("root", 1, vec![node("ok", 2, Vec::new())]);
+        let wanted = element(&before.children[0]);
+        // Same identity, newly minted handles, as a real driver returns.
+        let fresh = node("root", 1, vec![node("ok", 2, Vec::new())]);
+        let live = by_handle(&fresh, &wanted).unwrap();
+        assert_eq!(live.name.as_deref(), Some("ok"));
+        // A changed fingerprint or two identical candidates are stale.
+        let moved = node("root", 1, vec![node("ok", 3, Vec::new())]);
+        assert!(by_handle(&moved, &wanted).is_none());
+        let twins = node(
+            "root",
+            1,
+            vec![node("ok", 2, Vec::new()), node("ok", 2, Vec::new())],
+        );
+        assert!(by_handle(&twins, &wanted).is_none());
     }
 }
