@@ -208,6 +208,10 @@ impl ApprovalProvider for Approvals {
     }
 
     async fn handoff(&self, _: &SessionCtx, app: &AppInfo, reason: HandoffReason, cancel: &Cancel) {
+        // Nobody answers a handoff card in an eval run; do not block until timeout.
+        if eval_policy(self.mode.as_deref()).is_some() {
+            return;
+        }
         let config = self.policy.load();
         handoff_for_test(
             app,

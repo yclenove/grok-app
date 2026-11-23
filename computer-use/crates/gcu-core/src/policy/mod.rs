@@ -448,9 +448,12 @@ impl PolicyEngine {
                 ErrorCode::ElementNotActionable,
                 "execution surfaces reject input",
             )),
-            surface::SurfaceGate::Uncertain => Some(PolicyDecision::Handoff(HandoffReason::Other(
-                "could not classify the execution surface".into(),
-            ))),
+            // Refuse at once instead of a handoff that blocks until timeout: the
+            // model can retry with a target, and no input reaches the window.
+            surface::SurfaceGate::Uncertain => Some(refuse(
+                ErrorCode::ElementNotActionable,
+                "this window mixes execution and other UI; target the control with element_index",
+            )),
             surface::SurfaceGate::Remote | surface::SurfaceGate::Clear => None,
         }
     }
