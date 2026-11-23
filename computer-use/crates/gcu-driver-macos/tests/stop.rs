@@ -207,7 +207,7 @@ async fn unknown_activity_never_guesses_idle_or_activates() {
 }
 
 #[tokio::test]
-async fn independent_watchdog_listener_stall_latches_and_releases() {
+async fn independent_watchdog_listener_stall_releases_without_latching() {
     let f = Fixture::new();
     let press = input::plan_click(
         &target(false),
@@ -234,9 +234,11 @@ async fn independent_watchdog_listener_stall_latches_and_releases() {
     while f.events.calls().is_empty() {
         tokio::task::yield_now().await;
     }
-    assert!(f.latch.is_stopped());
+    // A stall is not a user Stop: no durable latch, but foreground stays closed.
+    assert!(!f.latch.is_stopped());
     assert!(f.ledger.is_empty());
     assert_eq!(f.monitor.ms_since_physical_input(), None);
+    assert!(!f.guards.foreground_ready());
     quit.cancel();
     service.await.unwrap();
 }
