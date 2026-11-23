@@ -3,6 +3,7 @@ import { trAccount } from "./account";
 import { trAutomations } from "./automations";
 import { trChat } from "./chat";
 import { trComposer } from "./composer";
+import { trComputerUse } from "./computer-use";
 import { trCore } from "./core";
 import { trDoctor } from "./doctor";
 import { trErrors } from "./errors";
@@ -31,6 +32,7 @@ export const tr: Record<MessageKey, string> = {
   ...trAutomations,
   ...trChat,
   ...trComposer,
+  ...trComputerUse,
   ...trCore,
   ...trDoctor,
   ...trErrors,
