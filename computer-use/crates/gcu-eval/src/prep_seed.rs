@@ -62,6 +62,49 @@ pub(crate) fn seed_auth_in(
     Ok(())
 }
 
+/// Write a refreshed login back to the seed after an unverified run.
+///
+/// The Grok login rotates its refresh token, so the copy a task used is the
+/// only valid one once it refreshed. Only used with `--unverified-environment`.
+/// The task copy is read with the same checks as the seed; the seed file is
+/// replaced through a new `0600` temporary file and a rename. Returns whether
+/// anything was written.
+pub(crate) fn write_back_auth(seed: &Path, grok_home: &Path) -> Result<bool, Error> {
+    if symlink_path(seed)? {
+        return Err(Error::msg("refusing a symlink auth seed"));
+    }
+    let used = grok_home.join("auth.json");
+    if symlink_path(&used)? || std::fs::symlink_metadata(&used).is_err() {
+        return Ok(false);
+    }
+    let fresh = read_seed_file(&used)?;
+    let target = seed.join("auth.json");
+    if symlink_path(&target)? {
+        return Err(Error::msg("refusing a symlink auth seed"));
+    }
+    if read_seed_file(&target).is_ok_and(|old| old == fresh) {
+        return Ok(false);
+    }
+    let tmp = seed.join(".auth.json.writeback");
+    let _ = std::fs::remove_file(&tmp);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&tmp)
+        .map_err(|_| Error::msg("could not write the auth seed back"))?;
+    file.write_all(&fresh)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| Error::msg("could not write the auth seed back"))?;
+    drop(file);
+    std::fs::rename(&tmp, &target).map_err(|_| Error::msg("could not write the auth seed back"))?;
+    Ok(true)
+}
+
 const SEED_MAX: u64 = 1024 * 1024;
 
 fn read_seed_file(path: &Path) -> Result<Vec<u8>, Error> {
