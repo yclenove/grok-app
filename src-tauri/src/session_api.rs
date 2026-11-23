@@ -1,17 +1,25 @@
-//! Local session API for external integrations (#626 first slice).
+//! Local session API for external integrations.
 //!
 //! Loopback HTTP (127.0.0.1, token file) + CLI that talks to the same Host
-//! helpers. Lists Grok App sessions and continues one by id + prompt.
-//! Does not create a new chat. Does not interrupt a running turn.
+//! helpers.
+//! - List Grok App sessions and continue one by id + prompt (#626).
+//!   A running turn is queued, not interrupted.
+//! - Create a new App session in an already-trusted project and start its
+//!   first turn (#1356). Does not add projects and does not bypass the trust gate.
+//!   Optional `worktreePath` binds cwd to an existing worktree of that project
+//!   (`set_session_worktree`); it does not create a worktree or a new project.
+//! - Read one session's turn phase (#1356).
 
+use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::future::Future;
+use std::path::{Component, Path as StdPath, PathBuf};
+use std::sync::{Arc, LazyLock};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -19,15 +27,29 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use crate::paths::{app_data_root, ensure_app_dirs};
-use crate::session_manager::SessionManager;
-use crate::store::{self, SessionMeta};
+use crate::session_fsm::SessionState;
+use crate::session_manager::{ExternalSessionSignals, SessionManager};
+use crate::store::{self, ChatMessageStored, SessionMeta};
 
 pub const SESSIONS_FLAG: &str = "--sessions";
 pub const SESSION_SEND_FLAG: &str = "--session-send";
+pub const SESSION_NEW_FLAG: &str = "--session-new";
 pub const PROMPT_FLAG: &str = "--prompt";
 pub const PROMPT_FILE_FLAG: &str = "--prompt-file";
 pub const IDEMPOTENCY_FLAG: &str = "--idempotency-key";
 pub const INCLUDE_ARCHIVED_FLAG: &str = "--include-archived";
+pub const PROJECT_FLAG: &str = "--project";
+pub const WORKTREE_FLAG: &str = "--worktree";
+pub const TITLE_FLAG: &str = "--title";
+pub const SOURCE_FLAG: &str = "--source";
+
+/// `source` on `POST /v1/sessions`: length cap, charset `[a-z0-9_-]`.
+const SOURCE_MAX_LEN: usize = 32;
+/// Last assistant preview on `GET /v1/sessions/{id}`.
+pub const LAST_ASSISTANT_MAX_CHARS: usize = 2000;
+/// Namespace create keys inside the shared idempotency file so they do not
+/// replay a continue-turn result (or the other way around).
+const CREATE_IDEMPOTENCY_PREFIX: &str = "session-new:";
 
 const ENDPOINT_FILE: &str = "session-api.json";
 const IDEMPOTENCY_FILE: &str = "session-api-idempotency.json";
@@ -44,6 +66,8 @@ pub const CLI_HTTP_TIMEOUT_SECS: u64 = DISPATCH_TURN_TIMEOUT_SECS + 5;
 const HOST_BUSY_RETRY_MESSAGE: &str = "host busy: connect in progress, retry later";
 
 static QUEUE_FILE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+static CREATE_IN_FLIGHT: LazyLock<std::sync::Mutex<HashSet<String>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
 
 fn drain_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -83,6 +107,57 @@ pub struct TurnRequest {
     pub prompt: String,
     #[serde(default)]
     pub idempotency_key: Option<String>,
+}
+
+/// Turn phase for `GET /v1/sessions/{id}` (#1356).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiSessionPhase {
+    Running,
+    Idle,
+    NeedsInput,
+    Error,
+}
+
+/// `POST /v1/sessions` body. `worktreePath`, when set, is the cwd of the new
+/// chat. It must already be a worktree of the trusted project (or that
+/// project's own root). This route never creates a worktree or a project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSessionBody {
+    #[serde(default)]
+    pub project_path: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    pub prompt: String,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub worktree_path: Option<String>,
+}
+
+/// `GET /v1/sessions/{id}`. Token and cost are omitted: the host has no
+/// persisted per-session aggregate (live spend lives in the UI only).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionDetail {
+    pub id: String,
+    pub title: String,
+    pub project_id: Option<String>,
+    pub project_name: Option<String>,
+    pub status: ApiSessionPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_assistant_message: Option<String>,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Canonical cwd when this chat is bound to a git worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,7 +362,7 @@ pub async fn drain_ready_external_queues(app: &AppHandle, mgr: &Arc<SessionManag
         let Some(head) = take_persisted_head(&item.session_id) else {
             continue;
         };
-        let prepared = match prepare_send(&head.session_id, &head.prompt) {
+        let prepared = match prepare_send(&head.session_id, &head.prompt, "external") {
             Ok(p) => p,
             Err(e) => {
                 if e.status == TurnStatus::NotFound {
@@ -592,13 +667,53 @@ pub enum CliCommand {
         prompt: String,
         idempotency_key: Option<String>,
     },
+    New {
+        project: String,
+        title: Option<String>,
+        prompt: String,
+        idempotency_key: Option<String>,
+        source: Option<String>,
+        worktree: Option<String>,
+    },
 }
 
 pub fn parse_cli(argv: &[String]) -> Result<CliCommand, String> {
     let args: Vec<&str> = argv.iter().skip(1).map(String::as_str).collect();
-    if args.contains(&SESSIONS_FLAG) {
+    let has_list = args.contains(&SESSIONS_FLAG);
+    let has_send = args.contains(&SESSION_SEND_FLAG);
+    let has_new = args.contains(&SESSION_NEW_FLAG);
+    let kinds = usize::from(has_list) + usize::from(has_send) + usize::from(has_new);
+    if kinds > 1 {
+        return Err("pass only one of --sessions, --session-send, --session-new".into());
+    }
+    if has_list {
         return Ok(CliCommand::List {
             include_archived: args.contains(&INCLUDE_ARCHIVED_FLAG),
+        });
+    }
+    if has_new {
+        let project = flag_value(&args, PROJECT_FLAG).ok_or_else(|| {
+            "usage: --session-new --project <path> [--worktree <path>] --prompt <text> | --prompt-file <path>"
+                .to_string()
+        })?;
+        if project.trim().is_empty() {
+            return Err("empty --project".into());
+        }
+        let worktree = flag_value(&args, WORKTREE_FLAG);
+        if worktree.as_deref().is_some_and(|s| s.trim().is_empty()) {
+            return Err("empty --worktree".into());
+        }
+        let prompt = parse_prompt(&args)?;
+        if prompt.trim().is_empty() {
+            return Err("empty prompt".into());
+        }
+        return Ok(CliCommand::New {
+            project,
+            title: flag_value(&args, TITLE_FLAG),
+            prompt,
+            idempotency_key: flag_value(&args, IDEMPOTENCY_FLAG),
+            source: flag_value(&args, SOURCE_FLAG),
+            worktree,
         });
     }
     if let Some(i) = args.iter().position(|a| *a == SESSION_SEND_FLAG) {
@@ -826,7 +941,14 @@ pub fn classify_send_error(err: &str) -> TurnStatus {
     TurnStatus::Error
 }
 
-pub fn prepare_send(session_id: &str, prompt: &str) -> Result<PreparedSend, Box<TurnResult>> {
+/// Check a session can take a turn and build the request for it. `origin` names
+/// who asked (`pr_monitor`, `external`): an injected prompt is remembered so the
+/// transcript can show an automatic follow-up instead of the user's own words.
+pub fn prepare_send(
+    session_id: &str,
+    prompt: &str,
+    origin: &'static str,
+) -> Result<PreparedSend, Box<TurnResult>> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
         return Err(Box::new(TurnResult::fail(
@@ -887,6 +1009,7 @@ pub fn prepare_send(session_id: &str, prompt: &str) -> Result<PreparedSend, Box<
         session_id: meta.id,
         project_path,
         prompt: prompt.to_string(),
+        origin,
     })
 }
 
@@ -894,6 +1017,9 @@ pub struct PreparedSend {
     pub session_id: String,
     pub project_path: Option<String>,
     pub prompt: String,
+    /// Who asked for this turn (`pr_monitor`, `external`): a prompt the Host
+    /// injected is marked (`auto_wake`) instead of reading as the user's.
+    pub origin: &'static str,
 }
 
 pub async fn with_dispatch_timeout_for<F>(
@@ -930,9 +1056,16 @@ pub async fn dispatch_turn(
     req: PreparedSend,
 ) -> TurnResult {
     let sid = req.session_id.clone();
+    // Held across the awaits below. The turn runner takes the arm while it
+    // writes the user row. Drop clears it when this future is cancelled (the
+    // dispatch budget) or when connect/send fails, so a turn that never went
+    // out cannot mark the user's next message. A queued turn keeps the arm:
+    // its row is written when the queue drains.
+    let armed = crate::injected_prompts::ArmedSend::hold(&sid, req.origin);
     // Mid-turn (drawing / tools / permission): do not connect-steal or send.
     // Push onto the same composer follow-up queue the GUI already shows.
     if mgr.session_turn_busy(&sid) {
+        armed.keep();
         return enqueue_while_busy(app, &sid, &req.prompt);
     }
     if let Err(e) = mgr
@@ -943,6 +1076,7 @@ pub async fn dispatch_turn(
     }
     // Connect can race a new turn; treat that as queue, never interrupt.
     if mgr.session_turn_busy(&sid) {
+        armed.keep();
         return enqueue_while_busy(app, &sid, &req.prompt);
     }
     match mgr
@@ -955,9 +1089,12 @@ pub async fn dispatch_turn(
         )
         .await
     {
+        // The journal takes the marker before this returns. Drop then finds an
+        // empty slot, including when the send returned without taking it.
         Ok(_) => TurnResult::started(sid),
         Err(e) => {
             if classify_send_error(&e) == TurnStatus::Busy {
+                armed.keep();
                 return enqueue_while_busy(app, &sid, &req.prompt);
             }
             TurnResult::fail(classify_send_error(&e), sid, e)
@@ -986,7 +1123,7 @@ async fn handle_turn(
             return (status_for(&prev.status), Json(prev));
         }
     }
-    let prepared = match prepare_send(session_id, &body.prompt) {
+    let prepared = match prepare_send(session_id, &body.prompt, "external") {
         Ok(p) => p,
         Err(mut r) => {
             r.idempotency_key = key.clone();
@@ -1017,6 +1154,529 @@ fn status_for(s: &TurnStatus) -> StatusCode {
     }
 }
 
+struct ParsedCreate {
+    project: store::Project,
+    title: Option<String>,
+    prompt: String,
+    idempotency_key: Option<String>,
+    source: Option<String>,
+    /// Canonical worktree directory plus the branch name from porcelain, when known.
+    worktree: Option<ResolvedWorktree>,
+}
+
+struct ResolvedWorktree {
+    path: String,
+    branch: Option<String>,
+}
+
+struct CreateInFlight {
+    key: String,
+}
+
+fn in_flight_lock() -> std::sync::MutexGuard<'static, HashSet<String>> {
+    CREATE_IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+}
+
+impl Drop for CreateInFlight {
+    fn drop(&mut self) {
+        in_flight_lock().remove(&self.key);
+    }
+}
+
+async fn claim_create_idempotency(key: &str) -> CreateInFlight {
+    loop {
+        {
+            let mut guard = in_flight_lock();
+            if guard.insert(key.to_string()) {
+                return CreateInFlight {
+                    key: key.to_string(),
+                };
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+fn fail_create(message: impl Into<String>) -> TurnResult {
+    TurnResult::fail(TurnStatus::Error, "", message)
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn normalize_source(raw: Option<&str>) -> Result<Option<String>, String> {
+    let Some(s) = non_empty(raw) else {
+        return Ok(None);
+    };
+    let ok = s.len() <= SOURCE_MAX_LEN
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+    if !ok {
+        return Err(format!(
+            "source must be 1–{SOURCE_MAX_LEN} characters of [a-z0-9_-]"
+        ));
+    }
+    Ok(Some(s.to_string()))
+}
+
+fn normalize_path_key(path: &str) -> String {
+    path.trim().trim_end_matches(['/', '\\']).replace('\\', "/")
+}
+
+fn project_paths_match(stored: &str, given: &str) -> bool {
+    if normalize_path_key(stored) == normalize_path_key(given) {
+        return true;
+    }
+    match (
+        StdPath::new(stored).canonicalize(),
+        StdPath::new(given).canonicalize(),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Existing index row only. Never calls `add_project`.
+fn resolve_trusted_project(
+    project_id: Option<&str>,
+    project_path: Option<&str>,
+) -> Result<store::Project, String> {
+    if project_id.is_none() && project_path.is_none() {
+        return Err("projectPath or projectId is required".into());
+    }
+    let projects = store::load_projects();
+    let project = if let Some(id) = project_id {
+        let Some(found) = projects.iter().find(|p| p.id == id) else {
+            return Err(format!("project not found: {id}"));
+        };
+        if let Some(path) = project_path {
+            if !project_paths_match(&found.path, path) {
+                return Err("projectPath does not match projectId".into());
+            }
+        }
+        found.clone()
+    } else {
+        let path = project_path.unwrap_or("");
+        let mut hits: Vec<&store::Project> = projects
+            .iter()
+            .filter(|p| project_paths_match(&p.path, path))
+            .collect();
+        if hits.is_empty() {
+            return Err(format!("project not found: {path}"));
+        }
+        if hits.len() > 1 {
+            let exact: Vec<&store::Project> = hits
+                .iter()
+                .copied()
+                .filter(|p| normalize_path_key(&p.path) == normalize_path_key(path))
+                .collect();
+            if exact.len() == 1 {
+                hits = exact;
+            } else {
+                return Err(format!("project path is ambiguous: {path}"));
+            }
+        }
+        hits[0].clone()
+    };
+    if project.is_legacy_general() {
+        return Err(format!("project not found: {}", project.id));
+    }
+    if !project.trusted {
+        return Err(format!("project not trusted: {}", project.name));
+    }
+    if !project.path_ok && !project.is_ssh_remote() {
+        return Err(format!("project path missing: {}", project.name));
+    }
+    Ok(project)
+}
+
+fn parse_create_body(body: &CreateSessionBody) -> Result<ParsedCreate, Box<TurnResult>> {
+    let prompt = body.prompt.trim();
+    if prompt.is_empty() {
+        return Err(Box::new(fail_create("empty prompt")));
+    }
+    let source = match normalize_source(body.source.as_deref()) {
+        Ok(source) => source,
+        Err(err) => return Err(Box::new(fail_create(err))),
+    };
+    // Shape checks do not need the project index. A missing or relative path
+    // fails here, before any store read, and is not recorded as idempotency.
+    let canonical = match canonicalize_worktree_arg(non_empty(body.worktree_path.as_deref())) {
+        Ok(path) => path,
+        Err(err) => return Err(Box::new(fail_create(err))),
+    };
+    let project = match resolve_trusted_project(
+        non_empty(body.project_id.as_deref()),
+        non_empty(body.project_path.as_deref()),
+    ) {
+        Ok(project) => project,
+        Err(err) => return Err(Box::new(fail_create(err))),
+    };
+    let worktree = match canonical {
+        Some(path) => match match_project_worktree(&project, &path) {
+            Ok(worktree) => Some(worktree),
+            Err(err) => return Err(Box::new(fail_create(err))),
+        },
+        None => None,
+    };
+    Ok(ParsedCreate {
+        project,
+        title: non_empty(body.title.as_deref()).map(str::to_string),
+        prompt: prompt.to_string(),
+        idempotency_key: non_empty(body.idempotency_key.as_deref()).map(str::to_string),
+        source,
+        worktree,
+    })
+}
+
+/// Absolute, no `..`, exists, and canonicalizes to a directory.
+/// `None` means the client did not send a worktree.
+fn canonicalize_worktree_arg(raw: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    if raw.contains('\0') {
+        return Err("worktreePath is not a valid path".into());
+    }
+    let path = StdPath::new(raw);
+    if !path.is_absolute() {
+        return Err("worktreePath must be an absolute path".into());
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err("worktreePath must not contain ..".into());
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("worktreePath does not exist: {raw}"));
+        }
+        Err(err) => return Err(format!("worktreePath could not be read: {err}")),
+    }
+    let canon = match path.canonicalize() {
+        Ok(path) => path,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("worktreePath does not exist: {raw}"));
+        }
+        Err(err) => return Err(format!("worktreePath could not be resolved: {err}")),
+    };
+    if !canon.is_dir() {
+        return Err("worktreePath is not a directory".into());
+    }
+    Ok(Some(canon))
+}
+
+/// Test stand-in for `git worktree list --porcelain`. Keyed by the project
+/// path string `list_project_worktrees` receives, so other tests still call git.
+#[cfg(test)]
+static WORKTREE_PORCELAIN_OVERRIDE: std::sync::Mutex<Option<(String, String)>> =
+    std::sync::Mutex::new(None);
+
+/// Read-only. Never `git worktree add` — this slice does not create checkouts.
+fn list_project_worktrees(
+    project_path: &str,
+) -> Result<Vec<crate::commands::GitWorktreeEntry>, String> {
+    #[cfg(test)]
+    if let Some(raw) = {
+        let guard = WORKTREE_PORCELAIN_OVERRIDE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        guard
+            .as_ref()
+            .filter(|(key, _)| key == project_path)
+            .map(|(_, raw)| raw.clone())
+    } {
+        return Ok(crate::commands::parse_worktree_porcelain(&raw));
+    }
+    let out = crate::process_util::command("git")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(["-C", project_path, "worktree", "list", "--porcelain"])
+        .output()
+        .map_err(|err| format!("git worktree list failed: {err}"))?;
+    if !out.status.success() {
+        let err_owned = String::from_utf8_lossy(&out.stderr);
+        let err = err_owned.trim();
+        return Err(if err.is_empty() {
+            "git worktree list failed".into()
+        } else {
+            let short: String = err.chars().take(200).collect();
+            format!("git worktree list failed: {short}")
+        });
+    }
+    let raw = String::from_utf8_lossy(&out.stdout);
+    Ok(crate::commands::parse_worktree_porcelain(&raw))
+}
+
+fn same_dir(listed: &str, target: &StdPath) -> bool {
+    StdPath::new(listed)
+        .canonicalize()
+        .ok()
+        .is_some_and(|path| path == target)
+}
+
+/// `canon` is already canonical. It must be the project root or one of
+/// `git worktree list --porcelain` for that repository.
+fn match_project_worktree(
+    project: &store::Project,
+    canon: &StdPath,
+) -> Result<ResolvedWorktree, String> {
+    if project.is_ssh_remote() {
+        return Err("worktreePath is not supported for SSH projects".into());
+    }
+    let project_canon = StdPath::new(&project.path)
+        .canonicalize()
+        .map_err(|_| format!("project path missing: {}", project.name))?;
+    let stored = canon.to_string_lossy().into_owned();
+    let listed = match list_project_worktrees(&project.path) {
+        Ok(listed) => listed,
+        Err(err) => {
+            if canon == project_canon {
+                return Ok(ResolvedWorktree {
+                    path: stored,
+                    branch: None,
+                });
+            }
+            return Err(format!(
+                "worktreePath is not a worktree of this project: {err}"
+            ));
+        }
+    };
+    if let Some(entry) = listed.iter().find(|entry| same_dir(&entry.path, canon)) {
+        return Ok(ResolvedWorktree {
+            path: stored,
+            branch: entry.branch.clone(),
+        });
+    }
+    if canon == project_canon {
+        return Ok(ResolvedWorktree {
+            path: stored,
+            branch: None,
+        });
+    }
+    Err(format!(
+        "worktreePath is not a worktree of this project: {stored}"
+    ))
+}
+
+/// Same row the sidebar's first send writes: `session_create` →
+/// `store::create_session` + `bind_default_workspace_if_unbound`.
+fn materialize_session(parsed: &ParsedCreate) -> Result<SessionMeta, (Option<String>, String)> {
+    let meta = store::create_session(Some(parsed.project.id.clone()), parsed.title.clone(), false)
+        .map_err(|err| (None, err))?;
+    let mut meta =
+        crate::workspace_store::bind_default_workspace_if_unbound(&meta.id).unwrap_or(meta);
+    if let Some(source) = parsed.source.clone() {
+        meta.source = Some(source);
+        if let Err(err) = store::update_session_meta(&meta) {
+            return Err((Some(meta.id), err));
+        }
+    }
+    // Same row the sidebar writes for a worktree chat. `prepare_send` prefers
+    // this path over the project folder, so the turn's cwd is the worktree
+    // while `project_id` (sidebar group) stays the trusted project.
+    if let Some(wt) = &parsed.worktree {
+        meta = store::set_session_worktree(&meta.id, Some(wt.path.clone()), wt.branch.clone())
+            .map_err(|err| (Some(meta.id.clone()), err))?;
+    }
+    Ok(meta)
+}
+
+fn remember_create(key: Option<&str>, result: &TurnResult) {
+    if result.session_id.is_empty() {
+        return;
+    }
+    if let Some(key) = key {
+        remember_idempotency(key, result);
+    }
+}
+
+/// Create an App session and start its first turn.
+///
+/// Idempotency reuses the continue-turn store (`session-new:` prefix). A key is
+/// recorded only after the session row exists, including `retry_later` / connect
+/// errors, so a retry cannot open a second chat. Validation failures are not
+/// recorded: the caller can fix the body or trust the project and reuse the key.
+pub async fn execute_create<D, Fut, N>(
+    body: CreateSessionBody,
+    dispatch: D,
+    on_created: N,
+) -> (StatusCode, TurnResult)
+where
+    D: FnOnce(String, String) -> Fut,
+    Fut: Future<Output = TurnResult>,
+    N: FnOnce(&str),
+{
+    let parsed = match parse_create_body(&body) {
+        Ok(parsed) => parsed,
+        Err(result) => return (status_for(&result.status), *result),
+    };
+    let storage_key = parsed
+        .idempotency_key
+        .as_ref()
+        .map(|key| format!("{CREATE_IDEMPOTENCY_PREFIX}{key}"));
+    if let Some(key) = storage_key.as_deref() {
+        if let Some(prev) = recall_idempotency(key) {
+            return (status_for(&prev.status), prev);
+        }
+    }
+    let _guard = match storage_key.as_deref() {
+        Some(key) => Some(claim_create_idempotency(key).await),
+        None => None,
+    };
+    if let Some(key) = storage_key.as_deref() {
+        if let Some(prev) = recall_idempotency(key) {
+            return (status_for(&prev.status), prev);
+        }
+    }
+
+    let meta = match materialize_session(&parsed) {
+        Ok(meta) => meta,
+        Err((maybe_id, message)) => {
+            let sid = maybe_id.unwrap_or_default();
+            if !sid.is_empty() {
+                on_created(&sid);
+            }
+            let mut result = TurnResult::fail(TurnStatus::Error, sid, message);
+            result.idempotency_key = parsed.idempotency_key.clone();
+            remember_create(storage_key.as_deref(), &result);
+            return (status_for(&result.status), result);
+        }
+    };
+    on_created(&meta.id);
+    let sid = meta.id.clone();
+    let mut result = dispatch(sid.clone(), parsed.prompt.clone()).await;
+    if result.session_id.is_empty() {
+        result.session_id = sid;
+    }
+    result.idempotency_key = parsed.idempotency_key.clone();
+    remember_create(storage_key.as_deref(), &result);
+    (status_for(&result.status), result)
+}
+
+pub fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let mut out: String = text.chars().take(keep).collect();
+    out.push('…');
+    out
+}
+
+fn last_assistant_preview(messages: &[ChatMessageStored]) -> (Option<String>, bool) {
+    for message in messages.iter().rev() {
+        if message.role != "assistant" || message.marker.is_some() {
+            continue;
+        }
+        let text = message.content.trim();
+        if text.is_empty() && !message.is_error {
+            continue;
+        }
+        let preview = if text.is_empty() {
+            None
+        } else {
+            Some(truncate_chars(text, LAST_ASSISTANT_MAX_CHARS))
+        };
+        return (preview, message.is_error);
+    }
+    (None, false)
+}
+
+/// Map host signals + the journal's last assistant row.
+/// `needs_input` wins over `running`. A sticky ghost `Streaming` flag with no
+/// prompt, tools, or gate is idle (same rule as `live_session_is_busy`).
+pub fn map_api_session_phase(
+    signals: Option<&ExternalSessionSignals>,
+    last_assistant_is_error: bool,
+) -> ApiSessionPhase {
+    let Some(signals) = signals else {
+        return if last_assistant_is_error {
+            ApiSessionPhase::Error
+        } else {
+            ApiSessionPhase::Idle
+        };
+    };
+    let needs_input = signals.pending_plan
+        || signals.pending_ask_user
+        || signals.pending_permission
+        || signals.state == SessionState::AwaitingPermission;
+    if needs_input {
+        return ApiSessionPhase::NeedsInput;
+    }
+    let ghost_stream = signals.state == SessionState::Streaming
+        && !signals.prompt_in_flight
+        && !signals.open_tools
+        && !signals.deferred_prompt_complete
+        && !signals.pending_plan
+        && !signals.pending_ask_user
+        && !signals.pending_permission;
+    let running = !ghost_stream
+        && (signals.prompt_in_flight
+            || signals.open_tools
+            || signals.deferred_prompt_complete
+            || signals.has_streaming_message
+            || matches!(
+                signals.state,
+                SessionState::Streaming | SessionState::Connecting
+            ));
+    if running {
+        return ApiSessionPhase::Running;
+    }
+    if signals.has_last_error || last_assistant_is_error {
+        ApiSessionPhase::Error
+    } else {
+        ApiSessionPhase::Idle
+    }
+}
+
+pub fn session_detail(mgr: &SessionManager, id: &str) -> Result<SessionDetail, Box<TurnResult>> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err(Box::new(TurnResult::fail(
+            TurnStatus::Error,
+            "",
+            "session id is required",
+        )));
+    }
+    let Some(meta) = store::load_sessions_index()
+        .into_iter()
+        .find(|session| session.id == id)
+    else {
+        return Err(Box::new(TurnResult::fail(
+            TurnStatus::NotFound,
+            id,
+            "session not found",
+        )));
+    };
+    let projects = store::load_projects();
+    let project_name = meta.project_id.as_ref().and_then(|pid| {
+        projects
+            .iter()
+            .find(|project| &project.id == pid)
+            .map(|project| project.name.clone())
+    });
+    let (last_assistant_message, last_is_error) =
+        last_assistant_preview(&store::load_messages(&meta.id));
+    let signals = mgr.external_session_signals(&meta.id);
+    let status = map_api_session_phase(signals.as_ref(), last_is_error);
+    Ok(SessionDetail {
+        id: meta.id,
+        title: meta.title,
+        project_id: meta.project_id,
+        project_name,
+        status,
+        last_assistant_message,
+        updated_at: meta.updated_at.to_rfc3339(),
+        source: meta.source,
+        worktree_path: meta.worktree_path.filter(|path| !path.trim().is_empty()),
+    })
+}
+
 fn unauthorized() -> impl IntoResponse {
     (
         StatusCode::UNAUTHORIZED,
@@ -1037,6 +1697,51 @@ async fn get_sessions(
         return unauthorized().into_response();
     }
     Json(list_sessions(q.include_archived)).into_response()
+}
+
+async fn post_create(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(body): Json<CreateSessionBody>,
+) -> impl IntoResponse {
+    if !token_ok(&headers, &state.token) {
+        return unauthorized().into_response();
+    }
+    let app = state.app.clone();
+    let mgr = Arc::clone(&state.mgr);
+    let notify_app = state.app.clone();
+    let (code, result) = execute_create(
+        body,
+        move |sid, prompt| {
+            let app = app.clone();
+            let mgr = Arc::clone(&mgr);
+            async move {
+                match prepare_send(&sid, &prompt, "external") {
+                    Ok(prepared) => dispatch_turn_or_timeout(&app, &mgr, prepared).await,
+                    Err(result) => *result,
+                }
+            }
+        },
+        move |id| {
+            crate::mirror::notify_sessions_changed(Some(&notify_app), "create", id);
+        },
+    )
+    .await;
+    (code, Json(result)).into_response()
+}
+
+async fn get_session(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if !token_ok(&headers, &state.token) {
+        return unauthorized().into_response();
+    }
+    match session_detail(&state.mgr, &id) {
+        Ok(detail) => Json(detail).into_response(),
+        Err(result) => (status_for(&result.status), Json(*result)).into_response(),
+    }
 }
 
 async fn post_turn(
@@ -1066,6 +1771,101 @@ async fn get_health(State(state): State<HttpState>, headers: HeaderMap) -> impl 
     Json(health_payload(&state.mgr)).into_response()
 }
 
+// ── PR monitor (the Agent's handle on this chat's watches) ──────────────────
+//
+// The branch menu is the human path to a watch; these routes are the agent path,
+// driven by the injected `pr-monitor` MCP (`pr_monitor::mcp`). All three reuse
+// the Host's own commands, so the menu and the agent can never disagree about
+// what a chat is watching.
+
+#[derive(Debug, Deserialize)]
+struct PrWatchesQuery {
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrWatchBody {
+    session_id: String,
+    project_path: String,
+    pr_number: u64,
+    #[serde(default)]
+    interval_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrUnwatchBody {
+    session_id: String,
+    pr_number: u64,
+}
+
+fn bad_request(message: &str) -> impl IntoResponse {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "ok": false,
+            "status": "error",
+            "message": message,
+        })),
+    )
+}
+
+async fn get_pr_watches(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Query(q): Query<PrWatchesQuery>,
+) -> impl IntoResponse {
+    if !token_ok(&headers, &state.token) {
+        return unauthorized().into_response();
+    }
+    let sid = q.session_id.trim();
+    if sid.is_empty() {
+        return bad_request("session_id is required").into_response();
+    }
+    let state = crate::pr_monitor::pr_monitor_state(sid.to_string()).await;
+    Json(state).into_response()
+}
+
+async fn post_pr_watch(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(body): Json<PrWatchBody>,
+) -> impl IntoResponse {
+    if !token_ok(&headers, &state.token) {
+        return unauthorized().into_response();
+    }
+    let sid = body.session_id.trim();
+    if sid.is_empty() {
+        return bad_request("session_id is required").into_response();
+    }
+    let result = crate::pr_monitor::pr_monitor_watch(
+        state.app.clone(),
+        sid.to_string(),
+        body.project_path,
+        body.pr_number,
+        body.interval_secs,
+    )
+    .await;
+    Json(result).into_response()
+}
+
+async fn delete_pr_watch(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(body): Json<PrUnwatchBody>,
+) -> impl IntoResponse {
+    if !token_ok(&headers, &state.token) {
+        return unauthorized().into_response();
+    }
+    let sid = body.session_id.trim();
+    if sid.is_empty() {
+        return bad_request("session_id is required").into_response();
+    }
+    let result =
+        crate::pr_monitor::pr_monitor_unwatch(state.app.clone(), sid.to_string(), body.pr_number)
+            .await;
+    Json(result).into_response()
+}
+
 pub async fn start(app: AppHandle, mgr: Arc<SessionManager>) -> Result<SessionApiHandle, String> {
     let token = random_token();
     fanout_persisted_queue(&app);
@@ -1077,8 +1877,12 @@ pub async fn start(app: AppHandle, mgr: Arc<SessionManager>) -> Result<SessionAp
     };
     let router = Router::new()
         .route("/v1/health", get(get_health))
-        .route("/v1/sessions", get(get_sessions))
+        .route("/v1/sessions", get(get_sessions).post(post_create))
+        .route("/v1/sessions/{id}", get(get_session))
         .route("/v1/sessions/{id}/turns", post(post_turn))
+        .route("/v1/pr-monitor/watches", get(get_pr_watches))
+        .route("/v1/pr-monitor/watches", post(post_pr_watch))
+        .route("/v1/pr-monitor/watches", delete(delete_pr_watch))
         .with_state(state);
 
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -1246,6 +2050,54 @@ pub fn run_cli() -> i32 {
                 }
             }
         }
+        Ok(CliCommand::New {
+            project,
+            title,
+            prompt,
+            idempotency_key,
+            source,
+            worktree,
+        }) => {
+            let Some(ep) = read_endpoint_file() else {
+                let mut out = TurnResult::fail(
+                    TurnStatus::AppNotRunning,
+                    "",
+                    "Grok App is not running. Start the app (or leave it in the tray), then retry.",
+                );
+                out.idempotency_key = idempotency_key;
+                print_turn(&out);
+                return 2;
+            };
+            match http_create(
+                &ep,
+                &project,
+                title.as_deref(),
+                &prompt,
+                idempotency_key.as_deref(),
+                source.as_deref(),
+                worktree.as_deref(),
+            ) {
+                Ok(r) => {
+                    print_turn(&r);
+                    if r.ok {
+                        0
+                    } else if r.status == TurnStatus::Busy {
+                        3
+                    } else if r.status == TurnStatus::AppNotRunning {
+                        2
+                    } else {
+                        1
+                    }
+                }
+                Err(e) => {
+                    let (status, code, message) = classify_cli_transport_error(&e, "");
+                    let mut out = TurnResult::fail(status, "", message);
+                    out.idempotency_key = idempotency_key;
+                    print_turn(&out);
+                    code
+                }
+            }
+        }
         Err(e) => {
             if e.contains("not a session-api command") {
                 return -1;
@@ -1284,6 +2136,34 @@ fn http_list(ep: &EndpointFile, include_archived: bool) -> Result<Vec<SessionLis
     if !res.status().is_success() {
         return Err(format!("HTTP {}", res.status()));
     }
+    res.json().map_err(|e| e.to_string())
+}
+
+fn http_create(
+    ep: &EndpointFile,
+    project: &str,
+    title: Option<&str>,
+    prompt: &str,
+    idempotency_key: Option<&str>,
+    source: Option<&str>,
+    worktree: Option<&str>,
+) -> Result<TurnResult, String> {
+    let url = format!("{}/v1/sessions", ep.url.trim_end_matches('/'));
+    let body = CreateSessionBody {
+        project_path: Some(project.to_string()),
+        project_id: None,
+        title: title.map(str::to_string),
+        prompt: prompt.to_string(),
+        idempotency_key: idempotency_key.map(str::to_string),
+        source: source.map(str::to_string),
+        worktree_path: worktree.map(str::to_string),
+    };
+    let res = http_client()?
+        .post(url)
+        .header(header::AUTHORIZATION, format!("Bearer {}", ep.token))
+        .json(&body)
+        .send()
+        .map_err(|e| e.to_string())?;
     res.json().map_err(|e| e.to_string())
 }
 
@@ -1582,5 +2462,841 @@ mod tests {
         let v = health_payload(&mgr);
         assert_eq!(v["ok"], true);
         assert_eq!(v["connectLockBusy"], false);
+    }
+
+    #[test]
+    fn parse_session_new_cli() {
+        let cmd = parse_cli(&[
+            "grok-app".into(),
+            "--session-new".into(),
+            "--project".into(),
+            "/tmp/repo".into(),
+            "--title".into(),
+            "job".into(),
+            "--prompt".into(),
+            "do the thing".into(),
+            "--idempotency-key".into(),
+            "k1".into(),
+            "--source".into(),
+            "grok-bot".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            cmd,
+            CliCommand::New {
+                project: "/tmp/repo".into(),
+                title: Some("job".into()),
+                prompt: "do the thing".into(),
+                idempotency_key: Some("k1".into()),
+                source: Some("grok-bot".into()),
+                worktree: None,
+            }
+        );
+        let cmd = parse_cli(&[
+            "grok-app".into(),
+            "--session-new".into(),
+            "--project".into(),
+            "/tmp/repo".into(),
+            "--worktree".into(),
+            "/tmp/repo-feat".into(),
+            "--prompt".into(),
+            "do the thing".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            cmd,
+            CliCommand::New {
+                project: "/tmp/repo".into(),
+                title: None,
+                prompt: "do the thing".into(),
+                idempotency_key: None,
+                source: None,
+                worktree: Some("/tmp/repo-feat".into()),
+            }
+        );
+        let err = parse_cli(&[
+            "grok-app".into(),
+            "--session-new".into(),
+            "--project".into(),
+            "/tmp/repo".into(),
+            "--worktree".into(),
+            "   ".into(),
+            "--prompt".into(),
+            "x".into(),
+        ])
+        .unwrap_err();
+        assert!(err.contains("empty --worktree"), "{err}");
+        let err = parse_cli(&["grok-app".into(), "--session-new".into()]).unwrap_err();
+        assert!(err.contains("--project"), "{err}");
+        let err = parse_cli(&[
+            "grok-app".into(),
+            "--session-new".into(),
+            "--project".into(),
+            "/tmp/repo".into(),
+        ])
+        .unwrap_err();
+        assert!(err.contains("prompt"), "{err}");
+        let err = parse_cli(&[
+            "grok-app".into(),
+            "--sessions".into(),
+            "--session-new".into(),
+            "--project".into(),
+            "/tmp/repo".into(),
+            "--prompt".into(),
+            "x".into(),
+        ])
+        .unwrap_err();
+        assert!(err.contains("only one"), "{err}");
+    }
+
+    #[test]
+    fn source_charset_and_length() {
+        assert_eq!(
+            normalize_source(Some(" grok-bot_1 ")).unwrap().as_deref(),
+            Some("grok-bot_1")
+        );
+        assert_eq!(normalize_source(Some("  ")).unwrap(), None);
+        assert_eq!(normalize_source(None).unwrap(), None);
+        assert!(normalize_source(Some("Grok")).is_err());
+        assert!(normalize_source(Some("has space")).is_err());
+        assert!(normalize_source(Some(&"a".repeat(SOURCE_MAX_LEN + 1))).is_err());
+        assert!(normalize_source(Some(&"a".repeat(SOURCE_MAX_LEN))).is_ok());
+    }
+
+    #[test]
+    fn project_paths_match_ignores_trailing_slash() {
+        assert!(project_paths_match("/tmp/foo", "/tmp/foo/"));
+        assert!(project_paths_match(r"C:\work\app\", r"C:\work\app"));
+        assert!(!project_paths_match("/tmp/foo", "/tmp/bar"));
+    }
+
+    #[test]
+    fn session_phase_mapping() {
+        assert_eq!(map_api_session_phase(None, false), ApiSessionPhase::Idle);
+        assert_eq!(map_api_session_phase(None, true), ApiSessionPhase::Error);
+        let idle = ExternalSessionSignals::parked_idle();
+        assert_eq!(
+            map_api_session_phase(Some(&idle), false),
+            ApiSessionPhase::Idle
+        );
+        let mut running = idle;
+        running.prompt_in_flight = true;
+        assert_eq!(
+            map_api_session_phase(Some(&running), true),
+            ApiSessionPhase::Running
+        );
+        let mut connecting = idle;
+        connecting.state = SessionState::Connecting;
+        assert_eq!(
+            map_api_session_phase(Some(&connecting), false),
+            ApiSessionPhase::Running
+        );
+        let mut tools = idle;
+        tools.open_tools = true;
+        assert_eq!(
+            map_api_session_phase(Some(&tools), false),
+            ApiSessionPhase::Running
+        );
+        let mut perm = idle;
+        perm.state = SessionState::AwaitingPermission;
+        perm.pending_permission = true;
+        assert_eq!(
+            map_api_session_phase(Some(&perm), false),
+            ApiSessionPhase::NeedsInput
+        );
+        let mut ask = idle;
+        ask.pending_ask_user = true;
+        assert_eq!(
+            map_api_session_phase(Some(&ask), false),
+            ApiSessionPhase::NeedsInput
+        );
+        let mut plan = idle;
+        plan.pending_plan = true;
+        plan.prompt_in_flight = true;
+        assert_eq!(
+            map_api_session_phase(Some(&plan), false),
+            ApiSessionPhase::NeedsInput
+        );
+        let mut ghost = idle;
+        ghost.state = SessionState::Streaming;
+        ghost.has_streaming_message = true;
+        assert_eq!(
+            map_api_session_phase(Some(&ghost), false),
+            ApiSessionPhase::Idle
+        );
+        assert_eq!(
+            map_api_session_phase(Some(&ghost), true),
+            ApiSessionPhase::Error
+        );
+        let mut failed = idle;
+        failed.has_last_error = true;
+        failed.state = SessionState::Disconnected;
+        assert_eq!(
+            map_api_session_phase(Some(&failed), false),
+            ApiSessionPhase::Error
+        );
+        assert_eq!(
+            serde_json::to_value(ApiSessionPhase::NeedsInput).unwrap(),
+            serde_json::json!("needs_input")
+        );
+    }
+
+    #[test]
+    fn truncate_chars_keeps_unicode_boundary() {
+        assert_eq!(truncate_chars("hello", 10), "hello");
+        assert_eq!(truncate_chars("abcdef", 4), "abc…");
+        assert_eq!(truncate_chars("你好世界", 3), "你好…");
+    }
+
+    struct Home {
+        dir: std::path::PathBuf,
+        prev: Option<String>,
+    }
+
+    impl Home {
+        fn enter() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "grok-f5-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let prev = std::env::var("GROK_APP_HOME").ok();
+            std::env::set_var("GROK_APP_HOME", &dir);
+            Self { dir, prev }
+        }
+    }
+
+    impl Drop for Home {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(value) => std::env::set_var("GROK_APP_HOME", value),
+                None => std::env::remove_var("GROK_APP_HOME"),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn trusted_project(trust: bool) -> store::Project {
+        let dir = crate::paths::app_data_root().join(if trust { "proj-ok" } else { "proj-no" });
+        std::fs::create_dir_all(&dir).unwrap();
+        store::add_project(dir.to_string_lossy().to_string(), trust).unwrap()
+    }
+
+    fn create_body(project: &store::Project, key: &str) -> CreateSessionBody {
+        CreateSessionBody {
+            project_path: Some(project.path.clone()),
+            project_id: None,
+            title: Some("job one".into()),
+            prompt: "hello from f5".into(),
+            idempotency_key: Some(key.into()),
+            source: Some("grok-bot".into()),
+            worktree_path: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_bad_input_without_a_session() {
+        let (code, result) = execute_create(
+            CreateSessionBody {
+                project_path: Some("/tmp/does-not-matter".into()),
+                project_id: None,
+                title: None,
+                prompt: "  ".into(),
+                idempotency_key: None,
+                source: None,
+                worktree_path: None,
+            },
+            |_sid, _prompt| async { unreachable!("dispatch") },
+            |_| {},
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(result.message.unwrap().contains("empty prompt"));
+
+        let (code, result) = execute_create(
+            CreateSessionBody {
+                project_path: None,
+                project_id: None,
+                title: None,
+                prompt: "hi".into(),
+                idempotency_key: None,
+                source: Some("Nope".into()),
+                worktree_path: None,
+            },
+            |_sid, _prompt| async { unreachable!("dispatch") },
+            |_| {},
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(result.message.unwrap().contains("[a-z0-9_-]"));
+
+        let missing =
+            std::env::temp_dir().join(format!("grok-f11-missing-{}", uuid::Uuid::new_v4()));
+        let (code, result) = execute_create(
+            CreateSessionBody {
+                project_path: Some("/tmp/proj".into()),
+                project_id: None,
+                title: None,
+                prompt: "hi".into(),
+                idempotency_key: None,
+                source: None,
+                worktree_path: Some(missing.to_string_lossy().into()),
+            },
+            |_sid, _prompt| async { unreachable!("dispatch") },
+            |_| {},
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(
+            result.message.unwrap().contains("does not exist"),
+            "missing worktreePath must fail before the project index"
+        );
+    }
+
+    // The env lock is process-global and must cover every store call inside
+    // the awaits. These tests never lock it again on this task.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn create_refuses_missing_untrusted_and_broken_projects() {
+        let _lock = crate::paths::APP_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _home = Home::enter();
+
+        let (code, missing) = execute_create(
+            CreateSessionBody {
+                project_path: Some("/tmp/not-a-registered-project".into()),
+                project_id: None,
+                title: None,
+                prompt: "hi".into(),
+                idempotency_key: Some("missing".into()),
+                source: None,
+                worktree_path: None,
+            },
+            |_sid, _prompt| async { unreachable!("dispatch") },
+            |_| {},
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(
+            missing
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("project not found"),
+            "{:?}",
+            missing.message
+        );
+        assert!(store::load_projects().is_empty());
+        assert!(store::load_sessions_index().is_empty());
+
+        let untrusted = trusted_project(false);
+        let before = store::load_projects().len();
+        let (code, denied) = execute_create(
+            create_body(&untrusted, "untrusted"),
+            |_sid, _prompt| async { unreachable!("dispatch") },
+            |_| {},
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(
+            denied.message.as_deref().unwrap().contains("not trusted"),
+            "{:?}",
+            denied.message
+        );
+        assert_eq!(store::load_projects().len(), before);
+        assert!(store::load_sessions_index().is_empty());
+
+        // `load_projects` recomputes `path_ok` from the directory. A saved
+        // `path_ok: false` does not stick while the folder still exists.
+        std::fs::remove_dir_all(&untrusted.path).unwrap();
+        let mut projects = store::load_projects();
+        assert!(!projects[0].path_ok, "a missing folder must clear path_ok");
+        projects[0].trusted = true;
+        store::save_projects(&projects).unwrap();
+        let (code, broken) = execute_create(
+            create_body(&untrusted, "broken-path"),
+            |_sid, _prompt| async { unreachable!("dispatch") },
+            |_| {},
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(
+            broken.message.as_deref().unwrap().contains("path missing"),
+            "{:?}",
+            broken.message
+        );
+        assert!(store::load_sessions_index().is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn create_is_idempotent_and_detail_maps_journal_error() {
+        let _lock = crate::paths::APP_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _home = Home::enter();
+        let project = trusted_project(true);
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let body = create_body(&project, "job-1");
+
+        let c1 = std::sync::Arc::clone(&calls);
+        let (code, first) = execute_create(
+            body.clone(),
+            move |sid, prompt| {
+                c1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    assert_eq!(prompt, "hello from f5");
+                    TurnResult::started(sid)
+                }
+            },
+            |_| {},
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(first.status, TurnStatus::TurnStarted);
+        assert!(!first.session_id.is_empty());
+
+        let c2 = std::sync::Arc::clone(&calls);
+        let (code, second) = execute_create(
+            body,
+            move |sid, _prompt| {
+                c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move { TurnResult::started(sid) }
+            },
+            |_| {},
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(second.session_id, first.session_id);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let rows = store::load_sessions_index();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source.as_deref(), Some("grok-bot"));
+        assert_eq!(rows[0].project_id.as_deref(), Some(project.id.as_str()));
+        assert_eq!(rows[0].title, "job one");
+
+        let mgr = SessionManager::new();
+        let detail = session_detail(&mgr, &first.session_id).unwrap();
+        assert_eq!(detail.status, ApiSessionPhase::Idle);
+        assert!(detail.last_assistant_message.is_none());
+        assert_eq!(detail.project_name.as_deref(), Some(project.name.as_str()));
+        assert_eq!(detail.source.as_deref(), Some("grok-bot"));
+        assert!(detail.worktree_path.is_none());
+
+        let missing = session_detail(&mgr, "missing-session").unwrap_err();
+        assert_eq!(missing.status, TurnStatus::NotFound);
+
+        store::append_message(
+            &first.session_id,
+            store::ChatMessageStored {
+                id: "m-err".into(),
+                role: "assistant".into(),
+                content: "x".repeat(LAST_ASSISTANT_MAX_CHARS + 20),
+                thought: None,
+                created_at: chrono::Utc::now(),
+                is_error: true,
+                attachments: None,
+                marker: None,
+            },
+        )
+        .unwrap();
+        let detail = session_detail(&mgr, &first.session_id).unwrap();
+        assert_eq!(detail.status, ApiSessionPhase::Error);
+        let preview = detail.last_assistant_message.unwrap();
+        assert_eq!(preview.chars().count(), LAST_ASSISTANT_MAX_CHARS);
+        assert!(preview.ends_with('…'));
+    }
+
+    struct TempTrees {
+        root: std::path::PathBuf,
+        main: std::path::PathBuf,
+        linked: std::path::PathBuf,
+    }
+
+    impl Drop for TempTrees {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// Directories only. The test injects porcelain instead of spawning git,
+    /// and creates the escape symlink only on Unix (`symlink_dir` needs a
+    /// privilege Windows CI does not have).
+    fn temp_trees() -> TempTrees {
+        let root = std::env::temp_dir().join(format!(
+            "grok-f11-wt-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let main = root.join("repo");
+        let linked = root.join("repo-feat");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::create_dir_all(&linked).unwrap();
+        TempTrees { root, main, linked }
+    }
+
+    fn porcelain_for(main: &std::path::Path, linked: &std::path::Path) -> String {
+        format!(
+            "worktree {main}\nHEAD abcdef\nbranch refs/heads/main\n\nworktree {linked}\nHEAD fedcba\nbranch refs/heads/feat\n",
+            main = main.display(),
+            linked = linked.display()
+        )
+    }
+
+    struct PorcelainOverride;
+
+    impl PorcelainOverride {
+        fn arm(project_path: &str, raw: String) -> Self {
+            *super::WORKTREE_PORCELAIN_OVERRIDE
+                .lock()
+                .unwrap_or_else(|err| err.into_inner()) = Some((project_path.to_string(), raw));
+            Self
+        }
+    }
+
+    impl Drop for PorcelainOverride {
+        fn drop(&mut self) {
+            *super::WORKTREE_PORCELAIN_OVERRIDE
+                .lock()
+                .unwrap_or_else(|err| err.into_inner()) = None;
+        }
+    }
+
+    fn canon_path(path: &std::path::Path) -> String {
+        std::fs::canonicalize(path)
+            .unwrap_or_else(|err| panic!("canonicalize {}: {err}", path.display()))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn create_worktree_is_cwd_and_rejects_bad_paths() {
+        let _lock = crate::paths::APP_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _home = Home::enter();
+        let trees = temp_trees();
+        let project = store::add_project(trees.main.to_string_lossy().to_string(), true).unwrap();
+        let _porcelain =
+            PorcelainOverride::arm(&project.path, porcelain_for(&trees.main, &trees.linked));
+        let projects_before = store::load_projects().len();
+        let canon_main = canon_path(&trees.main);
+        let canon_linked = canon_path(&trees.linked);
+
+        let outside = trees.root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        #[cfg(unix)]
+        let escape = {
+            let escape = trees.root.join("escape-link");
+            std::os::unix::fs::symlink(&outside, &escape).unwrap();
+            escape
+        };
+
+        async fn reject(body: CreateSessionBody, needle: &str) {
+            let (code, result) = execute_create(
+                body,
+                |_sid, _prompt| async { unreachable!("dispatch") },
+                |_| {},
+            )
+            .await;
+            assert_eq!(code, StatusCode::BAD_REQUEST);
+            let message = result.message.unwrap_or_default();
+            assert!(message.contains(needle), "expected {needle} in {message}");
+            assert!(result.session_id.is_empty());
+        }
+
+        let base = |worktree: String, key: Option<&str>| CreateSessionBody {
+            project_path: Some(project.path.clone()),
+            project_id: None,
+            title: Some("wt job".into()),
+            prompt: "work the tree".into(),
+            idempotency_key: key.map(str::to_string),
+            source: Some("grok-bot".into()),
+            worktree_path: Some(worktree),
+        };
+
+        reject(base("feat".into(), Some("rel")), "absolute path").await;
+        reject(
+            base(format!("{}/../not-a-worktree", trees.main.display()), None),
+            "must not contain ..",
+        )
+        .await;
+        reject(
+            base(
+                trees.root.join("missing-wt").to_string_lossy().into(),
+                Some("gone"),
+            ),
+            "does not exist",
+        )
+        .await;
+        reject(
+            base(outside.to_string_lossy().into(), None),
+            "not a worktree of this project",
+        )
+        .await;
+        #[cfg(unix)]
+        reject(
+            base(escape.to_string_lossy().into(), Some("escape")),
+            "not a worktree of this project",
+        )
+        .await;
+        assert!(
+            store::load_sessions_index().is_empty(),
+            "rejected worktreePath must not create a session or stick the idempotency key"
+        );
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let body = base(trees.linked.to_string_lossy().into(), Some("gone"));
+        let c1 = std::sync::Arc::clone(&calls);
+        let (code, first) = execute_create(
+            body.clone(),
+            move |sid, prompt| {
+                c1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    assert_eq!(prompt, "work the tree");
+                    TurnResult::started(sid)
+                }
+            },
+            |_| {},
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(first.status, TurnStatus::TurnStarted);
+
+        let c2 = std::sync::Arc::clone(&calls);
+        let (code, second) = execute_create(
+            body,
+            move |sid, _prompt| {
+                c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move { TurnResult::started(sid) }
+            },
+            |_| {},
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(second.session_id, first.session_id);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let rows = store::load_sessions_index();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].project_id.as_deref(), Some(project.id.as_str()));
+        assert_eq!(
+            rows[0].worktree_path.as_deref(),
+            Some(canon_linked.as_str())
+        );
+        assert_eq!(rows[0].worktree_branch.as_deref(), Some("feat"));
+        assert!(rows[0].is_worktree_session);
+        assert_eq!(rows[0].source.as_deref(), Some("grok-bot"));
+        assert_eq!(store::load_projects().len(), projects_before);
+        assert!(store::load_projects().iter().all(|item| {
+            std::fs::canonicalize(&item.path).ok().as_deref()
+                != std::fs::canonicalize(&trees.linked).ok().as_deref()
+        }));
+
+        let prepared = prepare_send(&first.session_id, "again", "external").unwrap();
+        assert_eq!(
+            prepared.project_path.as_deref(),
+            Some(canon_linked.as_str()),
+            "session cwd is the worktree, not the project root"
+        );
+        let mgr = SessionManager::new();
+        let detail = session_detail(&mgr, &first.session_id).unwrap();
+        assert_eq!(detail.worktree_path.as_deref(), Some(canon_linked.as_str()));
+        assert_eq!(detail.project_id.as_deref(), Some(project.id.as_str()));
+        let json = serde_json::to_value(&detail).unwrap();
+        assert_eq!(json["worktreePath"], canon_linked);
+
+        let (code, at_root) = execute_create(
+            base(trees.main.to_string_lossy().into(), Some("at-root")),
+            |sid, _prompt| async move { TurnResult::started(sid) },
+            |_| {},
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        let root_row = store::load_sessions_index()
+            .into_iter()
+            .find(|row| row.id == at_root.session_id)
+            .unwrap();
+        assert_eq!(root_row.project_id.as_deref(), Some(project.id.as_str()));
+        assert_eq!(root_row.worktree_path.as_deref(), Some(canon_main.as_str()));
+        assert_eq!(store::load_projects().len(), projects_before);
+
+        let ssh = store::add_ssh_project("devbox", "/srv/app".to_string(), true).unwrap();
+        let sessions_before_ssh = store::load_sessions_index().len();
+        reject(
+            CreateSessionBody {
+                project_path: None,
+                project_id: Some(ssh.id.clone()),
+                title: None,
+                prompt: "work the tree".into(),
+                idempotency_key: Some("ssh-wt".into()),
+                source: None,
+                worktree_path: Some(trees.linked.to_string_lossy().into()),
+            },
+            "SSH projects",
+        )
+        .await;
+        assert_eq!(store::load_sessions_index().len(), sessions_before_ssh);
+        assert!(store::load_projects().iter().any(|item| item.id == ssh.id));
+        assert_eq!(store::load_projects().len(), projects_before + 1);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn http_create_and_get_roundtrip_with_curl() {
+        let _lock = crate::paths::APP_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let _home = Home::enter();
+        let project = trusted_project(true);
+        let token = "f5-test-token".to_string();
+        let state = TestHttp {
+            token: token.clone(),
+            mgr: std::sync::Arc::new(SessionManager::new()),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = axum::Router::new()
+            .route("/v1/sessions", post(test_post_create))
+            .route("/v1/sessions/{id}", get(test_get_session))
+            .with_state(state);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let url = format!("http://127.0.0.1:{port}/v1/sessions");
+        let payload = serde_json::json!({
+            "projectPath": project.path,
+            "title": "curl job",
+            "prompt": "hello curl",
+            "idempotencyKey": "curl-1",
+            "source": "grok-bot",
+        });
+        let created = curl_json("POST", &url, Some(&token), Some(&payload.to_string())).await;
+        let again = curl_json("POST", &url, Some(&token), Some(&payload.to_string())).await;
+        let unauth = curl_json("POST", &url, None, Some(&payload.to_string())).await;
+        let id = created["json"]["sessionId"].as_str().unwrap().to_string();
+        let got = curl_json(
+            "GET",
+            &format!("http://127.0.0.1:{port}/v1/sessions/{id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+        let unknown = curl_json(
+            "POST",
+            &url,
+            Some(&token),
+            Some(
+                &serde_json::json!({
+                    "projectPath": "/tmp/not-registered-f5",
+                    "prompt": "nope",
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+
+        let log = format!(
+            "create:\n{created:#}\nreplay:\n{again:#}\nget:\n{got:#}\nunauth:\n{unauth:#}\nunknown:\n{unknown:#}\n"
+        );
+        eprintln!("{log}");
+
+        assert_eq!(created["http"].as_u64().unwrap(), 200);
+        assert_eq!(created["json"]["status"], "turn_started");
+        assert_eq!(again["http"].as_u64().unwrap(), 200);
+        assert_eq!(again["json"]["sessionId"], created["json"]["sessionId"]);
+        assert_eq!(store::load_sessions_index().len(), 1);
+        assert_eq!(unauth["http"].as_u64().unwrap(), 401);
+        assert_eq!(got["http"].as_u64().unwrap(), 200);
+        assert_eq!(got["json"]["status"], "idle");
+        assert_eq!(got["json"]["source"], "grok-bot");
+        assert_eq!(got["json"]["title"], "curl job");
+        assert_eq!(got["json"]["projectId"], project.id);
+        assert!(got["json"].get("totalTokens").is_none());
+        assert!(got["json"].get("costUsd").is_none());
+        assert_eq!(unknown["http"].as_u64().unwrap(), 400);
+        assert!(unknown["json"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("project not found"));
+        assert_eq!(store::load_projects().len(), 1);
+
+        server.abort();
+    }
+
+    #[derive(Clone)]
+    struct TestHttp {
+        token: String,
+        mgr: std::sync::Arc<SessionManager>,
+    }
+
+    async fn test_post_create(
+        axum::extract::State(state): axum::extract::State<TestHttp>,
+        headers: HeaderMap,
+        axum::Json(body): axum::Json<CreateSessionBody>,
+    ) -> impl axum::response::IntoResponse {
+        if !token_ok(&headers, &state.token) {
+            return unauthorized().into_response();
+        }
+        let (code, result) = execute_create(
+            body,
+            |sid, _prompt| async move { TurnResult::started(sid) },
+            |_| {},
+        )
+        .await;
+        (code, axum::Json(result)).into_response()
+    }
+
+    async fn test_get_session(
+        axum::extract::State(state): axum::extract::State<TestHttp>,
+        headers: HeaderMap,
+        axum::extract::Path(id): axum::extract::Path<String>,
+    ) -> impl axum::response::IntoResponse {
+        if !token_ok(&headers, &state.token) {
+            return unauthorized().into_response();
+        }
+        match session_detail(&state.mgr, &id) {
+            Ok(detail) => axum::Json(detail).into_response(),
+            Err(result) => (status_for(&result.status), axum::Json(*result)).into_response(),
+        }
+    }
+
+    async fn curl_json(
+        method: &str,
+        url: &str,
+        token: Option<&str>,
+        body: Option<&str>,
+    ) -> serde_json::Value {
+        let mut cmd = tokio::process::Command::new("curl");
+        cmd.arg("-sS")
+            .arg("-w")
+            .arg("\n%{http_code}")
+            .arg("-X")
+            .arg(method)
+            .arg(url);
+        if let Some(token) = token {
+            cmd.arg("-H").arg(format!("Authorization: Bearer {token}"));
+        }
+        if let Some(body) = body {
+            cmd.arg("-H")
+                .arg("Content-Type: application/json")
+                .arg("--data")
+                .arg(body);
+        }
+        let out = cmd.output().await.expect("curl");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let (body, code) = text.rsplit_once('\n').unwrap_or((text.as_ref(), "0"));
+        let json: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::json!({
+            "raw": body,
+            "stderr": String::from_utf8_lossy(&out.stderr),
+        }));
+        serde_json::json!({
+            "http": code.trim().parse::<u64>().unwrap_or(0),
+            "json": json,
+        })
     }
 }

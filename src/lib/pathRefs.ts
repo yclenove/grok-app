@@ -16,6 +16,7 @@ import {
   isSiteRootAbsolutePath,
   isWindowsStylePath,
   normalizeLocalPathToken,
+  pathTokenText,
   unescapeShellPath,
 } from "@/lib/pathNormalize";
 
@@ -28,7 +29,7 @@ const FILE_EXT_RE = new RegExp(
 );
 
 export function isHttpUrl(s: string): boolean {
-  return /^https?:\/\//i.test(s.trim());
+  return /^https?:\/\//i.test(pathTokenText(s).trim());
 }
 
 /**
@@ -41,7 +42,7 @@ export function isHttpUrl(s: string): boolean {
  * spaces open correctly; does not treat those backslashes as Windows separators.
  */
 export function normalizePathToken(s: string): string {
-  let t = s.trim();
+  let t = pathTokenText(s).trim();
   if (!t) return t;
   // Shell-unescape / Windows normalize before other transforms.
   t = normalizeLocalPathToken(t) || t;
@@ -80,6 +81,14 @@ export function normalizePathToken(s: string): string {
 }
 
 export function looksLikeFilePath(s: string): boolean {
+  const raw = pathTokenText(s).trim();
+  // Before normalize. Folding `\\server\share\a.png` yields `//server/…`,
+  // which the absolute-path branch below rejects as protocol-relative.
+  if (raw && raw.length <= 800 && isRealLocalAbsolutePath(raw)) {
+    if (FILE_EXT_RE.test(raw)) return true;
+    const segs = raw.split(/[\\/]/).filter(Boolean);
+    return segs.length >= 2;
+  }
   const t = normalizePathToken(s);
   if (!t || t.length > 800) return false;
   if (isHttpUrl(t)) return false;
@@ -101,7 +110,7 @@ export function looksLikeFilePath(s: string): boolean {
     // Single-segment abs with ext (`/a.png`) stays a path only when real local
     // (agent-home short roots); slash commands without ext already rejected.
     if (FILE_EXT_RE.test(t)) return true;
-    const segs = t.replace(/^~\/?/, "").split("/").filter(Boolean);
+    const segs = t.replace(/^~\/?/, "").split(/[\\/]/).filter(Boolean);
     return segs.length >= 2;
   }
   // Other absolute-looking tokens without a known FS root: not a file card.
@@ -142,7 +151,7 @@ export function isHomeRelativePath(s: string): boolean {
  * Prefer {@link isRealLocalAbsolutePath} for media open / path_scope.
  */
 export function isAbsoluteFsPath(s: string): boolean {
-  const t = normalizeLocalPathToken(s) || s.trim();
+  const t = normalizeLocalPathToken(s) || pathTokenText(s).trim();
   if (isFusedQueryKeyPath(t)) return false;
   return (
     t.startsWith("/") ||

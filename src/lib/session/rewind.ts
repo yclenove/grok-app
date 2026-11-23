@@ -2,8 +2,9 @@ import {
   mergeAttachments,
   parseAttachmentsFromContent,
 } from "../attachments";
+import { localPathIdentity } from "../pathNormalize";
 import type { ChatMessage, MessageSegment, SessionState } from "./types";
-import { isTurnPromptMessage } from "./types";
+import { isInjectedPromptMarker, isTurnPromptMessage } from "./types";
 import {
   buildSegmentsFromLegacy,
   contentLooksLikeThought,
@@ -374,10 +375,12 @@ export function userBubbleDedupeKey(message: ChatMessage): string {
   const text = parsed.text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
   const paths = new Set<string>();
   for (const a of message.attachments ?? []) {
-    if (a.path) paths.add(a.path);
+    const key = localPathIdentity(a.path);
+    if (key) paths.add(key);
   }
   for (const a of parsed.attachments) {
-    if (a.path) paths.add(a.path);
+    const key = localPathIdentity(a.path);
+    if (key) paths.add(key);
   }
   return `${text}\n---\n${[...paths].sort().join("\n")}`;
 }
@@ -516,7 +519,7 @@ function lastTurnAssistantIndex(messages: ChatMessage[]): number {
   let lastUser = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
-    if (m?.role === "user" && m.marker !== "interjection") {
+    if (m?.role === "user" && !isInjectedPromptMarker(m.marker)) {
       lastUser = i;
       break;
     }
@@ -532,7 +535,7 @@ function lastTurnAssistantIndex(messages: ChatMessage[]): number {
 function promptUserCount(messages: ChatMessage[]): number {
   let n = 0;
   for (const m of messages) {
-    if (m.role === "user" && m.marker !== "interjection") n += 1;
+    if (m.role === "user" && !isInjectedPromptMarker(m.marker)) n += 1;
   }
   return n;
 }
@@ -674,7 +677,7 @@ export function upgradeMessagesFromJournal(
       let lastUser = -1;
       for (let i = journal.length - 1; i >= 0; i--) {
         const m = journal[i];
-        if (m?.role === "user" && m.marker !== "interjection") {
+        if (m?.role === "user" && !isInjectedPromptMarker(m.marker)) {
           lastUser = i;
           break;
         }
@@ -763,7 +766,7 @@ export function settleStreamingOnHostReady(
   let lastUser = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
-    if (m?.role === "user" && m.marker !== "interjection") {
+    if (m?.role === "user" && !isInjectedPromptMarker(m.marker)) {
       lastUser = i;
       break;
     }

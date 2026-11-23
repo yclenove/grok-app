@@ -2,7 +2,7 @@
  * Composer column: welcome mark, ask-user / permission bars, context chips, portal wrap.
  * Draft/queue chrome lives in WorkbenchComposerShell.
  */
-import type { Dispatch, MouseEvent as ReactMouseEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode, RefObject, SetStateAction } from "react";
+import { useMemo, type Dispatch, type MouseEvent as ReactMouseEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject, type SetStateAction } from "react";
 import { createT } from "@/i18n";
 import type { AccountStatus } from "@/lib/api/account";
 import type { Project, SessionRow } from "@/lib/app/sidebarModels";
@@ -39,6 +39,9 @@ import * as api from "@/lib/api";
 import { ComposerProjectMenu } from "@/components/ComposerProjectMenu";
 import { ComposerRemoteMenu } from "@/components/ComposerRemoteMenu";
 import { ComposerWorktreeMenu } from "@/components/ComposerWorktreeMenu";
+import { usePrMonitor } from "@/hooks/usePrMonitor";
+import { prListRows } from "@/lib/prMonitor";
+import { buildPrHubDeepLink } from "@/lib/prHubDeepLink";
 import { AskUserBar } from "@/components/AskUserBar";
 import { ComputerUseApprovalSlot } from "@/components/computer-use/ComputerUseApprovalCard";
 import { ComputerUseActionConfirmSlot } from "@/components/computer-use/ComputerUseActionConfirmCard";
@@ -120,6 +123,7 @@ export type WorkbenchComposerColumnProps = {
   confirmRemoveWorktree: (wt: GitWorktreeEntry) => void;
   connecting: boolean;
   contextUsageDisplay: ContextUsageDisplay;
+  refreshContextInfo: () => void;
   currentModelWindow: number | null;
   customRouteActive: boolean;
   cycleAttachedChatScope: (id: string) => void;
@@ -140,14 +144,14 @@ export type WorkbenchComposerColumnProps = {
   goalMode: boolean;
   guideQueuedMessage: (item: QueuedSend) => Promise<void>;
   guidingQueueItemId: string | null;
-  handleContextWindow: (tokens: number) => Promise<void>;
+  handleContextWindow: (tokens: number) => Promise<boolean>;
   handleEffortPick: (nextEffort: string) => void;
   handleModelPick: (pick: ComposerModelPick) => Promise<void>;
   layout: LayoutPrefs;
   liveAt: LiveTokenQuery;
   liveSlash: LiveTokenQuery;
   liveVoiceOpen: boolean;
-  locale: "en" | "de" | "es" | "fil" | "fr" | "id" | "it" | "ja" | "ko" | "pt-BR" | "ru" | "ta" | "uk" | "zh" | "zh-TW";
+  locale: "en" | "de" | "es" | "fil" | "fr" | "id" | "it" | "ja" | "ko" | "pt-BR" | "ru" | "ta" | "tr" | "uk" | "zh" | "zh-TW";
   mode: string;
   modelId: string;
   onComposerContextMenu: (e: ReactMouseEvent) => void;
@@ -243,7 +247,7 @@ export type WorkbenchComposerColumnProps = {
   slashCatalogCount: number;
   slashKindCounts: SlashKindCounts;
   slashKindFilter: SlashKindFilter;
-  stop: () => Promise<void>;
+  stop: (sessionId?: string | null) => Promise<boolean>;
   switchToWorktree: (wt: GitWorktreeEntry) => Promise<void>;
   switchToBranch: (branch: GitBranchEntry) => Promise<void>;
   toggleVoice: () => void;
@@ -370,6 +374,32 @@ export function WorkbenchComposerColumn(p: WorkbenchComposerColumnProps) {
   const askUserSettlingRpcRef = useRef<number | null>(null);
   const askUserLiveRef = useRef(askUser);
   askUserLiveRef.current = askUser;
+
+  // ── PR monitor: the repository's open PRs + this chat's watches ───────────
+  // A pull request is opened against a repository, so the list is the repo's and
+  // no branch enters the model; the host owns the watches and pushes their state.
+  const prMonitor = usePrMonitor({
+    enabled: api.isDesktopHost() && !!activeProject?.path,
+    projectPath: activeProject?.path ?? null,
+    sessionId: session.sessionId ?? null,
+    locale,
+    notify: (message, tone) => showToast(message, tone === "error" ? 5000 : 3200),
+  });
+  const prRows = useMemo(
+    () =>
+      prListRows(prMonitor.prs, prMonitor.watches, {
+        busy: prMonitor.busy,
+        tr,
+      }),
+    [prMonitor.prs, prMonitor.watches, prMonitor.busy, tr],
+  );
+  // The PR hub already owns the PR detail view: reuse its deep link (Settings →
+  // runtime/tools focused on that row) instead of building a second surface.
+  const openPrHubForNumber = (prNumber: number) => {
+    if (typeof window === "undefined") return;
+    const hash = buildPrHubDeepLink({ prNumber });
+    if (window.location.hash !== hash) window.location.hash = hash;
+  };
   const previewText = displayPermissionPreview(perm?.preview);
   useEffect(() => {
     setPermBusy(false);
@@ -796,7 +826,36 @@ export function WorkbenchComposerColumn(p: WorkbenchComposerColumnProps) {
                       cliWorktreeMissingPath: tr(
                         "composer.cliWorktreeMissingPath",
                       ),
+                      pr: tr("prMonitor.menuHead"),
+                      prEmpty: tr("prMonitor.empty"),
+                      prWatch: tr("prMonitor.watch"),
+                      prUnwatch: tr("prMonitor.unwatch"),
+                      prWatchTip: tr("prMonitor.watchTip"),
+                      prUnwatchTip: tr("prMonitor.unwatchTip"),
+                      prOpenHub: tr("prMonitor.openHub"),
+                      prChipCount: tr("prMonitor.chipCount"),
+                      prChipCountTip: tr("prMonitor.chipCountTip"),
+                      prPendingWakes: tr("prMonitor.pendingWakes"),
+                      prWatchingLabel: tr("prMonitor.watching"),
+                      prLastUpdate: tr("prMonitor.lastUpdate"),
+                      prUnavailable: tr("prMonitor.unavailable"),
                     }}
+                    prRows={prRows}
+                    prLoading={prMonitor.loading}
+                    prAvailable={prMonitor.available}
+                    prCanWatch={prMonitor.canWatch}
+                    prWatchingCount={prMonitor.watching}
+                    prPendingWakes={prMonitor.pendingCount}
+                    prLastChange={prMonitor.lastChange}
+                    prWatchError={prMonitor.watchError}
+                    onTogglePrWatch={prMonitor.toggleWatch}
+                    onPrMenuOpen={() => {
+                      // Opening the menu is when watch state becomes visible:
+                      // re-read it, so an agent mount the push missed shows up.
+                      prMonitor.refresh();
+                      prMonitor.refreshWatches();
+                    }}
+                    onOpenPrHub={openPrHubForNumber}
                     onSwitch={(wt) => {
                       void switchToWorktree(wt);
                     }}

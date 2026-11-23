@@ -1,5 +1,11 @@
 /** Build the agent-facing continue prompt after a host/agent interrupt. */
 
+import {
+  endOfTurnChipShowsContinue,
+  mapEndOfTurnReason,
+  parseEndOfTurnContent,
+} from "./endOfTurn";
+
 export interface ContinueInterruptContext {
   command?: string | null;
   title?: string | null;
@@ -38,12 +44,39 @@ export function buildContinueAgentPrompt(
   return lines.join("\n");
 }
 
-export function isContinuableEndReason(reason: string | null | undefined): boolean {
-  const r = (reason || "").toLowerCase();
-  return r === "host_exit" || r === "agent_exit";
+/** User ended a turn whose model stream was cut off. Not a host restart. */
+export function buildContinueAfterStopPrompt(): string {
+  return [
+    "The previous turn was ended by the user because the model stream was cut off.",
+    "Do not redo steps that already succeeded.",
+    "Check the plan and what is actually on disk.",
+    "Continue from the first unfinished step.",
+  ].join("\n");
 }
 
-/** Last host_exit / agent_exit chip after the last user prompt (or null). */
+/**
+ * The turn died on a dropped connection (network, timeout, disconnect, crash).
+ * The visible retry must not rewind: agent rewind fails once the process is
+ * gone, and the click then sends nothing (#1324).
+ */
+export function buildContinueAfterTransportPrompt(): string {
+  return [
+    "The previous turn stopped because the connection to the model dropped.",
+    "Do not redo steps that already succeeded.",
+    "Continue the user's last request from the first unfinished step.",
+    "Do not assume a previous permission prompt is still open — request approval again if you need to run a command.",
+  ].join("\n");
+}
+
+/**
+ * Same continuable set as the end-of-turn chip.
+ * Aliases such as `process_exit` and `host` map before the check.
+ */
+export function isContinuableEndReason(reason: string | null | undefined): boolean {
+  return endOfTurnChipShowsContinue(mapEndOfTurnReason(reason).reason);
+}
+
+/** Last continuable end chip after the last user prompt (or null). */
 export function latestContinuableEndMessageId(
   messages: Array<{
     id: string;
@@ -70,14 +103,15 @@ export function latestContinuableEndMessageId(
         (m.content?.startsWith("turn_cancelled") ||
           m.content?.startsWith("turn_end|")));
     if (!isEnd) continue;
-    const reason =
-      (m.toolStatus || "").toLowerCase() ||
-      (m.content?.startsWith("turn_cancelled|")
-        ? m.content.slice("turn_cancelled|".length).split("|")[0]
-        : m.content?.startsWith("turn_end|")
-          ? m.content.slice("turn_end|".length).split("|")[0]
-          : "");
-    if (isContinuableEndReason(reason)) return m.id;
+    // Journal content wins, matching EndOfTurnChip. toolStatus on a
+    // reloaded row is often a generic `cancelled` while the body still
+    // says `turn_cancelled|user_stop`.
+    const fromContent = parseEndOfTurnContent(m.content);
+    if (fromContent) {
+      if (isContinuableEndReason(fromContent)) return m.id;
+      continue;
+    }
+    if (isContinuableEndReason(m.toolStatus)) return m.id;
   }
   return null;
 }

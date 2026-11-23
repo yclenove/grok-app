@@ -1,9 +1,9 @@
 /**
  * Effective inference model shown in composer model chips.
  *
- * A custom provider is a channel. The chip shows the model this chat picked
- * when that id is in the provider catalog. Otherwise it shows the provider's
- * configured `model`, never a leftover official catalog id such as Grok 4.5.
+ * Shows the model this chat picked when that id is in the provider catalog.
+ * A leftover official catalog id such as Grok 4.5, which is not in the
+ * catalog, falls back to the channel `model` (#1337, #1394).
  */
 
 export function resolveCustomRouteDisplay(
@@ -11,6 +11,7 @@ export function resolveCustomRouteDisplay(
     | {
         name?: string | null;
         model?: string | null;
+        providerMode?: string | null;
         models?: ReadonlyArray<{ id: string; name?: string | null }> | null;
       }
     | null
@@ -23,10 +24,10 @@ export function resolveCustomRouteDisplay(
   if (!provider) return null;
   const models = provider.models ?? [];
   const sessionId = sessionModelId.trim();
+  const configured = provider.model?.trim() ?? "";
   const sessionEntry = sessionId
     ? models.find((m) => m.id === sessionId)
     : undefined;
-  const configured = provider.model?.trim() ?? "";
   const configuredEntry = configured
     ? models.find((m) => m.id === configured)
     : undefined;

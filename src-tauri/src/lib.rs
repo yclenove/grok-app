@@ -25,6 +25,8 @@ mod agent_memory_embed;
 
 mod agent_prefs;
 
+mod agent_proc_home;
+
 mod agent_privacy;
 
 mod agent_subagent_wt_snap;
@@ -63,6 +65,12 @@ mod cli_worktrees;
 
 mod customize_commands;
 
+mod director;
+
+/// Prompts the Host injected into a chat (wakes / external sends): remembered so
+/// the transcript can show them as automatic follow-ups, not user messages.
+mod injected_prompts;
+
 mod wsl_backend;
 
 mod ssh_remote;
@@ -77,6 +85,7 @@ mod commands;
 
 pub(crate) mod computer_use;
 
+mod pet_quick;
 mod pet_window;
 mod theme_editor_window;
 
@@ -126,6 +135,8 @@ mod path_scope;
 
 mod paths;
 
+mod workflow_followup;
+
 mod plan_chrome;
 
 mod permission;
@@ -154,6 +165,10 @@ mod providers;
 mod proxy;
 
 mod relay_stream_proxy;
+
+mod pr_monitor;
+
+mod pr_monitor_i18n;
 
 mod pty_host;
 
@@ -272,6 +287,10 @@ mod mac_ime_fn_bridge;
 mod win_file_drop;
 #[cfg(windows)]
 mod win_shell;
+#[cfg(windows)]
+mod win_webview_recovery;
+
+mod webview_recovery;
 
 mod x_evidence;
 
@@ -391,6 +410,7 @@ pub fn run() {
         // AppSettings.launch_at_login in setup + settings_set. Safe for `cargo test`
         // (tests never call run(); init does not touch the OS login list).
         .plugin(tauri_plugin_autostart::Builder::new().build())
+        .plugin(pet_quick::global_shortcut_plugin())
         // Remember main window size / position / maximize across launches.
         // Desktop-only dependency (see Cargo.toml target cfg).
         .plugin({
@@ -533,6 +553,15 @@ pub fn run() {
                     if window.label() == "main" => {
                         schedule_persist_main_window_state(window.app_handle());
                     }
+                WindowEvent::Destroyed => {
+                    // WebView2 rebuild listens only while a recovery destroy
+                    // is in flight. User close / tray hide does not set that.
+                    #[cfg(windows)]
+                    crate::win_webview_recovery::on_window_destroyed(
+                        window.app_handle(),
+                        window.label(),
+                    );
+                }
                 WindowEvent::Focused(focused) if window.label() == "main" => {
                     // Launch first-interaction dead-zone diagnosis: trace every
                     // key-window transition so a lost activation race is visible
@@ -548,8 +577,20 @@ pub fn run() {
                 _ => {}
             }
         })
+        // Every webview, including ones created after setup (session, pet,
+        // album, side browser). Windows-only; the hook is idempotent per
+        // live ICoreWebView2. macOS / Linux ignore the callback.
+        .on_page_load(|webview, _payload| {
+            #[cfg(windows)]
+            crate::win_webview_recovery::install(webview);
+            #[cfg(not(windows))]
+            let _ = webview;
+        })
 
         .setup(|app| {
+            // Plugin setup already exited any second process. Sweep only here,
+            // so a relaunch cannot delete the running chats' agent-proc homes.
+            agent_proc_home::sweep_orphans();
 
             crate::path_scope::refresh_from_store();
             crate::computer_use::install(app.handle());
@@ -764,7 +805,12 @@ pub fn run() {
             }));
 
             #[cfg(windows)]
-            win_shell::ensure_main_window_shell_integration(&window);
+            {
+                win_shell::ensure_main_window_shell_integration(&window);
+                if let Some(webview) = app.get_webview(window.label()) {
+                    win_webview_recovery::install(&webview);
+                }
+            }
 
             let want_maximized = saved_geometry
                 .as_ref()
@@ -946,6 +992,11 @@ pub fn run() {
                 } else {
                     automation_runner::start(app.handle().clone(), mgr);
                 }
+
+                // PR monitors: poll mounted PRs while the process lives (tray
+                // included) and emit `pr-monitor://update` on real changes.
+                // Mounts are UI-driven and not persisted.
+                pr_monitor::start(app.handle().clone());
             }
 
             // LaunchAgent / helper / oneshot: open into tray so schedules fire without focus steal.
@@ -1041,6 +1092,8 @@ pub fn run() {
 
             }
 
+            pet_quick::init_hotkey(app.handle());
+
             let pet_prefs = pet_window::load_prefs();
             if pet_prefs.enabled && pet_prefs.visible {
                 if let Err(e) = pet_window::show_pet(app.handle()) {
@@ -1059,6 +1112,15 @@ pub fn run() {
         .expect("error while building Grok App")
 
         .run(|app, event| {
+            // Destroying the last window during a WebView2 rebuild asks the
+            // process to exit (`code == None`). Tray Quit / app.exit pass
+            // Some(code) and still leave.
+            #[cfg(windows)]
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = &event {
+                if crate::win_webview_recovery::should_block_exit(*code) {
+                    api.prevent_exit();
+                }
+            }
 
             // macOS: Dock click. The pet overlay is a visible skip-taskbar
             // window, so `has_visible_windows` stays true and must not block

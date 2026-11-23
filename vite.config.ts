@@ -105,6 +105,8 @@ export default defineConfig(() => ({
     },
   },
   build: {
+    // Skip the gzip size report; it holds every chunk in memory again.
+    reportCompressedSize: false,
     rollupOptions: {
       input: { main: path.resolve(root, "index.html"), computerUseOverlay: path.resolve(root, "computer-use-overlay.html") },
       output: {

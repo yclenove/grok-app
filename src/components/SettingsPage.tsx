@@ -109,6 +109,7 @@ import {
   loadComposerSendKeyPref,
   type ComposerSendKeyPref,
 } from "@/lib/composerSendKey";
+import { loadComposerEnterInsertsLive } from "@/lib/composerEnterInsertsLive";
 import { formatShortcutHint } from "@/lib/shortcuts";
 import { SHORTCUT_REMAP_CHANGED_EVENT } from "@/lib/shortcutRemap";
 import {
@@ -174,6 +175,7 @@ import {
   ensureNotifyPermission,
   refreshNotifyPermission,
   notificationSupport,
+  resolveNotifySoundEnabled,
   takeLastNativeNotifyError,
 } from "@/lib/desktopNotify";
 import {
@@ -271,6 +273,8 @@ export function SettingsPage({
   onReplaceProviderBrandLogo,
   welcomeMotionEnabled = true,
   onWelcomeMotionEnabled,
+  outputMotionEnabled = true,
+  onOutputMotionEnabled,
   goalOrchUiEnabled = true,
   onGoalOrchUiEnabled,
   messageTimeFormat = "absolute",
@@ -506,6 +510,9 @@ export function SettingsPage({
   /** Composer Enter vs ⌘/Ctrl+Enter — localStorage only (no Host settings). */
   const [composerSendKeyPref, setComposerSendKeyPref] =
     useState<ComposerSendKeyPref>(() => loadComposerSendKeyPref());
+  const [composerEnterInsertsLive, setComposerEnterInsertsLive] = useState(
+    () => loadComposerEnterInsertsLive(),
+  );
   /** Browser spellcheck on main composer — localStorage only. */
   const [composerSpellcheck, setComposerSpellcheck] = useState(() =>
     loadComposerSpellcheck(),
@@ -878,6 +885,7 @@ export function SettingsPage({
           title: t("settings.notify.honesty.test"),
           body: t("settings.notify.honesty.testOk"),
           sessionId: null,
+          sound: resolveNotifySoundEnabled(notifySound),
         });
         // Honest path-specific copy: bare tauri dev → Script Editor; .app → Grok.
         if (path === "osascript") {
@@ -904,7 +912,7 @@ export function SettingsPage({
     } finally {
       setNotifyTestBusy(false);
     }
-  }, [notifyTestBusy, t, showSettingsToast]);
+  }, [notifyTestBusy, notifySound, t, showSettingsToast]);
   const runClearWorkspaceMemory = useCallback(async () => {
     if (!workspaceCwd || clearMemoryBusy) return;
     setClearMemoryBusy(true);
@@ -1484,6 +1492,8 @@ export function SettingsPage({
     onReplaceProviderBrandLogo,
     welcomeMotionEnabled,
     onWelcomeMotionEnabled,
+    outputMotionEnabled,
+    onOutputMotionEnabled,
     goalOrchUiEnabled,
     onGoalOrchUiEnabled,
     messageTimeFormat,
@@ -1709,6 +1719,8 @@ export function SettingsPage({
     onComposerMinRows,
     composerSendKeyPref,
     setComposerSendKeyPref,
+    composerEnterInsertsLive,
+    setComposerEnterInsertsLive,
     composerSpellcheck,
     setComposerSpellcheck,
     composerDraftStats,

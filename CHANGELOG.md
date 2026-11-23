@@ -19,43 +19,363 @@ See `docs/llm-wiki/release.md`.
 **中文 · 新增**
 - 电脑操作在发布门槛通过前保持实验。开关不会默认变成正式功能。
 
-## [0.2.40] - 2026-10-04
+## [0.2.51] - 2026-11-14
 
-> **Highlight:** Linux ARM64 and Apple Silicon installers are on this GitHub Release.
+> **Highlight:** Rewound chats keep their new replies, and model menus use a fresh catalog.
 >
-> **中文 · 亮点：** 本版 GitHub Release 含 Linux ARM64 与 Apple Silicon 安装包。
+> **中文 · 亮点：** 回退后的对话保留新回复，模型菜单采用更新的目录。
 
 ### Fixed
-- Linux ARM64 AppImage, .deb, and .rpm are published. v0.2.39 lacked them (`xdg-mime` missing on the ARM runner).
-- The Apple Silicon .dmg is published. v0.2.39's macOS ARM job ran out of Node heap.
+
+- Rewound replies no longer return after you send a new message.
+- Official model menus use the newest available catalog.
+- CLI bulk import counts eligible sessions and reports complete import failures.
+- Markdown paste keeps block structure and stops formatting the next text.
 
 **中文 · 修复**
-- Linux ARM64 的 AppImage、.deb 和 .rpm 已发布。v0.2.39 缺这三项（ARM 构建机没有 `xdg-mime`）。
-- Apple Silicon 的 .dmg 已发布。v0.2.39 的 macOS ARM 任务 Node 内存不足。
 
-## [0.2.39] - 2026-10-04
+- 回退后发送新消息，不再重新显示已丢弃的旧回复。
+- 官方模型菜单采用最新可用目录。
+- CLI 批量导入只统计符合条件的会话，全部失败时会显示错误。
+- Markdown 粘贴保留块结构，后续输入不再沿用粘贴内容的格式。
 
-> **Highlight:** Linux ARM64 installers are on GitHub Releases.
+## [0.2.50] - 2026-10-28
+
+> **Highlight:** Every model of a custom provider is selectable again, and the chosen one is the one used.
 >
-> **中文 · 亮点：** GitHub Releases 提供 Linux ARM64 安装包。
+> **中文 · 亮点：** 自定义供应商的每个模型都能重新选择，选哪个就用哪个。
+
+### Fixed
+- Every model of a custom provider shows in the model menu again, and the model you pick is the one sent.
+- Desktop notifications play their short sound when the sound setting is on, including the test notification.
+
+**中文 · 修复**
+- 自定义供应商的每个模型重新出现在模型菜单里，选哪个模型就发送哪个。
+- 开启提示音后，桌面通知（包括测试通知）会播放一声短音。
+
+## [0.2.49] - 2026-10-28
+
+> **Highlight:** Director mode in Settings can send large work to a background workflow.
+>
+> **中文 · 亮点：** 设置里的导演模式可以把大块工作交给后台工作流。
 
 ### Added
-- GitHub Releases include Linux ARM64 AppImage, .deb, and .rpm packages. Ubuntu 24.04+ aarch64.
-- Settings can switch the composer between Built-in and Markdown.
 
-### Fixed
-- Custom channels connect again when the channel name and the model id differ. The app tells the CLI the channel name, which is how that CLI finds the key. (#1294)
-- Sending one picture on Windows no longer shows that picture twice. The chat was counting the same file a second time. (#1284)
-- Markdown editor no longer freezes on large link-heavy documents.
+- Director mode in Settings asks Grok to put large work in a background workflow. A new chat still gets that rule when an agent is already running.
 
 **中文 · 新增**
-- GitHub Releases 现提供 Linux ARM64 的 AppImage、.deb 和 .rpm。面向 Ubuntu 24.04 及以上 aarch64。
-- 设置里可以把输入框换成「内置」或「Markdown」。
+
+- 设置中的导演模式会请 Grok 把大块工作放进后台工作流。已经有代理在跑时，新对话仍会带上这条规则。
+
+## [0.2.48] - 2026-10-28
+
+> **Highlight:** A finished background workflow reports back in the chat that started it.
+>
+> **中文 · 亮点：** 后台工作流结束后，结果会回到发起它的对话。
+
+### Fixed
+
+- A finished background workflow reports its result in the chat that started it. Switching chats or loading another session does not drop that result.
 
 **中文 · 修复**
+
+- 后台工作流结束后，结果会回到发起它的对话。切换对话或加载其他会话时，这个结果也不会丢。
+
+## [0.2.47] - 2026-10-27
+
+> **Highlight:** Paste from the right-click menu works when the page clipboard is empty.
+>
+> **中文 · 亮点：** 页面剪贴板为空时，右键菜单里的粘贴也能用。
+
+### Fixed
+
+- Paste uses the system clipboard when the page clipboard is empty.
+
+**中文 · 修复**
+
+- 页面剪贴板为空时，粘贴会改用系统剪贴板。
+
+## [0.2.46] - 2026-10-27
+
+> **Highlight:** macOS chats start again when the Grok home has a bundles folder.
+>
+> **中文 · 亮点：** Grok 目录里有 bundles 文件夹时，macOS 对话也能正常启动。
+
+### Fixed
+- Chats with the macOS workspace sandbox start again when the Grok home has a `bundles` folder.
+
+**中文 · 修复**
+- Grok 目录里有 `bundles` 文件夹时，开了工作区沙箱的 macOS 对话也能正常启动。
+
+## [0.2.45] - 2026-10-27
+
+> **Highlight:** Scheduled tasks can pick their own model, and macOS sandboxed chats start again.
+>
+> **中文 · 亮点：** 定时任务可以指定模型，macOS 沙箱对话也能重新正常启动。
+
+### Added
+- Scheduled tasks can run on a chosen model from the official catalog or a custom provider. They no longer fall back to your current default model.
+- The interface zoom you set with Ctrl/Cmd and +/- is remembered the next time you open the app.
+- The local session API can put a new chat in an existing git worktree of a trusted project.
+
+**中文 · 新增**
+- 定时任务可以使用指定的官方或自定义提供商模型，不再回退到当前默认模型。
+- 用 Ctrl/Cmd 加减号调好的界面缩放，下次打开应用时会保留。
+- 本地会话接口可以把新对话放进受信项目已有的 git worktree。
+
+### Changed
+- Sidebar text in the default light theme is darker and easier to read.
+- A custom relay channel shows only its own model in the model menu.
+
+**中文 · 变更**
+- 默认浅色主题下，侧栏文字更深、更清晰。
+- 自定义中转通道在模型菜单里只显示它自己的模型。
+
+### Fixed
+- Chats started with the macOS workspace sandbox can create sessions again.
+- The Markdown composer no longer leaves a box character when you press the right arrow at the end.
+
+**中文 · 修复**
+- macOS 工作区沙箱下的对话可以重新正常新建会话。
+- Markdown 输入框在行尾按右方向键时，不再留下方框字符。
+
+## [0.2.44] - 2026-10-26
+
+> **Highlight:** Scheduled tasks can reuse a chat, and replies fade in as they stream.
+>
+> **中文 · 亮点：** 定时任务可以复用指定会话，回复也会边流式输出边淡入。
+
+### Added
+- Scheduled tasks can run in a chat you choose instead of opening a new one every time. The chosen chat keeps its own model and reasoning.
+- Streamed replies fade in smoothly. Turn it off in Appearance; it follows the system Reduce Motion setting.
+- The local session API can start a new chat and report its status.
+
+**中文 · 新增**
+- 定时任务可以选择在指定会话中执行，不必每次新建。所选会话保留自己的模型与推理强度。
+- 流式回复会平滑淡入。可在外观里关闭，并跟随系统的减少动态效果设置。
+- 本地会话接口可以新建对话并查询状态。
+
+### Changed
+- Long-running chats stay responsive: background chats now update the screen less often.
+
+**中文 · 变更**
+- 长时间运行的对话更不容易卡：后台对话降低了刷新频率。
+
+### Fixed
+- Small icons in macOS System Settings no longer show colored stripes.
+- Follow System stays Simplified Chinese when that is the preferred language.
+- A trusted workspace no longer blocks sandboxed chats from starting.
+- Chats open again on macOS 12. Markdown no longer uses a pattern Monterey rejects.
+- JSON code blocks in a reply stay visible.
+- Composer markdown no longer stalls on a crafted link reference.
+- A chat connects when leader mode is on but no leader is running.
+- Show more lists the next chats after the open chat expands the group.
+- A long subagent no longer shows its time as 1m 60s.
+- A slow new chat keeps its text instead of opening an empty second chat.
+- A file on a Windows network share opens from the chat.
+- Review keeps a Windows network path pointed at that share.
+- A task due in under a minute no longer says 0 min.
+- Math written inside a code span stays as code.
+- A fullwidth @ or / from an IME opens the same composer panel.
+- A PR the agent starts watching shows up in the chat's watch chip and menu.
+- A subagent that is still running stays in the Tasks list when the list is full.
+- Queued messages in background chats now send on their own when the turn ends.
+- Memory embedding URL, key and model save, and a cleared extra prompt stays cleared.
+- The window rebuilds itself after a Windows WebView2 crash instead of staying blank.
+
+**中文 · 修复**
+- macOS 系统设置里的小图标不再出现彩色横纹。
+- 跟随系统时，首选简体中文就会显示简体。
+- 信任过工作区之后，沙箱对话可以正常启动。
+- macOS 12 上的对话可以重新打开。Markdown 不再使用旧系统会拒绝的正则。
+- 回复里的 JSON 代码块会照常显示。
+- 输入框里的 Markdown 不再会因一段特制链接引用而卡住。
+- 开了 leader、但本机没有 leader 时，对话也能连上。
+- 当前对话把分组撑开之后，显示更多会继续列出后面的会话。
+- 长时间运行的子任务不再把时长显示成 1 分 60 秒。
+- 新建对话连得很慢时，已输入的内容仍留在这一条会话里。
+- 对话里的 Windows 网络共享路径可以打开对应的文件。
+- 审查列表里的 Windows 网络路径仍指向原来的共享文件。
+- 不到一分钟就要运行的任务，不再显示成 0 分钟后。
+- 代码里的公式分隔符保持原样，不会被改成公式。
+- 输入法打出的全角＠或／，也会打开文件面板或斜杠面板。
+- Agent 主动开始监视的 PR，会出现在对话的监视标记和菜单里。
+- 任务列表满了以后，仍在运行的子任务会继续留在列表里。
+- 后台对话里排队的消息，会在这一轮结束后自动发出。
+- 记忆 Embedding 的地址、密钥和模型可以正常保存，清空的追加提示词不会再回来。
+- Windows 上 WebView2 崩溃后，窗口会自动重建，不再一直白屏。
+
+## [0.2.42] - 2026-10-19
+
+> **Highlight:** The desktop pet can dictate, send, and stop a chat.
+>
+> **中文 · 亮点：** 桌面宠物可以听写、发送，以及停掉对话。
+
+### Added
+- The desktop pet can dictate, send a prompt, and stop the chat.
+- Turkish is now an interface language.
+
+**中文 · 新增**
+- 桌面宠物可以听写、发送提示，以及停掉对话。
+- 界面语言现在可以选择土耳其语。
+
+### Fixed
+- The desktop pet stays where you left it when the app opens again.
+- A streaming reply stays at the bottom instead of bouncing.
+- Opening the desktop pet on Windows no longer freezes the app.
+- A stalled chat connect can be taken over once it expires.
+- Pinyin candidates stay at the caret after selecting text or switching windows.
+- Reopening a full side pane no longer stretches the window downward.
+- Sandbox can start a chat again. The sealed home copies its config and bundled files instead of linking them.
+- A custom channel stays on its own server when a model allowlist is already set. A refusal is shown instead of silently using another provider.
+- A WSL chat starts the Linux grok directly. The open project is reached through its distro path.
+- The WSL agent home stays inside Linux. Only the login file is shared from Windows.
+
+**中文 · 修复**
+- 下次打开应用时，桌面宠物还在上次放下的地方。
+- 正在输出的回复会停在底部，不再上下跳动。
+- 在 Windows 上打开桌面宠物，不再把整个应用卡住。
+- 卡住的连接过期后，可以被新的连接接过去。
+- 选中聊天文字或切换窗口后，拼音候选框仍在输入光标旁边。
+- 右栏拉满后再打开，窗口不再往下变高。
+- 沙箱又能开始对话了。密封目录改为复制配置和内置文件，不再做链接。
+- 已经写了模型白名单时，自定义通道仍走自己的服务器。被拒绝时会直接提示，不再静默换到别的通道。
+- WSL 对话会直接启动 Linux 里的 grok。打开的项目会走发行版里的对应路径。
+- WSL 的代理目录留在 Linux 里。只有登录文件从 Windows 共享过来。
+
+## [0.2.41] - 2026-10-14
+
+> **Highlight:** One chat can follow several pull requests, and an update continues it.
+>
+> **中文 · 亮点：** 一个对话可以盯上多条拉取请求，有更新时会自己接着写。
+
+### Added
+- A chat can watch several open pull requests from the branch menu. The chip shows how many are watched. (#1325)
+- The agent can watch and unwatch those pull requests itself. (#1327)
+- A pull-request update shows up as an automatic follow-up in the chat. (#1330)
+
+**中文 · 新增**
+- 一个对话可以从分支菜单盯上仓库里打开的多条拉取请求。芯片会写出正在盯的数量。（#1325）
+- 代理可以自己盯上或取消盯一条拉取请求。（#1327）
+- 拉取请求有更新时，这一轮会记成自动续写。（#1330）
+
+### Fixed
+- Retry on a dropped connection continues that chat. The button sends a continue prompt once the agent is gone. (#1324)
+- Chats start again when the sandbox is on. The private agent home was handing the sandbox a linked hooks folder, which it refuses. (#1323)
+- A new chat sees skills added or removed while the app stays open. The slash list reloads with that chat, and a startup agent is not reused for it. (#1328)
+- A timed-out follow-up no longer marks your next message as automatic. That mark is cleared when the send never went out.
+- The branch menu retries the pull-request list after a failed read or a project switch. Opening the menu asks again.
+- A pull-request watch shows a poll failure and clears it when the next read works. The hint updates when the error changes or goes away.
+- A reused startup agent still gets pull-request watch tools. A chat can watch pull requests on a process that started before the chat existed.
+
+**中文 · 修复**
+- 连接中断后，点错误上的重试会接着聊。按钮向模型发送继续，把未做完的步骤接上。（#1324）
+- 打开沙箱后，对话可以重新开始。每个对话单独的代理目录以前把 hooks 做成了链接，沙箱会拒绝启动。（#1323）
+- 应用开着的时候增删技能，新建对话能看到这次变化。斜杠列表会跟着这条对话重新加载，启动时预热的代理也不会再被这条新对话沿用。（#1328）
+- 超时未发出的自动续写，不会再把你的下一条消息标成自动。那次发送没有写入记录时，下一条仍算你自己发的。
+- 分支菜单在读取失败或切换项目后，会重新读取拉取请求。再次打开菜单会再问一次。
+- 拉取请求监视会显示轮询失败，下次读成功后会清掉。错误变了或消失时，提示会跟着更新。
+- 复用启动时预热的代理，仍然带上拉取请求监视工具。对话用上一个更早启动的进程时，也可以自己盯拉取请求。
+
+## [0.2.40] - 2026-10-11
+
+> **Highlight:** The send key can join a live reply, and a Mac can answer over iMessage.
+>
+> **中文 · 亮点：** 发送键可以插入正在进行的回复，Mac 也可以通过 iMessage 回复。
+
+### Added
+- You can make the send key insert into a reply that is still running. Shift+Enter still starts a new line, and the queue button still waits.
+- Remote control can use iMessage on a Mac that is signed into Messages. Allow specific phone numbers or Apple IDs, and grant Full Disk Access.
+- Official models can use another context length when the model offers more than one.
+- The usage chip can show the CLI's own context breakdown.
+- The Tasks panel lists live subagent runs, with the counters and output the CLI reports.
+- New official chats start at 500k when the model offers that size.
+- The composer chip shows the pull request for the branch on screen.
+- A pull request update wakes that chat once.
+
+**中文 · 新增**
+- 可以让发送键直接插入正在进行的回复。Shift+Enter 仍然换行，排队按钮仍然等到回合结束。
+- 远程控制可以在已登录「信息」的 Mac 上使用 iMessage。允许名单填电话号码或 Apple ID，并授予完全磁盘访问权限。
+- 官方模型如果提供多种上下文长度，可以改用其中一种。
+- 用量条可以显示 CLI 自己算出的上下文明细。
+- 任务面板会列出正在运行的子代理，并显示 CLI 上报的计数与输出。
+- 新的官方对话在模型提供 500k 时，从 500k 开始。
+- 输入框芯片显示当前分支对应的拉取请求。
+- 拉取请求有更新时，对应的对话会被唤醒一次。
+
+### Fixed
+- File names in the @ menu stay whole, and overflow ends with an ellipsis.
+- Windows plugin sign-in no longer waits until the attempt times out.
+- A model name with brackets no longer erases the provider listed above it.
+- A chat file link cannot leave the project through a parent folder.
+- A torn account list is kept aside instead of being replaced with an empty one.
+- A renamed file shows up under its new name.
+- Closing goal mode tries again if the first clear does not go through.
+- Continue shows for the same stopped turns the status line already marks.
+- The same Windows file stays one attachment when only the slashes differ.
+- A non-text file token no longer blanks the whole chat.
+- A finished tool turn no longer looks like the app restarted.
+- Changing the context window no longer puts a new chat back on the default model.
+- A file reference can point at a directory, not only a file.
+- Rows on screen stay drawn while the chat scrolls.
+- Windows stays clickable after you drag across chat text. WebView2 155 could ignore the mouse after that drag until the app was opened again.
+- Windows Pinyin stays next to the composer, and Shift switches language again. After the composer sat idle, the candidate could jump to the top-left of the screen.
+
+**中文 · 修复**
+- @ 菜单里的文件名会完整显示，放不下时末尾才出现省略号。
+- Windows 上的插件登录不再一直等到这次尝试超时。
+- 模型名字里带方括号时，不会再清掉它上面的那个供应商。
+- 对话里的文件链接不能顺着上级目录跑出当前项目。
+- 写到一半的账号列表会被挪到旁边，而不会换成一份空列表。
+- 重命名后的文件会显示在新名字下面。
+- 关闭目标模式时，如果第一次清除没有发出去，会再试一次。
+- 继续按钮会出现在状态行已经标成可继续的回合上。
+- 同一个 Windows 文件只是斜杠不同时，仍然只算一个附件。
+- 文件路径如果不是文字，整段对话不再因此变空白。
+- 已经做完的工具回合，切换对话时不再显示成应用重启。
+- 改上下文窗口时，新开的对话不会再回到默认模型。
+- 文件引用可以指向目录，而不只是文件。
+- 滑动对话时，屏幕上的行保持已绘制。
+- 在 Windows 上拖选对话文字后，窗口仍然能点。WebView2 155 上这次拖选可能让鼠标点不动，直到重新打开应用。
+- Windows 上的拼音候选框留在输入框旁边，Shift 也能重新切换中英文。输入框空闲后再打字时，候选框会跳到屏幕左上角。
+
+## [0.2.39] - 2026-10-06
+
+> **Highlight:** Goal mode reaches the CLI, and a stalled reply can continue in the same chat.
+>
+> **中文 · 亮点：** 目标模式会交给 CLI，卡住的回复也可以在同一条对话里接着写。
+
+### Fixed
+- Goal mode keeps /goal at the start of the message the CLI receives. Earlier context stays in the objective.
+- Opening the app again no longer clears login files for chats already running.
+- Stopping a chat from the phone mirror stops the agent again.
+- File references in the Markdown composer are sent as file paths.
+- The composer editor choice stays after a restart.
+- Code in the Markdown composer keeps its backslashes.
+- A slash command replaces the one at the cursor.
+- Dictation in the Markdown composer lands at the cursor.
+- A typed link keeps the space after it.
+- Custom channels connect again when the channel name and the model id differ. The app tells the CLI the channel name, which is how that CLI finds the key. (#1294)
+- Sending one picture on Windows no longer shows that picture twice. The chat was counting the same file a second time. (#1284)
+- Chat text now uses the font you set under Appearance. Code blocks keep the code font. (#1297)
+- Official and custom chats no longer share one login file. Each running chat keeps its own copy. (#1293)
+- A stalled reply can be ended and continued in the same chat. The notice says when the model stream was cut off.
+
+**中文 · 修复**
+- 打开目标模式后，发给 CLI 的内容仍以 /goal 开头。前面的历史和引用留在目标正文里。
+- 再次打开应用时，不会清掉已经在跑的对话的登录文件。
+- 在手机镜像里点停止，会再次停住这条对话。
+- Markdown 输入框里的文件引用会按文件路径发出去。
+- 输入框编辑器的选择在重启后仍然保留。
+- Markdown 输入框里的代码会保留反斜杠。
+- 选择斜杠命令时，替换的是光标处的那一个。
+- 在 Markdown 输入框里听写，文字落在光标处。
+- 敲出来的链接会保留后面的空格。
 - 通道名称和模型 ID 不同时，自定义通道可以重新连上。应用发给 CLI 的是通道名，CLI 靠它找到密钥。（#1294）
 - 在 Windows 上发送一张图片后，不会再显示成两张。同一文件之前被算了两次。（#1284）
-- Markdown 编辑器在大量链接的文档上不再卡死。
+- 对话正文会使用外观里选的界面字体。代码块仍用代码字体。（#1297）
+- 独立模式下，官方对话和自定义对话不再共用同一份登录文件。每条正在运行的对话使用自己的副本。（#1293）
+- 输出停住时，可以结束本轮并在同一条对话里接着写。提示会说明模型流是否中途断过。
 
 ## [0.2.38] - 2026-09-30
 

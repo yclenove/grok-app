@@ -20,6 +20,7 @@ pub enum Locale {
     PtBr,
     Ru,
     Ta,
+    Tr,
     Uk,
     Zh,
     ZhTw,
@@ -60,11 +61,23 @@ impl Locale {
         let primary = bare.split('-').next().unwrap_or("");
 
         // Chinese needs script/region inspection before the primary-subtag path.
+        // Script wins: `zh-Hans-HK` is Simplified on a Hong Kong Mac (#1363).
         if primary == "zh" {
-            let is_trad = bare
-                .split('-')
-                .any(|p| p == "hant" || p == "tw" || p == "hk" || p == "mo");
-            return if is_trad { Locale::ZhTw } else { Locale::Zh };
+            let parts = bare.split('-');
+            let mut hans = false;
+            let mut trad = false;
+            for part in parts {
+                if part == "hans" {
+                    hans = true;
+                } else if part == "hant" || part == "tw" || part == "hk" || part == "mo" {
+                    trad = true;
+                }
+            }
+            return if hans || !trad {
+                Locale::Zh
+            } else {
+                Locale::ZhTw
+            };
         }
 
         match primary {
@@ -77,6 +90,7 @@ impl Locale {
             "ko" => Locale::Ko,
             "ru" => Locale::Ru,
             "ta" => Locale::Ta,
+            "tr" => Locale::Tr,
             "uk" => Locale::Uk,
             // Every Portuguese variant shares the pt-BR catalog.
             "pt" => Locale::PtBr,
@@ -103,6 +117,7 @@ impl Locale {
             Locale::PtBr => "pt-BR",
             Locale::Ru => "ru",
             Locale::Ta => "ta",
+            Locale::Tr => "tr",
             Locale::Uk => "uk",
             Locale::Zh => "zh",
             Locale::ZhTw => "zh-TW",
@@ -135,6 +150,7 @@ impl Locale {
             Locale::PtBr => "Brazilian Portuguese",
             Locale::Ru => "Russian",
             Locale::Ta => "Tamil",
+            Locale::Tr => "Turkish",
             Locale::Uk => "Ukrainian",
             Locale::Zh => "Simplified Chinese",
             Locale::ZhTw => "Traditional Chinese",
@@ -213,6 +229,7 @@ pub fn windows_langid_to_tag(id: u16) -> Option<&'static str> {
     const LANG_INDONESIAN: u16 = 0x21;
     const LANG_UKRAINIAN: u16 = 0x22;
     const LANG_TAMIL: u16 = 0x49;
+    const LANG_TURKISH: u16 = 0x1f;
     const LANG_FILIPINO: u16 = 0x64;
 
     let primary = id & 0x3ff;
@@ -237,6 +254,7 @@ pub fn windows_langid_to_tag(id: u16) -> Option<&'static str> {
         LANG_UKRAINIAN => Some("uk"),
 
         LANG_TAMIL => Some("ta"),
+        LANG_TURKISH => Some("tr"),
         LANG_FILIPINO => Some("fil"),
         _ => None,
     }
@@ -566,6 +584,25 @@ const TA: TrayStrings = TrayStrings {
     reset_time_fmt: "%d/%m %H:%M",
 };
 
+const TR: TrayStrings = TrayStrings {
+    recent: "Son sohbetler",
+    no_recent: "Son sohbet yok",
+    untitled: "Başlıksız",
+    more: "Daha fazla",
+    settings: "Ayarlar…",
+    doctor: "Tanılama",
+    account: "Hesap",
+    new_chat: "Yeni sohbet",
+    open_app: "Grok'u aç",
+    quit: "Grok'tan çık",
+    tooltip: "Grok",
+    close: "Kapat",
+    usage_with_reset: "Kullanım  ·  %{pct} kaldı  ·  {time}",
+    usage_pct: "Kullanım  ·  %{pct} kaldı",
+    usage_unknown: "Kullanım  ·  —",
+    reset_time_fmt: "%d.%m %H:%M",
+};
+
 const UK: TrayStrings = TrayStrings {
     recent: "Нещодавні",
     no_recent: "Немає нещодавніх чатів",
@@ -637,6 +674,7 @@ pub fn strings(locale: Locale) -> &'static TrayStrings {
         Locale::PtBr => &PT_BR,
         Locale::Ru => &RU,
         Locale::Ta => &TA,
+        Locale::Tr => &TR,
         Locale::Uk => &UK,
         Locale::Zh => &ZH,
         Locale::ZhTw => &ZH_TW,
@@ -665,7 +703,7 @@ pub fn format_usage(template: &str, pct: Option<f64>, time: Option<&str>) -> Str
 /// Public because anything that has to recognise copy the app itself wrote
 /// must walk the whole roster; a second hand-kept list goes stale the moment
 /// a locale is added.
-pub const ALL: [Locale; 15] = [
+pub const ALL: [Locale; 16] = [
     Locale::En,
     Locale::De,
     Locale::Es,
@@ -678,6 +716,7 @@ pub const ALL: [Locale; 15] = [
     Locale::PtBr,
     Locale::Ru,
     Locale::Ta,
+    Locale::Tr,
     Locale::Uk,
     Locale::Zh,
     Locale::ZhTw,
@@ -886,8 +925,11 @@ mod tests {
         assert_eq!(Locale::from_lang_tag("ru_RU.UTF-8"), Locale::Ru);
         assert_eq!(Locale::from_lang_tag("zh_CN.UTF-8"), Locale::Zh);
         assert_eq!(Locale::from_lang_tag("zh-Hans-CN"), Locale::Zh);
+        assert_eq!(Locale::from_lang_tag("zh-Hans-HK"), Locale::Zh);
+        assert_eq!(Locale::from_lang_tag("zh-Hans-MO"), Locale::Zh);
         assert_eq!(Locale::from_lang_tag("zh-TW"), Locale::ZhTw);
         assert_eq!(Locale::from_lang_tag("zh-Hant-TW"), Locale::ZhTw);
+        assert_eq!(Locale::from_lang_tag("zh-Hant-HK"), Locale::ZhTw);
         assert_eq!(Locale::from_lang_tag("zh-HK"), Locale::ZhTw);
         assert_eq!(Locale::from_lang_tag("ja_JP.UTF-8"), Locale::Ja);
         assert_eq!(Locale::from_lang_tag("fr_FR.UTF-8"), Locale::Fr);

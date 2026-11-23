@@ -410,6 +410,7 @@ async fn run_official_acp_job_inner(
         sandbox_profile: Some("off".into()),
         json_schema: None,
         plugin_dirs: Vec::new(),
+        use_app_director_rules: false,
         extra_rules: Some(
             "You are an isolated official side-job. Complete the task and stop. \
 No repo edits. Prefer built-in tools. Keep the final answer concise and complete."
@@ -423,6 +424,7 @@ No repo edits. Prefer built-in tools. Keep the final answer concise and complete
         empty_mcp_servers: true,
         ssh_alias: None,
         folder_trust: false,
+        app_session_id: None,
     };
 
     tracing::info!(
@@ -1191,7 +1193,12 @@ pub fn mcp_server_acp_entry_reason() -> (Option<serde_json::Value>, &'static str
     )
 }
 
-fn which_node() -> Option<String> {
+/// Resolve the `node` binary for an injected stdio MCP server.
+///
+/// Shared with the PR-monitor MCP: `process_util::command` keeps a console from
+/// flashing on Windows, and callers fall back to the bare name when `which` is
+/// unavailable rather than dropping the server.
+pub(crate) fn which_node() -> Option<String> {
     for name in ["node", "nodejs"] {
         if let Ok(out) = process_util::command("which").arg(name).output() {
             if out.status.success() {

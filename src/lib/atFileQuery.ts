@@ -23,7 +23,11 @@ export type AtQuery = {
  * Query is the non-whitespace rest after `@`.
  */
 export function detectAtQuery(textBeforeCursor: string): AtQuery | null {
+  // Fullwidth ＠ (U+FF20) is what a Chinese IME emits for @. It is one
+  // code unit, so indexes still line up with the stored draft, which keeps
+  // that character and has already dropped zero-width caret pads.
   const text = textBeforeCursor
+    .replace(/\uFF20/g, "@")
     .replace(/[\u200B-\u200D\uFEFF\u2060]/g, "")
     .replace(/[\s\u00a0]+$/u, "");
   const m = /(^|[\s])@([^\s@]*)$/u.exec(text);
@@ -62,7 +66,25 @@ export type AtFileHit = {
   name: string;
   relativePath: string;
   mtimeMs?: number;
+  /** True for a directory hit — the composer can reference a directory. */
+  isDir?: boolean;
 };
+
+/**
+ * Map codebase-search hits to `@` panel entries.
+ *
+ * `isDir` has to survive this mapping: `applyAtFileToComposer` picks the
+ * reference kind from it, and the panel draws the row's icon from it.
+ */
+export function toAtFileHits(hits: ReadonlyArray<AtFileHit>): AtFileHit[] {
+  return hits.map((h) => ({
+    path: h.path,
+    name: h.name,
+    relativePath: h.relativePath,
+    mtimeMs: h.mtimeMs,
+    isDir: !!h.isDir,
+  }));
+}
 
 /**
  * Fuzzy score for ranking file hits against a query.

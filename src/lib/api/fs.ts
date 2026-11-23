@@ -69,6 +69,21 @@ export async function clipboardFilePaths() {
   }
 }
 
+/**
+ * Plain text from the OS clipboard.
+ * Empty when the clipboard has no text. The WebView clipboard API is a
+ * separate store and often reports empty on Linux.
+ */
+export async function clipboardReadText() {
+  if (!isTauri()) return "";
+  try {
+    const text = await invoke<string>("clipboard_read_text");
+    return typeof text === "string" ? text : "";
+  } catch {
+    return "";
+  }
+}
+
 export interface PathEntry {
   path: string;
   name: string;
@@ -274,6 +289,8 @@ export type CodebaseSearchHit = {
   path: string;
   name: string;
   relativePath: string;
+  /** True when the hit is a directory (only when `includeDirs` was asked for). */
+  isDir?: boolean;
   size: number;
   mtimeMs: number;
   snippet: string;
@@ -303,12 +320,15 @@ export async function projectCodebaseSearch(opts: {
   query: string;
   mode?: "name" | "content" | "all" | string | null;
   limit?: number | null;
+  /** Also return a directory whose name matches (the `@` panel needs it). */
+  includeDirs?: boolean | null;
 }) {
   return invoke<CodebaseSearchResult>("project_codebase_search", {
     projectPath: opts.projectPath,
     query: opts.query,
     mode: opts.mode ?? null,
     limit: opts.limit ?? null,
+    includeDirs: opts.includeDirs ?? null,
   });
 }
 

@@ -62,6 +62,7 @@ describe("i18n catalog", () => {
         "pt-BR",
         "ru",
         "ta",
+        "tr",
         "uk",
         "zh",
         "zh-TW",
@@ -332,6 +333,9 @@ describe("resolveLocaleFromSystem", () => {
     expect(resolveLocaleFromSystem("zh_CN")).toBe("zh");
     expect(resolveLocaleFromSystem("zh-Hans")).toBe("zh");
     expect(resolveLocaleFromSystem("zh-Hans-CN")).toBe("zh");
+    expect(resolveLocaleFromSystem("zh-Hans-HK")).toBe("zh");
+    expect(resolveLocaleFromSystem("zh-Hans-MO")).toBe("zh");
+    expect(resolveLocaleFromSystem("zh-Hans-TW")).toBe("zh");
     expect(resolveLocaleFromSystem("zh-SG")).toBe("zh");
     expect(resolveLocaleFromSystem("zh_CN.UTF-8")).toBe("zh");
   });
@@ -341,6 +345,8 @@ describe("resolveLocaleFromSystem", () => {
     expect(resolveLocaleFromSystem("zh_TW")).toBe("zh-TW");
     expect(resolveLocaleFromSystem("zh-Hant")).toBe("zh-TW");
     expect(resolveLocaleFromSystem("zh-Hant-TW")).toBe("zh-TW");
+    expect(resolveLocaleFromSystem("zh-Hant-HK")).toBe("zh-TW");
+    expect(resolveLocaleFromSystem("zh-Hant-CN")).toBe("zh-TW");
     expect(resolveLocaleFromSystem("zh-HK")).toBe("zh-TW");
     expect(resolveLocaleFromSystem("zh-MO")).toBe("zh-TW");
     expect(resolveLocaleFromSystem("zh_TW.UTF-8")).toBe("zh-TW");
@@ -358,6 +364,7 @@ describe("resolveLocaleFromSystem", () => {
     expect(resolveLocaleFromSystem("fr-CA")).toBe("fr");
     expect(resolveLocaleFromSystem("it-IT")).toBe("it");
     expect(resolveLocaleFromSystem("uk-UA")).toBe("uk");
+    expect(resolveLocaleFromSystem("tr-TR")).toBe("tr");
     expect(resolveLocaleFromSystem("id-ID")).toBe("id");
     expect(resolveLocaleFromSystem("fil-PH")).toBe("fil");
     expect(resolveLocaleFromSystem("ta-IN")).toBe("ta");
