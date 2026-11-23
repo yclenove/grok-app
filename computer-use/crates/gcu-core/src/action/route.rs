@@ -58,12 +58,13 @@ pub(crate) fn pointer_needed(
 }
 fn target<'a>(gate: &Gate, fresh: &'a Fresh) -> Option<&'a RawNode> {
     gate.element.as_ref().and_then(|e| {
-        fresh
+        let nodes = fresh
             .tree
             .nodes()
             .into_iter()
-            .find(|(_, n)| n.node.handle.ptr_eq(&e.handle))
             .map(|(_, n)| &n.node)
+            .collect();
+        gate::live_match(nodes, |node: &&'a RawNode| *node, e)
     })
 }
 fn semantic_press(n: &RawNode) -> Option<NodeAction> {

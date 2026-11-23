@@ -66,9 +66,37 @@ pub(crate) fn error(code: ErrorCode) -> ToolError {
     ToolError {
         code,
         message: code.as_str().replace('_', " "),
-        hint: "Use the attached state; obtain fresh user authorization when required.".into(),
+        hint: hint(code).into(),
         retryable: false,
         state: None,
+    }
+}
+
+/// A next step the model can act on; the generic text left it guessing.
+fn hint(code: ErrorCode) -> &'static str {
+    use ErrorCode as C;
+    match code {
+        C::AppNotFound => "Call list_apps for the exact name, or pass the app name to launch_app.",
+        C::WindowNotFound | C::WindowGone => {
+            "The app has no usable window. Call list_windows, or launch_app to open it, then get_app_state again."
+        }
+        C::WindowMinimized => "Restore the window with launch_app, then call get_app_state again.",
+        C::StaleElement | C::StaleGeometry | C::StaleScreenshot | C::ElementNotActionable => {
+            "Call get_app_state for fresh state and use the new element indexes."
+        }
+        C::OutOfBounds => "Use coordinates inside the latest screenshot.",
+        C::UserActive => "The user is using the computer. Wait a few seconds, then retry.",
+        C::Busy | C::Timeout => "Retry once; if it fails again, call get_app_state.",
+        C::StoppedByUser => {
+            "The user pressed Stop. Do not retry; tell the user. They can resume from the Computer Use panel or with `gcu resume` in a terminal."
+        }
+        C::ApprovalDenied | C::ApprovalTimeout => {
+            "The user did not approve this. Do not retry without asking the user."
+        }
+        C::PermissionMissing => {
+            "Ask the user to grant the missing OS permission to Grok Computer Use (macOS: Accessibility and Screen Recording in Privacy & Security)."
+        }
+        _ => "Use the attached state; obtain fresh user authorization when required.",
     }
 }
 

@@ -232,18 +232,18 @@ async fn auto_incomplete_before_or_after_capture_requires_handoff() {
 }
 
 #[tokio::test]
-async fn auto_tree_capture_state_mismatch_does_not_deliver_an_image() {
+async fn auto_tree_capture_state_mismatch_reads_again_before_delivering() {
     let h = Rig::new("form", calibrated(1));
     let mut raw = h.driver.raw("fake.form").await;
     raw.root.as_mut().unwrap().name = Some("Changed during capture".into());
     h.driver.replace_after_capture(raw);
-    let error = h.observe(json!("auto")).await.unwrap_err();
-    assert_eq!(error.code, ErrorCode::StaleScreenshot);
-    assert!(error.state.is_none());
+    // The mismatched capture is dropped; the next read is consistent.
+    h.observe(json!("auto")).await.unwrap();
+    assert!(h.driver.captures() >= 2);
 }
 
 #[tokio::test]
-async fn auto_geometry_change_during_capture_does_not_deliver_an_image() {
+async fn auto_geometry_change_during_capture_reads_again_before_delivering() {
     use gcu_core::driver::Driver;
     use gcu_driver_fake::faults::Fault;
     let h = Rig::new("form", calibrated(1));
@@ -263,9 +263,9 @@ async fn auto_geometry_change_during_capture_does_not_deliver_an_image() {
         })
         .await
         .unwrap();
-    let error = h.observe(json!("auto")).await.unwrap_err();
-    assert_eq!(error.code, ErrorCode::StaleGeometry);
-    assert!(error.state.is_none());
+    // The capture taken across the move is dropped; the next read is consistent.
+    h.observe(json!("auto")).await.unwrap();
+    assert!(h.driver.captures() >= 2);
 }
 
 #[tokio::test]

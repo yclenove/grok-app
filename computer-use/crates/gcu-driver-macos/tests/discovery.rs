@@ -117,6 +117,32 @@ async fn resolve_running_without_executable_url_matches_bundle_stem() {
 }
 
 #[tokio::test]
+async fn resolve_takes_a_unique_partial_name_only() {
+    let api = Arc::new(FakeMacApi::default());
+    api.add_running(
+        7,
+        &signed_facts("com.example.GcuFixture", "/Applications/gcu-fixture.app"),
+    );
+    api.add_running(
+        8,
+        &signed_facts("com.example.Notes", "/Applications/Notes.app"),
+    );
+    api.add_running(
+        9,
+        &signed_facts("com.example.Notes2", "/Applications/Notes Pro.app"),
+    );
+    let driver = start(api).await;
+    let app = driver
+        .resolve_app(&AppQuery::from("Fixture"))
+        .await
+        .unwrap();
+    assert_eq!(app.info.pid, Some(7));
+    // "Note" matches two apps and "fx" is too short: neither guesses.
+    assert!(driver.resolve_app(&AppQuery::from("Note")).await.is_err());
+    assert!(driver.resolve_app(&AppQuery::from("fx")).await.is_err());
+}
+
+#[tokio::test]
 async fn resolve_absolute_path_outside_spotlight() {
     let api = Arc::new(FakeMacApi::default());
     let facts = signed_facts("com.example.Fixture", "/Applications/Fixture.app");
