@@ -399,6 +399,7 @@ mod seed;
 pub(crate) use seed::seed_auth;
 #[cfg(all(test, unix))]
 pub(crate) use seed::seed_auth_in;
+pub(crate) use seed::write_back_auth;
 
 /// S3 uses only a trusted in-memory fake manifest, never fixture state JSON.
 pub(crate) async fn start_scope(

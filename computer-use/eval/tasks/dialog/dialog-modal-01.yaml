@@ -1,8 +1,8 @@
 id: dialog-modal-01
 platforms: [macos, windows, linux]
 category: dialog
-prompt_zh: "关闭夹具里的模态对话框，且只关闭一次。"
-prompt_en: "Close the fixture modal dialog once."
+prompt_zh: "在夹具里打开模态对话框（若未打开），然后点「确认」关闭它，只关闭一次。"
+prompt_en: "In the Fixture app, open the modal dialog if it is not open, then close it once with Confirm."
 setup: { launch: fixture, scene: modal }
 oracle:
   all:

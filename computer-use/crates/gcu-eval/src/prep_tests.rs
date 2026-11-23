@@ -29,6 +29,28 @@ fn environment(root: &Path) -> Environment {
 }
 
 #[test]
+fn write_back_replaces_a_rotated_login_and_skips_an_unchanged_one() {
+    use std::os::unix::fs::PermissionsExt;
+    let seed = scratch("wb-seed");
+    std::fs::write(seed.join("auth.json"), b"old").unwrap();
+    let home = scratch("wb-home");
+    std::fs::write(home.join("auth.json"), b"rotated").unwrap();
+    assert!(super::write_back_auth(&seed, &home).unwrap());
+    assert_eq!(std::fs::read(seed.join("auth.json")).unwrap(), b"rotated");
+    let mode = std::fs::metadata(seed.join("auth.json"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    assert!(!seed.join(".auth.json.writeback").exists());
+    assert!(!super::write_back_auth(&seed, &home).unwrap());
+    std::fs::remove_file(home.join("auth.json")).unwrap();
+    assert!(!super::write_back_auth(&seed, &home).unwrap());
+    let _ = std::fs::remove_dir_all(&seed);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
 fn auth_seed_copies_only_the_login_file_with_owner_only_permissions() {
     use std::os::unix::fs::PermissionsExt;
     let seed = scratch("seed");
