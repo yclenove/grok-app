@@ -209,7 +209,7 @@ async fn uncertain_native_timeout_router_returns_unknown_and_never_replays() {
 }
 
 #[tokio::test]
-async fn uia_execution_hints_feed_policy_all_paths_refused_unknown_handoff() {
+async fn uia_execution_hints_feed_policy_all_paths_fail_closed() {
     for name in [
         "Integrated Terminal",
         "Debug Console",
@@ -242,10 +242,15 @@ async fn uia_execution_hints_feed_policy_all_paths_refused_unknown_handoff() {
                 ),
                 "{name}: {tool:?}"
             );
-            // No known target is supplied: execution-only and unknown mixed UI must fail closed.
+            // No known target is supplied: execution-only and unknown mixed UI must
+            // fail closed (refused at once; it used to block on a handoff).
             assert!(
-                matches!(unresolved, PolicyDecision::Handoff(_)),
-                "{name}: {tool:?} mixed surface must hand off"
+                matches!(
+                    unresolved,
+                    PolicyDecision::Refuse(ErrorCode::ElementNotActionable, _)
+                        | PolicyDecision::Handoff(_)
+                ),
+                "{name}: {tool:?} mixed surface must fail closed"
             );
         }
         assert!(

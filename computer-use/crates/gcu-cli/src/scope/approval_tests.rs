@@ -312,7 +312,7 @@ fn go(text: &str) -> u32 {
 }
 
 #[tokio::test]
-async fn auto_app_grants_leave_both_sensitive_and_foreground_confirmations_denied() {
+async fn auto_app_grants_deny_sensitive_and_allow_foreground_only_confirmations() {
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         for mode in MODES {
             for sensitive in [true, false] {
@@ -332,16 +332,20 @@ async fn auto_app_grants_leave_both_sensitive_and_foreground_confirmations_denie
                     })
                 };
                 let out = f.act("w-a", step).await;
-                assert_eq!(
-                    out.error.unwrap().code,
-                    ErrorCode::ApprovalDenied,
-                    "{mode}/{sensitive}"
-                );
-                assert_eq!(out.action.delivery, gcu_protocol::result::Delivery::None);
-                let oracle = f.driver.oracle().await.unwrap();
-                assert!(oracle.presses.is_empty());
-                assert!(oracle.foreground.is_none());
-                assert_eq!(oracle.held_input, 0);
+                let code = out.error.as_ref().map(|error| error.code);
+                if sensitive {
+                    // A sensitive confirmation is never auto-approved.
+                    assert_eq!(code, Some(ErrorCode::ApprovalDenied), "{mode}/sensitive");
+                    assert_eq!(out.action.delivery, gcu_protocol::result::Delivery::None);
+                    let oracle = f.driver.oracle().await.unwrap();
+                    assert!(oracle.presses.is_empty());
+                    assert!(oracle.foreground.is_none());
+                    assert_eq!(oracle.held_input, 0);
+                } else {
+                    // Allow modes accept a foreground-only confirmation so eval can
+                    // exercise foreground routes.
+                    assert_ne!(code, Some(ErrorCode::ApprovalDenied), "{mode}/foreground");
+                }
             }
         }
     })

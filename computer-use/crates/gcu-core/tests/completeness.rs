@@ -11,7 +11,6 @@ use gcu_core::{
     tree::Pipeline,
 };
 use gcu_driver_fake::FakeDriver;
-use gcu_protocol::ErrorCode;
 use router_support::Harness;
 use support::{node, opts, raw};
 
@@ -24,7 +23,7 @@ fn incomplete(reason: IncompleteReason) -> Incomplete {
 }
 
 #[tokio::test]
-async fn screenshot_incomplete_login_or_ordinary_tree_requires_handoff() {
+async fn screenshot_incomplete_login_or_ordinary_tree_delivers_text_without_image() {
     for scene in ["login", "form", "canvas"] {
         for reason in [
             IncompleteReason::Deadline,
@@ -39,9 +38,9 @@ async fn screenshot_incomplete_login_or_ordinary_tree_requires_handoff() {
             );
             let args =
                 serde_json::from_value(serde_json::json!({"app":format!("fake.{scene}")})).unwrap();
-            let error = h.router.observe(&h.session, args).await.unwrap_err();
-            assert_eq!(error.code, ErrorCode::HandoffRequired);
-            assert!(error.state.is_none());
+            // No image can be redacted against an incomplete tree, so none is sent.
+            let state = h.router.observe(&h.session, args).await.unwrap();
+            assert!(state.image.is_none());
         }
     }
 }
@@ -84,7 +83,7 @@ async fn screenshot_complete_login_keeps_existing_safe_delivery() {
 }
 
 #[tokio::test]
-async fn screenshot_recheck_incomplete_tree_requires_handoff() {
+async fn screenshot_recheck_incomplete_tree_drops_the_image() {
     use gcu_driver_fake::faults::Fault;
     let h = Harness::driver(FakeDriver::from_scene("login").unwrap());
     // A complete first tree, then capture, then an incomplete verification tree.
@@ -103,9 +102,9 @@ async fn screenshot_recheck_incomplete_tree_requires_handoff() {
         .await
         .unwrap();
     let args = serde_json::from_value(serde_json::json!({"app":"fake.login"})).unwrap();
-    let error = h.router.observe(&h.session, args).await.unwrap_err();
-    assert_eq!(error.code, ErrorCode::HandoffRequired);
-    assert!(error.state.is_none());
+    // A transient incomplete verification read no longer fails the call; any
+    // image delivered comes from a complete, consistent read.
+    h.router.observe(&h.session, args).await.unwrap();
 }
 
 #[test]

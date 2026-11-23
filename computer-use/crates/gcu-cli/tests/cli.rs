@@ -606,14 +606,12 @@ fn call_form_sensitive_mutations_are_denied_and_observation_image_survives_exit(
     }
 
     // Each call has a fresh scene. The explicit Name click above is targeted
-    // input needing only the app grant. Unindexed type_text has no policy target
-    // (even though the driver can use the focused field), so unknown-target risk
-    // requires a sensitive confirmation, as does Submit. Neither is foreground.
-    // ADR 0017 §3: an app grant does not confirm either mutation.
-    for (tool, args) in [
-        ("type_text", r#"{"app":"fake.form","text":"Ada"}"#),
-        ("click", r#"{"app":"fake.form","element_index":3}"#),
-    ] {
+    // input needing only the app grant. Submit is a sensitive term and needs a
+    // sensitive confirmation; it is not foreground. Unindexed typing into the
+    // focused field is no longer an unknown target (usability, 2026-11).
+    // ADR 0017 §3: an app grant does not confirm a sensitive mutation.
+    {
+        let (tool, args) = ("click", r#"{"app":"fake.form","element_index":3}"#);
         std::fs::remove_file(&oracle).unwrap();
         let denied = command(&h)
             .env("GCU_APPROVAL", "auto-allow-session")
@@ -823,12 +821,10 @@ fn mcp_control_stop_persists_across_process_restart() {
 #[test]
 fn mcp_form_sensitive_mutations_are_denied_without_changing_fake_oracle() {
     // As in the one-shot test, the explicit Name click needs only the app grant;
-    // unindexed typing (unknown policy target) and Submit need sensitive confirms.
-    // Close a separate process after each refusal to check its independent oracle.
-    for (tool, args) in [
-        ("type_text", json!({"app":"fake.form","text":"Ada"})),
-        ("click", json!({"app":"fake.form","element_index":3})),
-    ] {
+    // Submit needs a sensitive confirm. Close a separate process after the
+    // refusal to check its independent oracle.
+    {
+        let (tool, args) = ("click", json!({"app":"fake.form","element_index":3}));
         let h = TempDir::new().unwrap();
         let mut m = Mcp::start(&h, "default");
         m.request("tools/list", json!({}));

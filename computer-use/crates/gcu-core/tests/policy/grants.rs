@@ -388,6 +388,7 @@ async fn approval_wait_session_close_denies_without_recording() {
         text: "click \"Save draft\"".into(),
         snapshot_id: "snap".into(),
         action_digest: [1; 32],
+        foreground_only: false,
     };
     let again = Arc::new(Session::open(
         "s2",

@@ -234,7 +234,7 @@ async fn native_editor_save_allows_until_strict() {
 }
 
 #[tokio::test]
-async fn ide_execution_paths_refuse_and_a_miss_hands_off() {
+async fn ide_execution_paths_and_an_untargeted_miss_refuse() {
     let (window, tree) = scene("ide", "Fixture IDE — main.rs").await;
     let app = notes();
     let grants = grants_for(&app);
@@ -311,9 +311,10 @@ async fn ide_execution_paths_refuse_and_a_miss_hands_off() {
         &miss,
         false,
     );
+    // A miss in a mixed window is refused at once (no blocking handoff).
     assert!(matches!(
         decision,
-        PolicyDecision::Handoff(HandoffReason::Other(_))
+        PolicyDecision::Refuse(gcu_protocol::ErrorCode::ElementNotActionable, _)
     ));
 }
 
