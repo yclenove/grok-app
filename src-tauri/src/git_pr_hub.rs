@@ -20,7 +20,9 @@ const COMMENTS_CAP: usize = 50;
 const EXCERPT_CAP: usize = 200;
 
 const LIST_JSON_FIELDS: &str = "number,title,author,url,mergeable,state,headRefName,baseRefName,isDraft,statusCheckRollup,createdAt,updatedAt";
-const VIEW_JSON_FIELDS: &str = "number,title,author,url,mergeable,state,headRefName,baseRefName,isDraft,statusCheckRollup,createdAt,updatedAt,body";
+/// PR fields shared by `pr list` and `pr view`; PR monitors extend it with
+/// `comments,reviews` so one call covers a whole poll.
+pub const VIEW_JSON_FIELDS: &str = "number,title,author,url,mergeable,state,headRefName,baseRefName,isDraft,statusCheckRollup,createdAt,updatedAt,body";
 const CHECKS_JSON_FIELDS: &str = "name,state,bucket,link,description,workflow";
 const COMMENTS_JSON_FIELDS: &str = "number,url,comments,reviews";
 
@@ -443,16 +445,50 @@ pub fn parse_gh_pr_list_json(stdout: &str) -> Result<Vec<GitPrHubEntry>, String>
     Ok(out)
 }
 
-/// Pure parse for `gh pr view --json` stdout.
-pub fn parse_gh_pr_view_json(stdout: &str) -> Result<Option<GitPrHubEntry>, String> {
+/// Pure parse for `gh pr view --json` stdout, with the CI rows the same call
+/// carried: a PR monitor needs both the rollup a row shows and the failing rows
+/// a fix-CI prompt names, and neither is worth a second `gh` call.
+pub fn parse_gh_pr_view_with_checks(
+    stdout: &str,
+) -> Result<Option<(GitPrHubEntry, Vec<GitPrCheckEntry>)>, String> {
     if stdout.trim().is_empty() {
         return Ok(None);
     }
     let value = parse_json_value(stdout)?;
-    if let Some(arr) = value.as_array() {
-        return Ok(arr.first().and_then(parse_gh_pr_object));
-    }
-    Ok(parse_gh_pr_object(&value))
+    let object = match value.as_array() {
+        Some(arr) => match arr.first() {
+            Some(first) => first,
+            None => return Ok(None),
+        },
+        None => &value,
+    };
+    let Some(entry) = parse_gh_pr_object(object) else {
+        return Ok(None);
+    };
+    let rows = object
+        .get("statusCheckRollup")
+        .or_else(|| object.get("status_check_rollup"))
+        .or_else(|| object.get("checks"))
+        .map(check_rows_from_rollup)
+        .unwrap_or_default();
+    Ok(Some((entry, rows)))
+}
+
+/// Pure parse for `gh pr view --json` stdout.
+pub fn parse_gh_pr_view_json(stdout: &str) -> Result<Option<GitPrHubEntry>, String> {
+    Ok(parse_gh_pr_view_with_checks(stdout)?.map(|(entry, _rows)| entry))
+}
+
+/// Check rows of a GraphQL `statusCheckRollup` array, classified the same way
+/// `summarize_status_check_rollup` classifies them.
+pub fn check_rows_from_rollup(rollup: &serde_json::Value) -> Vec<GitPrCheckEntry> {
+    let Some(arr) = rollup.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .take(CHECKS_CAP)
+        .filter_map(parse_gh_pr_check_object)
+        .collect()
 }
 
 /// Pure parse for one check row.
@@ -801,7 +837,7 @@ fn probe_gh() -> bool {
         .unwrap_or(false)
 }
 
-fn run_gh_in_project(project: &str, args: &[&str]) -> Result<Output, String> {
+pub(crate) fn run_gh_in_project(project: &str, args: &[&str]) -> Result<Output, String> {
     let mut cmd = process_util::command("gh");
     if let Some(path_env) = process_util::enriched_path_env() {
         cmd.env("PATH", path_env);
@@ -811,6 +847,8 @@ fn run_gh_in_project(project: &str, args: &[&str]) -> Result<Output, String> {
     // Avoid interactive auth prompts hanging the host.
     cmd.env("GH_PROMPT_DISABLED", "1");
     cmd.env("GIT_TERMINAL_PROMPT", "0");
+    // `--json` stdout is parsed: a colored terminal must not wrap it in ANSI.
+    process_util::apply_no_color_env_std(&mut cmd);
 
     // Best-effort timeout via spawn + wait (sync path for Tauri command).
     let mut child = cmd
@@ -894,7 +932,9 @@ fn soft_fail_comments(
     }
 }
 
-fn prepare_project(project_path: &str) -> Result<String, (String, bool, bool)> {
+/// Normalize + probe a project folder for GitHub PR reads (also used by the
+/// PR monitor, which needs the same "is this a usable repo with gh" gate).
+pub(crate) fn prepare_project(project_path: &str) -> Result<String, (String, bool, bool)> {
     let project = normalize_project_path(project_path);
     if project.is_empty() {
         return Err(("empty path".into(), false, false));

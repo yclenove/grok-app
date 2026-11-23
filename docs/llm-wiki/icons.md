@@ -11,7 +11,7 @@ Two **separate** pipelines — never mix them.
 
 ## Rules
 
-1. **App / dock** uses the authored `AppIcon.appiconset` rasters only (black production, white `icons/dev`). Pack with `scripts/pack_appiconset.py` — **never** `sips -z` / LANCZOS. Listed in `tauri.conf.json` → `bundle.icon`.
+1. **App / dock** uses the authored `AppIcon.appiconset` rasters only (black production, white `icons/dev`). Pack with `scripts/pack_appiconset.py` — **never** `sips -z` / LANCZOS. Listed in `tauri.conf.json` → `bundle.icon`. The `.icns` embeds PNG only in `ic07`–`ic14`. Do not put PNG in `icp4` / `icp5` / `icp6`: macOS paints those legacy slots as colored stripes in System Settings and process lists.
 2. **Tray / status bar** uses marks from `logo.svg` only. Embedded in `src-tauri/src/tray.rs` via `include_bytes!`. **macOS**: monochrome template + `icon_as_template(true)` (the bar inverts it). **Windows**: contrast badges (`tray-win-light.png` / `tray-win-dark.png`) — there is no template invert, so a black glyph vanishes on a dark taskbar. Light taskbars keep the black tile; dark taskbars use a **white glyph on transparency** (not a white rounded tile, and not black-on-transparent). Do not follow the in-app theme; follow the taskbar (`SystemUsesLightTheme`).
 3. Do not point the tray at `icon.png` or the dock at `tray-*.png`.
 4. Menu-bar icons must stay **padded** (~14% margin) and **retina-sized** (36px for 18pt display). Tiny unpadded rasters look like a blob on Retina.
@@ -26,6 +26,7 @@ Two **separate** pipelines — never mix them.
 - **Windows unread overlay** (opt-in, **default off**, independent of dock/tray `trayBusyBadge`): frontend `tray_set_windows_overlay` uses `WebviewWindow::set_overlay_icon` (16×16 painted badge from `win_taskbar_overlay`). `set_busy_count` does **not** drive the overlay. Do **not** call `set_badge_count` on Windows — Tauri documents it as unsupported and wry no-ops it. Re-apply the last overlay count after AddTab.
 - Reopen via **Dock click** (`RunEvent::Reopen` → `show_main_window`) or tray **Open Grok** / menu actions.
 - **Windows shell**: `win_shell.rs` sets process AppUserModelID from the bundled `identifier` (release `com.grokapp.desktop`; `pnpm dev` overlay `com.grokapp.desktop.dev`) and re-asserts `WS_EX_APPWINDOW` / `WS_MINIMIZEBOX` / taskbar tab on setup and every show so Explorer **Show Desktop** (taskbar far-right) minimizes the window even when it is alone.
+- **WebView2 crash recovery** (Windows only): `ICoreWebView2::ProcessFailed` is installed on the main window in setup and on every later webview at page load (`win_webview_recovery.rs`). Browser-process exit destroys that window and builds it again (same label, saved bounds, current route). Renderer exit or unresponsive calls `Reload` on the control that failed. At most 3 recoveries per window per 60 seconds; the next one is written to `app.log` and stops. `Window::destroy` does not emit `CloseRequested`, so close-to-tray does not hide the dead window instead of dropping it. While a rebuild is in flight, `RunEvent::ExitRequested` with `code: None` (last window gone) is cancelled. Tray **Quit Grok** and `app.exit` pass `Some(code)` and still exit. macOS and Linux do not compile this path.
 - **Quit Grok** in the tray menu (or app quit) fully exits.
 
 ## Window chrome by platform

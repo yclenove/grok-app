@@ -21,6 +21,11 @@ export interface AppSettings {
   wslDistro?: string | null;
   /** Path to grok inside WSL (e.g. grok, ~/.grok/bin/grok). */
   wslCliPath?: string | null;
+  /**
+   * Linux-native GROK_HOME when cliBackend is wsl.
+   * Empty = distro ~/.grok. Must not be /mnt/… .
+   */
+  wslGrokHome?: string | null;
   permissionPolicy: string;
   modelId: string | null;
   effort: string | null;
@@ -151,6 +156,12 @@ export interface AppSettings {
    */
   allowedTools?: string[];
   planEnabled?: boolean;
+  /**
+   * When true, ask Grok to lane large work into a background workflow or
+   * background subagents. Default false. The next composer message is wrapped,
+   * and the next agent spawn sends the same paragraph as ACP `_meta.rules`.
+   */
+  directorEnabled?: boolean;
   subagentsEnabled?: boolean;
   /**
    * Enable CLI subagent worktree snapshot (CLI 0.2.117+).
@@ -275,6 +286,8 @@ export interface AvailableModel {
   reasoningEfforts?: ReasoningEffort[];
   /** Model context window in tokens (live-merged from `initialize` first). */
   contextWindow?: number | null;
+  /** Selectable windows from CLI `info.context_windows` (catalog order). */
+  contextWindows?: number[] | null;
 }
 
 export interface AvailableModelsResult {
@@ -366,6 +379,29 @@ export async function sessionSetModel(
     modelId,
     projectId: opts?.projectId ?? null,
     sessionId: opts?.sessionId ?? null,
+  });
+}
+
+/**
+ * Set the live session's context window (`session/set_model` `_meta.contextWindow`).
+ * Does not change the stored model or reasoning effort. Official routes only.
+ */
+export async function sessionSetContextWindow(
+  tokens: number,
+  opts?: { sessionId?: string | null },
+) {
+  if (!isTauri()) return;
+  return invoke<void>("session_set_context_window", {
+    tokens,
+    sessionId: opts?.sessionId ?? null,
+  });
+}
+
+/** Live `x.ai/session/info` payload for `/context`. */
+export async function sessionContextInfo(sessionId?: string | null) {
+  if (!isTauri()) return null;
+  return invoke<unknown>("session_context_info", {
+    sessionId: sessionId ?? null,
   });
 }
 

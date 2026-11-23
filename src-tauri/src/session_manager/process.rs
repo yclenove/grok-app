@@ -1,6 +1,7 @@
 //! Process capacity, park/unpark, idle recycle, snapshots.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter};
@@ -294,6 +295,48 @@ impl SessionManager {
             .unwrap_or(false)
     }
 
+    /// Copy turn-phase signals for `GET /v1/sessions/{id}`.
+    /// `None` when this id has no live, background, or parked agent.
+    pub(crate) fn external_session_signals(
+        &self,
+        app_session_id: &str,
+    ) -> Option<crate::session_manager::ExternalSessionSignals> {
+        {
+            let guard = self.inner.lock();
+            if let Some(s) = guard.as_ref() {
+                if s.app_session_id == app_session_id {
+                    return Some(Self::signals_from_live(s));
+                }
+            }
+        }
+        {
+            let bg = self.background.lock();
+            if let Some(s) = bg.get(app_session_id) {
+                return Some(Self::signals_from_live(s));
+            }
+        }
+        let parked = self.parked.lock();
+        if parked.contains_key(app_session_id) {
+            Some(crate::session_manager::ExternalSessionSignals::parked_idle())
+        } else {
+            None
+        }
+    }
+
+    fn signals_from_live(s: &LiveSession) -> crate::session_manager::ExternalSessionSignals {
+        crate::session_manager::ExternalSessionSignals {
+            state: s.fsm.state(),
+            has_last_error: s.fsm.last_error().is_some(),
+            prompt_in_flight: s.prompt_in_flight,
+            open_tools: !s.open_tool_ids.is_empty(),
+            deferred_prompt_complete: s.deferred_prompt_complete.is_some(),
+            has_streaming_message: s.streaming_message_id.is_some(),
+            pending_plan: s.pending_plan_rpc_id.is_some(),
+            pending_ask_user: s.pending_ask_user_rpc_id.is_some(),
+            pending_permission: s.pending_permission_rpc_id.is_some(),
+        }
+    }
+
     /// True when any live or background mid-turn session is bound to `project_id`
     /// or has a worktree path under `project_path` (git switch safety).
     pub fn any_busy_turn_for_project(
@@ -401,6 +444,33 @@ impl SessionManager {
         )
     }
 
+    /// Record a provider `retry_state` without touching stall progress.
+    ///
+    /// Body-decode failures are remembered for the rest of the turn when the
+    /// host owns it. Other reasons still update `provider_retry_attempt` but
+    /// do not set the stall hint. Does not call `touch_stream_progress_locked`.
+    pub(super) fn note_provider_retry(s: &mut LiveSession, attempt: u32, reason: &str) {
+        s.provider_retry_attempt = attempt;
+        if !Self::should_apply_provider_retry_abort(s) {
+            return;
+        }
+        if crate::acp_client::is_stream_decode_retry_reason(reason) {
+            s.last_provider_retry = Some((Instant::now(), reason.to_string()));
+        }
+    }
+
+    pub(super) fn clear_provider_retry_memory(s: &mut LiveSession) {
+        s.provider_retry_attempt = 0;
+        s.provider_retry_aborted = false;
+        s.last_provider_retry = None;
+    }
+
+    pub(super) fn stream_interrupted_this_turn(s: &LiveSession) -> bool {
+        s.last_provider_retry
+            .as_ref()
+            .is_some_and(|(_, reason)| crate::acp_client::is_stream_decode_retry_reason(reason))
+    }
+
     /// Whether connect/respawn must keep the existing agent process.
     ///
     /// Terminal FSM states (`Disconnected` / `Idle`) never preserve the process —
@@ -448,6 +518,27 @@ impl SessionManager {
         s.stall_soft_emits = 0;
         s.saw_model_output = false;
         s.tools_this_turn = 0;
+        Self::clear_provider_retry_memory(s);
+    }
+
+    fn parked_agent_from_ready(s: &LiveSession, acp: Arc<AcpClient>) -> ParkedAgent {
+        let sandbox_profile = acp.sandbox_profile();
+        ParkedAgent {
+            process_id: s.process_id.clone(),
+            app_session_id: s.app_session_id.clone(),
+            meta: s.meta.clone(),
+            acp,
+            last_activity: s.last_activity,
+            model_id: s.model_id.clone(),
+            effort: s.effort.clone(),
+            product_mode: s.product_mode.clone(),
+            project_path: s.project_path.clone(),
+            policy: s.policy,
+            sandbox_profile,
+            needs_history_bootstrap: s.needs_history_bootstrap,
+            backend: s.backend.clone(),
+            sent_prompt_this_visit: s.sent_prompt_this_visit,
+        }
     }
 
     /// Park or background the current live session so focus can move.
@@ -564,22 +655,7 @@ impl SessionManager {
                         return Ok(());
                     }
                 }
-                let sandbox_profile = acp.sandbox_profile();
-                let parked = ParkedAgent {
-                    process_id: s.process_id.clone(),
-                    app_session_id: s.app_session_id.clone(),
-                    meta: s.meta.clone(),
-                    acp,
-                    last_activity: s.last_activity,
-                    model_id: s.model_id.clone(),
-                    effort: s.effort.clone(),
-                    product_mode: s.product_mode.clone(),
-                    project_path: s.project_path.clone(),
-                    policy: s.policy,
-                    sandbox_profile,
-                    needs_history_bootstrap: s.needs_history_bootstrap,
-                    backend: s.backend.clone(),
-                };
+                let parked = Self::parked_agent_from_ready(s, acp);
                 let _ = guard.take();
                 drop(guard);
                 self.parked
@@ -649,22 +725,7 @@ impl SessionManager {
         let Some(acp) = s.acp.take() else {
             return;
         };
-        let sandbox_profile = acp.sandbox_profile();
-        let parked = ParkedAgent {
-            process_id: s.process_id.clone(),
-            app_session_id: s.app_session_id.clone(),
-            meta: s.meta.clone(),
-            acp,
-            last_activity: s.last_activity,
-            model_id: s.model_id.clone(),
-            effort: s.effort.clone(),
-            product_mode: s.product_mode.clone(),
-            project_path: s.project_path.clone(),
-            policy: s.policy,
-            sandbox_profile,
-            needs_history_bootstrap: s.needs_history_bootstrap,
-            backend: s.backend.clone(),
-        };
+        let parked = Self::parked_agent_from_ready(&s, acp);
         self.parked
             .lock()
             .insert(parked.app_session_id.clone(), parked);
@@ -708,6 +769,7 @@ impl SessionManager {
             policy: parked.policy,
             provider_retry_attempt: 0,
             provider_retry_aborted: false,
+            last_provider_retry: None,
             needs_history_bootstrap: parked.needs_history_bootstrap,
             pending_plan_rpc_id: None,
             pending_permission_rpc_id: None,
@@ -728,11 +790,40 @@ impl SessionManager {
             tools_this_turn: 0,
             saw_model_output: false,
             prompt_in_flight: false,
-            sent_prompt_this_visit: false,
+            sent_prompt_this_visit: parked.sent_prompt_this_visit,
             pending_stream_emit: None,
             stream_emit_flush_gen: 0,
             last_tool_heartbeat_emit: None,
         })
+    }
+
+    /// Move a parked chat into `background` so a workflow result can land.
+    ///
+    /// Does not touch the live slot. `sent_prompt_this_visit` is the bit saved
+    /// at park time: a viewed-only chat stays closed, and a chat that already
+    /// sent can still open the follow-up.
+    pub(super) fn requeue_parked_as_background(&self, app_session_id: &str) -> bool {
+        if self.background.lock().contains_key(app_session_id) {
+            return true;
+        }
+        if self
+            .inner
+            .lock()
+            .as_ref()
+            .is_some_and(|s| s.app_session_id == app_session_id)
+        {
+            return false;
+        }
+        let Some(live) = self.unpark_to_live(app_session_id) else {
+            return false;
+        };
+        let sid = live.app_session_id.clone();
+        self.background.lock().insert(sid, live);
+        tracing::info!(
+            session = %app_session_id,
+            "workflow follow-up requeued parked session to background"
+        );
+        true
     }
 
     /// Move a background session into the (already cleared) live focus slot.
@@ -849,6 +940,7 @@ impl SessionManager {
 
         if in_background && self.promote_background_to_live(target_sid) {
             tracing::info!("acp focus: background → live sid={target_sid}");
+            self.emit_live_pending_stream(app);
             Self::emit_state(app, &self.snapshot());
             return Ok(true);
         }

@@ -155,6 +155,9 @@ const APP_APPEND_PROMPT_KEY: &str = "app_append_prompt";
 const APP_SUPPORTS_VISION_KEY: &str = "app_supports_vision";
 /// TOML field (ignored by Grok Build): relay transport semantics selected in App.
 const APP_PROVIDER_MODE_KEY: &str = "app_provider_mode";
+/// TOML field (ignored by Grok Build): this `[model.*]` section is one catalog
+/// row of a generic channel, not a provider card. Value is the parent section id.
+const APP_PARENT_PROVIDER_KEY: &str = "app_parent_provider";
 
 pub const PROVIDER_MODE_GENERIC: &str = "generic";
 pub const PROVIDER_MODE_GROK_BUILD_PROXY: &str = "grok_build_proxy";
@@ -728,7 +731,15 @@ fn model_header(id: &str) -> String {
 }
 
 fn parse_model_header_id(trimmed: &str) -> Option<String> {
-    let rest = trimmed.strip_prefix("[model.")?.strip_suffix(']')?;
+    // Same header rules as the config writer (`[model.id] # note`, quoted ids
+    // that contain `]`). `strip_suffix(']')` misses a trailing comment, so
+    // remove + append would leave the old section (and its `app_append_prompt`)
+    // in place and the save would look like it did not stick.
+    let (is_array, name) = crate::agent_home_config::parse_table_header(trimmed)?;
+    if is_array {
+        return None;
+    }
+    let rest = name.strip_prefix("model.")?;
     Some(unquote(rest).trim().to_string()).filter(|s| !s.is_empty())
 }
 
@@ -903,12 +914,7 @@ fn remove_section(text: &str, id: &str) -> String {
 }
 
 fn append_section(text: &str, id: &str, fields: &[(String, String)]) -> String {
-    let body: String = fields
-        .iter()
-        .filter(|(_, v)| !v.is_empty())
-        .map(|(k, v)| format!("{k} = {}", format_toml_field_value(k, v)))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let body = render_section_body(fields);
     let block = format!("\n{}\n{body}\n", model_header(id));
     let base = text.trim_end();
     if base.is_empty() {
@@ -916,6 +922,392 @@ fn append_section(text: &str, id: &str, fields: &[(String, String)]) -> String {
     } else {
         format!("{base}\n{block}")
     }
+}
+
+fn render_section_body(fields: &[(String, String)]) -> String {
+    fields
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| format!("{k} = {}", format_toml_field_value(k, v)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_section_block(id: &str, fields: &[(String, String)]) -> String {
+    format!("{}\n{}", model_header(id), render_section_body(fields))
+}
+
+/// Replace `[model.<id>]` in place, or append it. A matching block is left
+/// byte-for-byte so a second pass does not move comments or neighboring sections.
+fn replace_or_append_section(text: &str, id: &str, fields: &[(String, String)]) -> String {
+    let rendered = render_section_block(id, fields);
+    let sections = parse_model_sections(text);
+    let Some(hit) = sections.iter().find(|s| s.id == id) else {
+        return append_section(text, id, fields);
+    };
+    let lines = config_lines(text);
+    let existing = lines
+        .get(hit.start..hit.end)
+        .unwrap_or(&[])
+        .join("\n")
+        .trim_end()
+        .to_string();
+    if existing == rendered.trim_end() {
+        return text.to_string();
+    }
+    let mut out_lines: Vec<String> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i == hit.start {
+            out_lines.extend(rendered.split('\n').map(str::to_string));
+        }
+        if i >= hit.start && i < hit.end {
+            continue;
+        }
+        out_lines.push((*line).to_string());
+    }
+    let mut out = out_lines.join("\n");
+    if text.ends_with('\n') && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+fn stable_suffix(s: &str) -> String {
+    let mut h: u32 = 2_166_136_261;
+    for b in s.as_bytes() {
+        h ^= u32::from(*b);
+        h = h.wrapping_mul(16_777_619);
+    }
+    format!("{h:08x}")
+}
+
+/// TOML-bare slug for an upstream model id. Dots, slashes, and spaces become
+/// `-`. Case is kept so `GLM-A` and `glm-a` do not share a section.
+pub fn slug_model_id(model_id: &str) -> String {
+    let mut raw = String::new();
+    let mut prev_dash = false;
+    for c in model_id.trim().chars() {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            raw.push(c);
+            prev_dash = c == '-';
+        } else if !prev_dash && !raw.is_empty() {
+            raw.push('-');
+            prev_dash = true;
+        }
+    }
+    let raw = raw.trim_matches('-');
+    let raw = if raw.is_empty() { "model" } else { raw };
+    const MAX: usize = 48;
+    if raw.len() <= MAX {
+        return raw.to_string();
+    }
+    let hash = stable_suffix(model_id);
+    let keep = MAX.saturating_sub(7).min(raw.len());
+    let mut end = keep;
+    while end > 0 && raw.as_bytes()[end - 1] == b'-' {
+        end -= 1;
+    }
+    if end == 0 {
+        return format!("m-{}", &hash[..6]);
+    }
+    format!("{}-{}", &raw[..end], &hash[..6])
+}
+
+/// `[model.<providerId>__<slug>]` for one generic catalog row.
+pub fn generic_model_section_id(provider_id: &str, model_id: &str) -> String {
+    format!("{}__{}", provider_id.trim(), slug_model_id(model_id))
+}
+
+/// One generic catalog row and the TOML section `session/set_model` must name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenericSectionBinding {
+    pub section_id: String,
+    pub model_id: String,
+}
+
+fn assign_generic_sections(
+    provider_id: &str,
+    models: &[ProviderModelEntry],
+    foreign_ids: &std::collections::HashSet<String>,
+    existing_by_model: &std::collections::HashMap<String, String>,
+) -> Vec<GenericSectionBinding> {
+    let mut used = foreign_ids.clone();
+    let mut out = Vec::with_capacity(models.len());
+    for model in models {
+        if let Some(id) = existing_by_model.get(&model.id) {
+            if !used.contains(id) {
+                used.insert(id.clone());
+                out.push(GenericSectionBinding {
+                    section_id: id.clone(),
+                    model_id: model.id.clone(),
+                });
+                continue;
+            }
+        }
+        let base = generic_model_section_id(provider_id, &model.id);
+        let mut candidate = base.clone();
+        if used.contains(&candidate) {
+            let mut n = 2u32;
+            loop {
+                candidate = format!("{base}-{n}");
+                if !used.contains(&candidate) {
+                    break;
+                }
+                n += 1;
+                if n > 50 {
+                    candidate = format!("{base}-{}", &stable_suffix(&model.id)[..6]);
+                    break;
+                }
+            }
+        }
+        used.insert(candidate.clone());
+        out.push(GenericSectionBinding {
+            section_id: candidate,
+            model_id: model.id.clone(),
+        });
+    }
+    out
+}
+
+fn is_generic_parent(section: &Section) -> bool {
+    if !is_custom(&section.fields) {
+        return false;
+    }
+    if section
+        .fields
+        .get(APP_PARENT_PROVIDER_KEY)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    normalize_provider_mode(
+        section
+            .fields
+            .get(APP_PROVIDER_MODE_KEY)
+            .map(|s| s.as_str()),
+    ) != PROVIDER_MODE_GROK_BUILD_PROXY
+}
+
+fn generic_child_fields(
+    parent: &Section,
+    model: &ProviderModelEntry,
+    parent_id: &str,
+) -> Vec<(String, String)> {
+    let mut fields: Vec<(String, String)> = Vec::new();
+    fields.push(("model".into(), model.id.clone()));
+    if let Some(v) = parent.fields.get("base_url") {
+        fields.push(("base_url".into(), v.clone()));
+    }
+    let display = model.name.trim();
+    let display = if display.is_empty() {
+        model.id.as_str()
+    } else {
+        display
+    };
+    fields.push(("name".into(), display.to_string()));
+    if let Some(v) = parent.fields.get("api_key") {
+        fields.push(("api_key".into(), v.clone()));
+    }
+    let backend = parent
+        .fields
+        .get("api_backend")
+        .cloned()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "chat_completions".into());
+    fields.push(("api_backend".into(), backend));
+    let window = model.context_window.filter(|n| *n > 0).or_else(|| {
+        parent
+            .fields
+            .get("context_window")
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|n| *n > 0)
+    });
+    if let Some(n) = window {
+        fields.push(("context_window".into(), n.to_string()));
+    }
+    if let Some(v) = parent
+        .fields
+        .get(EXTRA_HEADERS_KEY)
+        .filter(|s| !s.trim().is_empty())
+    {
+        fields.push((EXTRA_HEADERS_KEY.into(), v.clone()));
+    }
+    if let Some(v) = parent.fields.get(SUPPORTS_REASONING_EFFORT_KEY) {
+        fields.push((SUPPORTS_REASONING_EFFORT_KEY.into(), v.clone()));
+    }
+    fields.push((APP_PROVIDER_MODE_KEY.into(), PROVIDER_MODE_GENERIC.into()));
+    fields.push((APP_PARENT_PROVIDER_KEY.into(), parent_id.to_string()));
+
+    const MANAGED: &[&str] = &[
+        "model",
+        "base_url",
+        "name",
+        "api_key",
+        "api_backend",
+        "context_window",
+        EXTRA_HEADERS_KEY,
+        SUPPORTS_REASONING_EFFORT_KEY,
+        APP_PROVIDER_MODE_KEY,
+        APP_PARENT_PROVIDER_KEY,
+        APP_MODELS_KEY,
+        APP_EFFORTS_KEY,
+        APP_APPEND_PROMPT_KEY,
+        APP_SUPPORTS_VISION_KEY,
+        APP_BASE_URL_FULL_PATH_KEY,
+    ];
+    let mut rest: Vec<(String, String)> = parent
+        .fields
+        .iter()
+        .filter(|(k, v)| !v.is_empty() && !MANAGED.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    rest.sort_by(|a, b| a.0.cmp(&b.0));
+    fields.extend(rest);
+    fields
+}
+
+fn sync_parent_children(text: &str, parent_id: &str) -> String {
+    let sections = parse_model_sections(text);
+    let Some(parent) = sections.iter().find(|s| s.id == parent_id).cloned() else {
+        return text.to_string();
+    };
+    let model_fallback = parent.fields.get("model").cloned().unwrap_or_default();
+    let name_fallback = parent
+        .fields
+        .get("name")
+        .cloned()
+        .unwrap_or_else(|| parent_id.to_string());
+    let models = decode_app_models(
+        parent.fields.get(APP_MODELS_KEY).map(|s| s.as_str()),
+        &model_fallback,
+        &name_fallback,
+    );
+    if models.is_empty() {
+        return text.to_string();
+    }
+    let children: Vec<Section> = sections
+        .iter()
+        .filter(|s| {
+            s.fields
+                .get(APP_PARENT_PROVIDER_KEY)
+                .is_some_and(|p| p == parent_id)
+        })
+        .cloned()
+        .collect();
+    let foreign_ids: std::collections::HashSet<String> = sections
+        .iter()
+        .filter(|s| {
+            !s.fields
+                .get(APP_PARENT_PROVIDER_KEY)
+                .is_some_and(|p| p == parent_id)
+        })
+        .map(|s| s.id.clone())
+        .collect();
+    let mut existing_by_model = std::collections::HashMap::new();
+    for child in &children {
+        if let Some(model_id) = child.fields.get("model").filter(|s| !s.is_empty()) {
+            existing_by_model
+                .entry(model_id.clone())
+                .or_insert_with(|| child.id.clone());
+        }
+    }
+    let assigned = assign_generic_sections(parent_id, &models, &foreign_ids, &existing_by_model);
+    let keep: std::collections::HashSet<String> =
+        assigned.iter().map(|b| b.section_id.clone()).collect();
+    let mut text = text.to_string();
+    for child in &children {
+        if !keep.contains(&child.id) {
+            text = remove_section(&text, &child.id);
+        }
+    }
+    for binding in &assigned {
+        let Some(model) = models.iter().find(|m| m.id == binding.model_id) else {
+            continue;
+        };
+        let fields = generic_child_fields(&parent, model, parent_id);
+        text = replace_or_append_section(&text, &binding.section_id, &fields);
+    }
+    text
+}
+
+fn drop_orphan_model_sections(text: &str) -> String {
+    let sections = parse_model_sections(text);
+    let parents: std::collections::HashSet<String> = sections
+        .iter()
+        .filter(|s| is_generic_parent(s))
+        .map(|s| s.id.clone())
+        .collect();
+    let orphans: Vec<String> = sections
+        .iter()
+        .filter(|s| {
+            s.fields
+                .get(APP_PARENT_PROVIDER_KEY)
+                .map(|p| !p.trim().is_empty() && !parents.contains(p.trim()))
+                .unwrap_or(false)
+        })
+        .map(|s| s.id.clone())
+        .collect();
+    let mut text = text.to_string();
+    for id in orphans {
+        text = remove_section(&text, &id);
+    }
+    text
+}
+
+/// Give every generic catalog row its own `[model.<provider>__<slug>]` section.
+///
+/// The parent section stays the channel (settings, `[models].default`,
+/// `app_models`). Child sections are what `session/set_model` names, so two
+/// chats can send different upstream models without rewriting the shared
+/// `model` field (#1337, #1394). Proxy channels are left alone. A second call
+/// on an already-synced file returns the same text. Hand-written sections that
+/// lack `app_parent_provider` are not rewritten.
+pub fn sync_generic_model_sections_in_text(text: &str) -> String {
+    let parent_ids: Vec<String> = parse_model_sections(text)
+        .into_iter()
+        .filter(is_generic_parent)
+        .map(|s| s.id)
+        .collect();
+    let mut text = text.to_string();
+    for id in parent_ids {
+        text = sync_parent_children(&text, &id);
+    }
+    drop_orphan_model_sections(&text)
+}
+
+/// Write per-model sections into App agent-home only. Never touches `~/.grok`.
+fn ensure_generic_model_sections() -> Result<(), String> {
+    let path = agent_config_toml();
+    let text = read_text(&path);
+    let next = sync_generic_model_sections_in_text(&text);
+    if next != text {
+        write_text(&path, &next)?;
+        let _ = ensure_custom_ids_in_allowed_models();
+    }
+    Ok(())
+}
+
+fn generic_sections_for_provider(provider_id: &str) -> Vec<GenericSectionBinding> {
+    let text = read_text(&agent_config_toml());
+    parse_model_sections(&text)
+        .into_iter()
+        .filter(|s| {
+            s.fields
+                .get(APP_PARENT_PROVIDER_KEY)
+                .is_some_and(|p| p == provider_id)
+        })
+        .filter_map(|s| {
+            let model_id = s.fields.get("model")?.trim();
+            if model_id.is_empty() {
+                return None;
+            }
+            Some(GenericSectionBinding {
+                section_id: s.id,
+                model_id: model_id.to_string(),
+            })
+        })
+        .collect()
 }
 
 fn is_custom(fields: &std::collections::HashMap<String, String>) -> bool {
@@ -1170,6 +1562,271 @@ fn set_models_u32_field(text: &str, key: &str, value: u32) -> String {
     }
 }
 
+/// If agent-home `[models].allowed_models` already exists, add every custom
+/// section id those patterns do not cover. Never creates the key, and never
+/// reads or writes shared `~/.grok` — the path is always App `agent-home`.
+pub fn ensure_custom_ids_in_allowed_models() -> Result<(), String> {
+    let _ = ensure_agent_home()?;
+    let path = agent_config_toml();
+    let text = read_text(&path);
+    let ids = custom_section_ids(&text);
+    let Some(next) = union_custom_ids_into_allowed_models(&text, &ids) else {
+        return Ok(());
+    };
+    if next != text {
+        write_text(&path, &next)?;
+        tracing::info!(
+            target: "providers",
+            "added custom section ids to existing [models].allowed_models"
+        );
+    }
+    Ok(())
+}
+
+fn custom_section_ids(text: &str) -> Vec<String> {
+    let mut ids: Vec<String> = parse_model_sections(text)
+        .into_iter()
+        .filter(|section| is_custom(&section.fields))
+        .map(|section| section.id)
+        .filter(|id| !id.is_empty())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// `Some(rewritten)` when the existing allowlist gained ids.
+/// `None` when the key is absent, already covers every id, or the value is
+/// not a string array we can rewrite without guessing.
+pub(crate) fn union_custom_ids_into_allowed_models(text: &str, ids: &[String]) -> Option<String> {
+    let (start, end) = allowed_models_array_span(text)?;
+    let patterns = parse_toml_string_array(&text[start..end])?;
+    let mut missing: Vec<String> = ids
+        .iter()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .filter(|id| {
+            !patterns
+                .iter()
+                .any(|pattern| allowed_model_pattern_covers(pattern, id))
+        })
+        .map(str::to_string)
+        .collect();
+    missing.sort();
+    missing.dedup();
+    if missing.is_empty() {
+        return None;
+    }
+    let mut combined = patterns;
+    combined.extend(missing);
+    let rendered = render_toml_string_array(&combined);
+    let mut out = String::with_capacity(text.len() + rendered.len());
+    out.push_str(&text[..start]);
+    out.push_str(&rendered);
+    out.push_str(&text[end..]);
+    Some(out)
+}
+
+fn render_toml_string_array(items: &[String]) -> String {
+    let body = items
+        .iter()
+        .map(|item| quote(item))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{body}]")
+}
+
+/// Full-string glob: `*` is any run (including empty), `?` is one byte.
+fn allowed_model_pattern_covers(pattern: &str, id: &str) -> bool {
+    fn rec(pat: &[u8], text: &[u8]) -> bool {
+        let mut pi = 0;
+        let mut ti = 0;
+        while pi < pat.len() {
+            if pat[pi] == b'*' {
+                if rec(&pat[pi + 1..], &text[ti..]) {
+                    return true;
+                }
+                if ti >= text.len() {
+                    return false;
+                }
+                ti += 1;
+                continue;
+            }
+            if ti >= text.len() {
+                return false;
+            }
+            if pat[pi] != b'?' && pat[pi] != text[ti] {
+                return false;
+            }
+            pi += 1;
+            ti += 1;
+        }
+        ti == text.len()
+    }
+    rec(pattern.as_bytes(), id.as_bytes())
+}
+
+/// Byte span of the `[models].allowed_models` array, including brackets.
+fn allowed_models_array_span(text: &str) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut in_models = false;
+    let mut i = 0;
+    while i < text.len() {
+        let line_end = text[i..].find('\n').map(|n| i + n).unwrap_or(text.len());
+        let line = &text[i..line_end];
+        let trimmed = line.trim();
+        if crate::agent_home_config::parse_table_header(trimmed).is_some() {
+            in_models = is_models_table_header(trimmed);
+        } else if in_models && assignment_key_exact(trimmed) == Some("allowed_models") {
+            let eq = line.find('=')?;
+            let mut j = i + eq + 1;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if bytes.get(j) != Some(&b'[') {
+                return None;
+            }
+            let end = scan_toml_array_end(bytes, j)?;
+            return Some((j, end));
+        }
+        i = if line_end < text.len() {
+            line_end + 1
+        } else {
+            text.len()
+        };
+    }
+    None
+}
+
+fn scan_toml_array_end(bytes: &[u8], open: usize) -> Option<usize> {
+    if bytes.get(open) != Some(&b'[') {
+        return None;
+    }
+    let mut i = open + 1;
+    let mut depth = 1i32;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => i = skip_basic_string(bytes, i)?,
+            b'\'' => i = skip_literal_string(bytes, i)?,
+            b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            b']' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            b'#' => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+fn skip_basic_string(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'"') {
+        return None;
+    }
+    if bytes.get(start + 1) == Some(&b'"') && bytes.get(start + 2) == Some(&b'"') {
+        return None;
+    }
+    let mut j = start + 1;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'\\' => {
+                if j + 1 >= bytes.len() {
+                    return None;
+                }
+                j += 2;
+            }
+            b'"' => return Some(j + 1),
+            b'\n' => return None,
+            _ => j += 1,
+        }
+    }
+    None
+}
+
+fn skip_literal_string(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) != Some(&b'\'') {
+        return None;
+    }
+    if bytes.get(start + 1) == Some(&b'\'') && bytes.get(start + 2) == Some(&b'\'') {
+        return None;
+    }
+    let mut j = start + 1;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'\'' => return Some(j + 1),
+            b'\n' => return None,
+            _ => j += 1,
+        }
+    }
+    None
+}
+
+fn parse_toml_string_array(array: &str) -> Option<Vec<String>> {
+    let bytes = array.as_bytes();
+    if bytes.first() != Some(&b'[') {
+        return None;
+    }
+    let mut i = 1;
+    let mut out = Vec::new();
+    let mut expect_value = true;
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' | b'\t' | b'\n' | b'\r' => i += 1,
+            b'#' => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b',' => {
+                if expect_value {
+                    return None;
+                }
+                expect_value = true;
+                i += 1;
+            }
+            b']' => {
+                let rest_ok = array[i + 1..].chars().all(char::is_whitespace);
+                if rest_ok {
+                    return Some(out);
+                }
+                return None;
+            }
+            b'"' => {
+                if !expect_value {
+                    return None;
+                }
+                let end = skip_basic_string(bytes, i)?;
+                let raw = &array[i..end];
+                out.push(unquote(raw));
+                i = end;
+                expect_value = false;
+            }
+            b'\'' => {
+                if !expect_value {
+                    return None;
+                }
+                let end = skip_literal_string(bytes, i)?;
+                out.push(unquote(&array[i..end]));
+                i = end;
+                expect_value = false;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// `grok` is the official `[models].default` token. A custom `[model.grok]`
 /// section must not steal Official Use (#1214).
 pub fn is_reserved_custom_provider_id(id: &str) -> bool {
@@ -1195,6 +1852,14 @@ fn build_list_result(home: PathBuf, path: PathBuf, text: &str) -> ProvidersListR
     let mut providers = Vec::new();
     for s in parse_model_sections(text) {
         if !is_custom(&s.fields) {
+            continue;
+        }
+        // Per-model sections are CLI targets, not provider cards (#1394).
+        if s.fields
+            .get(APP_PARENT_PROVIDER_KEY)
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
             continue;
         }
         let model = s
@@ -1303,6 +1968,8 @@ pub fn list_custom_providers() -> Result<ProvidersListResult, String> {
     let _ = ensure_model_integer_fields();
     // Existing App-only effort choices need the native Grok Build capability gate.
     let _ = ensure_reasoning_effort_support_fields();
+    // One TOML section per generic catalog row, so a menu pick can be sent (#1394).
+    let _ = ensure_generic_model_sections();
     let text = read_text(&path);
     Ok(build_list_result(home, path, &text))
 }
@@ -1396,6 +2063,27 @@ pub fn custom_provider_id_for_catalog_model(catalog_id: &str) -> Option<String> 
         }
     }
     None
+}
+
+/// Provider that uniquely lists `model`, for scheduling legacy rows.
+///
+/// Unlike [`custom_provider_id_for_catalog_model`], ambiguous matches return
+/// `None`: a guessed route would silently send the model to the wrong relay.
+pub fn custom_provider_id_for_model_unique(model: &str) -> Option<String> {
+    let model = model.trim();
+    if model.is_empty() || is_official_catalog_model(model) {
+        return None;
+    }
+    let list = list_custom_providers().ok()?;
+    let mut hits = list
+        .providers
+        .iter()
+        .filter(|p| p.id != model && (p.model == model || p.models.iter().any(|m| m.id == model)));
+    let first = hits.next()?;
+    if hits.next().is_some() {
+        return None;
+    }
+    Some(first.id.clone())
 }
 
 /// Model flag for `grok agent --model` and ACP `session/set_model`.
@@ -1538,19 +2226,13 @@ pub fn composer_provider_pick(
     }
 }
 
-/// Shared-mode official warm reuse uses `GROK_HOME=~/.grok` and must not copy
-/// OIDC into agent-home. Independent mode still prepares, same as a cold spawn.
-pub fn warm_reuse_should_prepare_auth(session_data_mode: &str, process_is_custom: bool) -> bool {
-    crate::paths::needs_agent_home_spawn_prep(session_data_mode, process_is_custom)
-}
-
 /// `--model` for a process bound to `provider_id`.
-/// Custom routes spawn with the section id. Official routes spawn with a catalog id.
+///
+/// Official routes spawn with a catalog id. A generic custom route spawns with
+/// the per-model section when one exists, otherwise the provider section.
+/// A Grok Build-compatible relay still resolves to the catalog id.
 pub fn spawn_model_for_provider(provider_id: &str, composer_model: &str) -> String {
-    if is_session_provider_official(provider_id) {
-        return session_set_model_id_for(SESSION_PROVIDER_OFFICIAL, composer_model);
-    }
-    provider_id.trim().to_string()
+    session_set_model_id_for(provider_id, composer_model)
 }
 
 /// `session/set_model` id for one chat on `provider_id`.
@@ -1581,20 +2263,39 @@ pub fn session_set_model_id_for(provider_id: &str, composer_model: &str) -> Stri
         }
         None => (Vec::new(), false),
     };
-    resolve_session_set_model_id(Some(id), composer_model, &models, allow_catalog_id)
+    let sections = if allow_catalog_id {
+        Vec::new()
+    } else {
+        generic_sections_for_provider(id)
+    };
+    resolve_session_set_model_id(
+        Some(id),
+        composer_model,
+        &models,
+        allow_catalog_id,
+        &sections,
+    )
 }
 
 /// Pure half of [`session_set_model_id_for`]. `None` route means official; the
 /// caller passes an already resolved official id.
 ///
 /// `allow_catalog_id` is only for a Grok Build-compatible relay, whose spawn
-/// already selected a real catalog id. Generic relays must keep the section id
-/// even when `composer_model` is listed in `app_models`.
+/// already selected a real catalog id.
+///
+/// A generic relay's request body comes from `[model.<section>].model`.
+/// CLI 1.0.70 accepts `session/set_model` of that section name (`matched by
+/// map key`) and rejects an id that is neither a section nor some section's
+/// `model` field (`unknown model id`). `generic_sections` lists the per-model
+/// sections for this channel. When it is empty (old single-section config),
+/// the provider id is still the right send — that section's `model` field is
+/// what the CLI will put in the body (#1337, #1394).
 pub fn resolve_session_set_model_id(
     custom_provider_id: Option<&str>,
     composer_model: &str,
     same_provider_models: &[String],
     allow_catalog_id: bool,
+    generic_sections: &[GenericSectionBinding],
 ) -> String {
     let m = composer_model.trim();
     let Some(id) = custom_provider_id.map(str::trim).filter(|s| !s.is_empty()) else {
@@ -1611,12 +2312,20 @@ pub fn resolve_session_set_model_id(
     {
         return m.to_string();
     }
+    if !allow_catalog_id && !m.is_empty() {
+        if let Some(hit) = generic_sections.iter().find(|s| s.section_id == m) {
+            return hit.section_id.clone();
+        }
+        if let Some(hit) = generic_sections.iter().find(|s| s.model_id == m) {
+            return hit.section_id.clone();
+        }
+    }
     id.to_string()
 }
 
 pub fn agent_spawn_model_id(composer_model: &str) -> String {
     match active_route() {
-        ActiveRoute::Custom { id } => id,
+        ActiveRoute::Custom { id } => spawn_model_for_provider(&id, composer_model),
         ActiveRoute::Official => {
             let m = composer_model.trim();
             if m.is_empty() || is_custom_provider_id(m) || m == OFFICIAL_DEFAULT_MODEL {
@@ -1628,7 +2337,7 @@ pub fn agent_spawn_model_id(composer_model: &str) -> String {
             // Picker stored app_models[].id / active `model =` while route is still
             // official (common under session-scoped prefs + sticky settings.json).
             if let Some(provider_id) = custom_provider_id_for_catalog_model(m) {
-                return provider_id;
+                return spawn_model_for_provider(&provider_id, m);
             }
             m.into()
         }
@@ -1981,6 +2690,9 @@ pub fn upsert_custom_provider(input: UpsertProviderInput) -> Result<ProvidersLis
 
     // Appended system-prompt rules: `Some("")` clears; `None` keeps the value
     // already on disk so an edit that omits the field is not a silent wipe.
+    // `Some` is explicit even when sanitize turns "" into None — the old key
+    // must not be copied back from the previous section.
+    let append_prompt_explicit = input.append_prompt.is_some();
     let resolved_append_prompt: Option<String> = match input.append_prompt {
         Some(ref raw) => crate::store::sanitize_extra_rules(Some(raw.clone())),
         None => crate::store::sanitize_extra_rules(
@@ -2069,6 +2781,11 @@ pub fn upsert_custom_provider(input: UpsertProviderInput) -> Result<ProvidersLis
             fields.iter().map(|(k, _)| k.clone()).collect();
         // Always treated as managed — empty list must not copy the old table back.
         known.insert(EXTRA_HEADERS_KEY.into());
+        // Explicit clear (`Some("")` → None) must drop the previous prompt.
+        // Omitted (`None`) stays out of `known` so the kept value is copied.
+        if append_prompt_explicit {
+            known.insert(APP_APPEND_PROMPT_KEY.into());
+        }
         for (k, v) in &ex.fields {
             if !known.contains(k) {
                 fields.push((k.clone(), v.clone()));
@@ -2082,6 +2799,7 @@ pub fn upsert_custom_provider(input: UpsertProviderInput) -> Result<ProvidersLis
     }
 
     write_text(&path, &text)?;
+    let _ = ensure_custom_ids_in_allowed_models();
     let mut result = list_custom_providers()?;
     if input.set_as_default.unwrap_or(false) {
         // Newly defaulted custom channel must not inherit OIDC.
@@ -3035,6 +3753,127 @@ mod tests {
             .ends_with("/v1/models"));
     }
 
+    #[test]
+    fn allowlist_absent_is_left_alone() {
+        let text = "\
+[models]
+default = \"kiro\"
+
+[model.kiro]
+model = \"simple-task\"
+base_url = \"http://127.0.0.1:8080/v1\"
+";
+        assert!(union_custom_ids_into_allowed_models(text, &["kiro".into()]).is_none());
+    }
+
+    #[test]
+    fn allowlist_gains_uncovered_section_ids_and_keeps_patterns() {
+        let text = "\
+[models]
+default = \"kiro\"
+allowed_models = [\"claude-*\", \"gpt-*\", \"auto*\"]
+
+[model.kiro]
+model = \"simple-task\"
+base_url = \"http://127.0.0.1:8080/v1\"
+";
+        let next = union_custom_ids_into_allowed_models(text, &["kiro".into(), "auto".into()])
+            .expect("kiro is not covered");
+        let allow_line = next
+            .lines()
+            .find(|line| line.contains("allowed_models"))
+            .unwrap();
+        assert!(allow_line.contains("\"claude-*\""));
+        assert!(allow_line.contains("\"gpt-*\""));
+        assert!(allow_line.contains("\"auto*\""));
+        assert!(allow_line.contains("\"kiro\""));
+        assert!(!allow_line.contains("simple-task"));
+        assert!(
+            union_custom_ids_into_allowed_models(&next, &["kiro".into(), "auto".into()]).is_none()
+        );
+    }
+
+    #[test]
+    fn allowlist_multiline_array_and_non_array_are_safe() {
+        let text = "\
+[models]
+allowed_models = [
+  \"claude-*\",
+  # user note
+]
+
+[model.ada-openai]
+base_url = \"http://example/v1\"
+model = \"auto\"
+";
+        let ids = custom_section_ids(text);
+        assert_eq!(ids, vec!["ada-openai".to_string()]);
+        let next = union_custom_ids_into_allowed_models(text, &ids).expect("append");
+        assert!(next.contains("ada-openai"));
+        assert!(next.contains("claude-*"));
+        assert!(union_custom_ids_into_allowed_models(
+            "[models]\nallowed_models = \"kiro\"\n",
+            &["kiro".into()],
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn allowlist_file_edit_stays_in_agent_home() {
+        let _lock = crate::paths::APP_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "grok-app-allowlist-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("agent-home")).unwrap();
+        let previous = std::env::var_os("GROK_APP_HOME");
+        std::env::set_var("GROK_APP_HOME", &tmp);
+        let decoy = tmp.join("shared-grok-config.toml");
+        std::fs::write(&decoy, "allowed_models = [\"claude-*\"]\n").unwrap();
+        std::fs::write(
+            crate::paths::agent_config_toml(),
+            "\
+[models]
+allowed_models = [\"claude-*\"]
+
+[model.kiro]
+model = \"simple-task\"
+base_url = \"http://127.0.0.1:8080/v1\"
+",
+        )
+        .unwrap();
+        ensure_custom_ids_in_allowed_models().unwrap();
+        let home = std::fs::read_to_string(crate::paths::agent_config_toml()).unwrap();
+        let allow_line = home
+            .lines()
+            .find(|line| line.contains("allowed_models"))
+            .unwrap();
+        assert!(allow_line.contains("\"kiro\""));
+        assert!(allow_line.contains("\"claude-*\""));
+        assert!(!allow_line.contains("simple-task"));
+        assert_eq!(
+            std::fs::read_to_string(&decoy).unwrap(),
+            "allowed_models = [\"claude-*\"]\n"
+        );
+        ensure_custom_ids_in_allowed_models().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(crate::paths::agent_config_toml()).unwrap(),
+            home
+        );
+        match previous {
+            Some(v) => std::env::set_var("GROK_APP_HOME", v),
+            None => std::env::remove_var("GROK_APP_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     fn sample_provider(id: &str) -> CustomProvider {
         CustomProvider {
             id: id.into(),
@@ -3325,14 +4164,15 @@ mod tests {
             agent_home: String::new(),
             switched_to_independent: false,
         };
-        // Generic relay: the API model id is not a CLI section. Sending it
-        // makes Grok Build fall through to the built-in catalog (#1294).
+        // Generic relay with no per-model section yet: the API model id is not
+        // a CLI section. Sending it falls through to the built-in catalog (#1294).
         assert_eq!(
             resolve_session_set_model_id(
                 Some("api-top"),
                 "grok-4.6",
                 &["grok-4.6".into(), "grok-4.5".into()],
                 false,
+                &[],
             ),
             "api-top"
         );
@@ -3342,17 +4182,22 @@ mod tests {
                 "deepseek-v4-pro",
                 &["deepseek-v4-flash".into(), "deepseek-v4-pro".into()],
                 false,
+                &[],
             ),
             "relay"
         );
         // Grok Build-compatible relay: spawn bound the catalog id, so set_model
-        // repeats it.
+        // repeats it. Per-model sections are not consulted.
         assert_eq!(
             resolve_session_set_model_id(
                 Some("beef-relay"),
                 "grok-4.5",
                 &["grok-4.6".into(), "grok-4.5".into()],
                 true,
+                &[GenericSectionBinding {
+                    section_id: "beef-relay__grok-4-5".into(),
+                    model_id: "grok-4.5".into(),
+                }],
             ),
             "grok-4.5"
         );
@@ -3362,12 +4207,74 @@ mod tests {
                 "grok-4.7",
                 &["deepseek-v4-flash".into()],
                 true,
+                &[],
             ),
             "relay"
         );
         assert_eq!(
-            resolve_session_set_model_id(None, "grok-4.7", &[], false),
+            resolve_session_set_model_id(None, "grok-4.7", &[], false, &[]),
             "grok-4.7"
+        );
+        // #1337 / #1394: a generic chat names the section whose `model` field
+        // is the picked catalog id. Two chats do not share one section.
+        // Without those sections, the provider id remains the safe send.
+        let kiro_sections = [
+            GenericSectionBinding {
+                section_id: "kiro__auto".into(),
+                model_id: "auto".into(),
+            },
+            GenericSectionBinding {
+                section_id: "kiro__gpt-5-6-luna".into(),
+                model_id: "gpt-5.6-luna".into(),
+            },
+            GenericSectionBinding {
+                section_id: "kiro__gpt-5-6-sol".into(),
+                model_id: "gpt-5.6-sol".into(),
+            },
+        ];
+        assert_eq!(
+            resolve_session_set_model_id(
+                Some("kiro"),
+                "gpt-5.6-luna",
+                &["auto".into(), "gpt-5.6-luna".into(), "gpt-5.6-sol".into()],
+                false,
+                &kiro_sections,
+            ),
+            "kiro__gpt-5-6-luna"
+        );
+        assert_eq!(
+            resolve_session_set_model_id(
+                Some("kiro"),
+                "kiro__gpt-5-6-luna",
+                &[],
+                false,
+                &kiro_sections,
+            ),
+            "kiro__gpt-5-6-luna"
+        );
+        assert_eq!(
+            resolve_session_set_model_id(
+                Some("kiro"),
+                "gpt-5.6-luna",
+                &["auto".into(), "gpt-5.6-luna".into()],
+                false,
+                &[],
+            ),
+            "kiro"
+        );
+        let other_sections = [GenericSectionBinding {
+            section_id: "other__gpt-5-6-sol".into(),
+            model_id: "gpt-5.6-sol".into(),
+        }];
+        assert_eq!(
+            resolve_session_set_model_id(
+                Some("other"),
+                "gpt-5.6-sol",
+                &["sol".into(), "gpt-5.6-sol".into()],
+                false,
+                &other_sections,
+            ),
+            "other__gpt-5-6-sol"
         );
         assert!(provider_mutation_needs_agent_reload(true, "other", &active));
         assert!(provider_mutation_needs_agent_reload(
@@ -3608,6 +4515,189 @@ mod tests {
             ],
         );
         assert!(!text.contains(APP_APPEND_PROMPT_KEY), "{text}");
+    }
+
+    #[test]
+    fn append_prompt_explicit_clear_drops_key_and_update_replaces_it() {
+        let _lock = crate::paths::APP_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("grok-app-append-prompt-{}", uuid::Uuid::new_v4()));
+        let previous_home = std::env::var("GROK_APP_HOME").ok();
+        std::env::set_var("GROK_APP_HOME", &home);
+
+        let outcome = (|| -> Result<(), String> {
+            ensure_app_dirs().map_err(|e| e.to_string())?;
+            let path = agent_config_toml();
+            let before = "\
+# keep-me
+[models]
+default = \"grok\"
+
+[memory] # memory switch
+enabled = false
+
+[ui]
+yolo = false
+
+[model.demo] # my relay
+model = \"demo-model\"
+base_url = \"https://relay.example/v1\"
+api_key = \"sk-channel-secret\"
+api_backend = \"chat_completions\"
+name = \"Demo\"
+app_append_prompt = \"1. 结构化输出确保可读性\"
+";
+            write_text(&path, before)?;
+
+            let updated = upsert_custom_provider(UpsertProviderInput {
+                id: "demo".into(),
+                model: "demo-model".into(),
+                base_url: "https://relay.example/v1".into(),
+                name: Some("Demo".into()),
+                api_key: Some("sk-channel-secret".into()),
+                api_backend: Some("chat_completions".into()),
+                provider_mode: Some(PROVIDER_MODE_GENERIC.into()),
+                set_as_default: Some(false),
+                create_only: Some(false),
+                models: Some(vec![ProviderModelEntry::named("demo-model", "Demo")]),
+                efforts: None,
+                context_window: Some(128_000),
+                base_url_full_path: Some(true),
+                append_prompt: Some("2. 先给结论\n第二行".into()),
+                supports_vision: Some(false),
+                extra_headers: None,
+            })?;
+            let saved = updated
+                .providers
+                .iter()
+                .find(|p| p.id == "demo")
+                .ok_or_else(|| "demo provider missing after update".to_string())?;
+            assert_eq!(saved.append_prompt.as_deref(), Some("2. 先给结论\n第二行"));
+            let after_update = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            assert!(
+                !after_update.contains("结构化输出确保可读性"),
+                "old prompt must be replaced:\n{after_update}"
+            );
+            assert_eq!(
+                after_update.matches("[model.demo]").count(),
+                1,
+                "commented header must be replaced, not duplicated:\n{after_update}"
+            );
+            assert!(after_update.starts_with("# keep-me\n"), "{after_update}");
+            assert!(
+                after_update.contains("[memory] # memory switch"),
+                "{after_update}"
+            );
+            assert!(after_update.contains("yolo = false"), "{after_update}");
+            assert!(
+                after_update.contains("api_key = \"sk-channel-secret\""),
+                "{after_update}"
+            );
+            let i_keep = after_update.find("# keep-me").unwrap();
+            let i_models = after_update.find("[models]").unwrap();
+            let i_mem = after_update.find("[memory]").unwrap();
+            let i_ui = after_update.find("[ui]").unwrap();
+            assert!(
+                i_keep < i_models && i_models < i_mem && i_mem < i_ui,
+                "{after_update}"
+            );
+
+            let kept = upsert_custom_provider(UpsertProviderInput {
+                id: "demo".into(),
+                model: "demo-model".into(),
+                base_url: "https://relay.example/v1".into(),
+                name: Some("Demo".into()),
+                api_key: None,
+                api_backend: Some("chat_completions".into()),
+                provider_mode: Some(PROVIDER_MODE_GENERIC.into()),
+                set_as_default: Some(false),
+                create_only: Some(false),
+                models: None,
+                efforts: None,
+                context_window: None,
+                base_url_full_path: None,
+                append_prompt: None,
+                supports_vision: None,
+                extra_headers: None,
+            })?;
+            let kept_prompt = kept
+                .providers
+                .iter()
+                .find(|p| p.id == "demo")
+                .and_then(|p| p.append_prompt.clone());
+            assert_eq!(kept_prompt.as_deref(), Some("2. 先给结论\n第二行"));
+
+            let cleared = upsert_custom_provider(UpsertProviderInput {
+                id: "demo".into(),
+                model: "demo-model".into(),
+                base_url: "https://relay.example/v1".into(),
+                name: Some("Demo".into()),
+                api_key: None,
+                api_backend: Some("chat_completions".into()),
+                provider_mode: Some(PROVIDER_MODE_GENERIC.into()),
+                set_as_default: Some(false),
+                create_only: Some(false),
+                models: None,
+                efforts: None,
+                context_window: None,
+                base_url_full_path: Some(true),
+                append_prompt: Some(String::new()),
+                supports_vision: None,
+                extra_headers: Some(vec![]),
+            })?;
+            assert!(
+                cleared
+                    .providers
+                    .iter()
+                    .find(|p| p.id == "demo")
+                    .and_then(|p| p.append_prompt.clone())
+                    .is_none(),
+                "empty append prompt must clear"
+            );
+            let after_clear = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            assert!(
+                !after_clear.contains("app_append_prompt"),
+                "cleared key must be gone:\n{after_clear}"
+            );
+            assert!(
+                !after_clear.contains("先给结论"),
+                "cleared text must be gone:\n{after_clear}"
+            );
+            assert!(
+                after_clear.contains("api_key = \"sk-channel-secret\""),
+                "{after_clear}"
+            );
+            assert!(after_clear.contains("# keep-me"), "{after_clear}");
+            assert!(
+                after_clear.contains("[memory] # memory switch"),
+                "{after_clear}"
+            );
+            assert!(after_clear.contains("yolo = false"), "{after_clear}");
+            assert!(
+                after_clear.contains("context_window = 128000"),
+                "{after_clear}"
+            );
+
+            fn mask(raw: &str) -> String {
+                raw.replace("sk-channel-secret", "sk-****")
+            }
+            eprintln!("--- append prompt BEFORE ---\n{}", mask(before));
+            eprintln!(
+                "--- append prompt AFTER UPDATE ---\n{}",
+                mask(&after_update)
+            );
+            eprintln!("--- append prompt AFTER CLEAR ---\n{}", mask(&after_clear));
+            Ok(())
+        })();
+
+        match previous_home {
+            Some(value) => std::env::set_var("GROK_APP_HOME", value),
+            None => std::env::remove_var("GROK_APP_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+        outcome.expect("append prompt clear/update");
     }
 
     #[test]
@@ -3981,7 +5071,14 @@ context_window = "1000000"
             custom_provider_id_for_catalog_model("qwen3.8-27b").as_deref(),
             Some("qwen38-local")
         );
-        assert_eq!(agent_spawn_model_id("qwen3.8-27b"), "qwen38-local");
+        assert_eq!(
+            agent_spawn_model_id("qwen3.8-27b"),
+            generic_model_section_id("qwen38-local", "qwen3.8-27b")
+        );
+        assert_eq!(
+            session_set_model_id_for("qwen38-local", "qwen3.8-27b"),
+            generic_model_section_id("qwen38-local", "qwen3.8-27b")
+        );
         // Official catalog ids must not remap through a relay that also lists them.
         assert_eq!(agent_spawn_model_id("grok-4.6"), "grok-4.6");
         assert_eq!(agent_spawn_model_id("grok-4.7"), "grok-4.7");
@@ -4236,17 +5333,334 @@ context_window = "1000000"
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    fn app_models_toml(entries: &[(&str, &str)]) -> String {
+        let models: Vec<ProviderModelEntry> = entries
+            .iter()
+            .map(|(id, name)| ProviderModelEntry::named(*id, *name))
+            .collect();
+        format_toml_field_value(APP_MODELS_KEY, &encode_app_models(&models))
+    }
+
+    fn field_of(text: &str, section_id: &str, key: &str) -> Option<String> {
+        parse_model_sections(text)
+            .into_iter()
+            .find(|s| s.id == section_id)
+            .and_then(|s| s.fields.get(key).cloned())
+    }
+
     #[test]
-    fn warm_reuse_auth_skips_only_shared_official() {
-        assert!(
-            !warm_reuse_should_prepare_auth("shared", false),
-            "shared official uses ~/.grok and must not copy OIDC into agent-home"
+    fn slug_model_id_keeps_case_and_replaces_separators() {
+        assert_eq!(slug_model_id("GLM-A"), "GLM-A");
+        assert_eq!(slug_model_id("glm-a"), "glm-a");
+        assert_ne!(slug_model_id("GLM-A"), slug_model_id("glm-a"));
+        assert_eq!(slug_model_id("z-ai/glm-5.3"), "z-ai-glm-5-3");
+        assert_eq!(slug_model_id("glm/b"), "glm-b");
+        assert_eq!(slug_model_id("   "), "model");
+        assert_eq!(generic_model_section_id("zhipu", "glm-a"), "zhipu__glm-a");
+        assert_eq!(
+            generic_model_section_id("qwen38-local", "qwen3.8-27b"),
+            "qwen38-local__qwen3-8-27b"
         );
-        assert!(!warm_reuse_should_prepare_auth("SHARED", false));
-        assert!(warm_reuse_should_prepare_auth("shared", true));
-        // Independent mode keeps the cold-spawn prepare, including when the
-        // process is official. A conflict skip would leave session/load signed out.
-        assert!(warm_reuse_should_prepare_auth("independent", false));
-        assert!(warm_reuse_should_prepare_auth("independent", true));
+        let long = "a".repeat(80);
+        let slug = slug_model_id(&long);
+        assert!(slug.len() <= 48, "{slug}");
+        assert!(slug.starts_with("aaaa"));
+    }
+
+    #[test]
+    fn sync_generic_model_sections_is_idempotent_and_keeps_hand_written_text() {
+        let app_models =
+            app_models_toml(&[("glm-a", "GLM A"), ("glm/b", "GLM B"), ("glm-b", "GLM B2")]);
+        let before = format!(
+            r#"# user comment
+
+[models]
+default = "zhipu"
+
+[model.hand]
+model = "keep-me"
+base_url = "https://hand.example/v1"
+api_key = "sk-hand"
+name = "Hand"
+
+[model.zhipu]
+model = "glm-a"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+api_key = "sk-z"
+name = "智谱"
+api_backend = "chat_completions"
+context_window = 128000
+app_provider_mode = "generic"
+app_models = {app_models}
+
+[model.zhipu__gone]
+model = "gone"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+name = "Gone"
+api_key = "sk-z"
+api_backend = "chat_completions"
+app_provider_mode = "generic"
+app_parent_provider = "zhipu"
+"#
+        );
+        let once = sync_generic_model_sections_in_text(&before);
+        let twice = sync_generic_model_sections_in_text(&once);
+        assert_eq!(once, twice, "migration must be idempotent:\n{twice}");
+        assert!(once.contains("# user comment"));
+        assert!(once.find("[model.hand]").unwrap() < once.find("[model.zhipu]").unwrap());
+        assert_eq!(get_models_default(&once).as_deref(), Some("zhipu"));
+        assert_eq!(field_of(&once, "hand", "model").as_deref(), Some("keep-me"));
+        assert_eq!(field_of(&once, "zhipu", "model").as_deref(), Some("glm-a"));
+        assert!(field_of(&once, "zhipu", APP_PARENT_PROVIDER_KEY).is_none());
+        assert!(field_of(&once, "zhipu", APP_MODELS_KEY).is_some());
+        assert!(parse_model_sections(&once)
+            .iter()
+            .all(|s| s.id != "zhipu__gone"));
+        assert_eq!(
+            field_of(&once, "zhipu__glm-a", "model").as_deref(),
+            Some("glm-a")
+        );
+        assert_eq!(
+            field_of(&once, "zhipu__glm-a", APP_PARENT_PROVIDER_KEY).as_deref(),
+            Some("zhipu")
+        );
+        assert_eq!(
+            field_of(&once, "zhipu__glm-b", "model").as_deref(),
+            Some("glm/b")
+        );
+        assert_eq!(
+            field_of(&once, "zhipu__glm-b-2", "model").as_deref(),
+            Some("glm-b")
+        );
+        assert_eq!(
+            field_of(&once, "hand__keep-me", APP_PARENT_PROVIDER_KEY).as_deref(),
+            Some("hand")
+        );
+        let listed = build_list_result(std::path::PathBuf::new(), std::path::PathBuf::new(), &once);
+        assert_eq!(
+            listed
+                .providers
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hand", "zhipu"]
+        );
+    }
+
+    #[test]
+    fn sync_generic_model_sections_does_not_clobber_a_foreign_section() {
+        let app_models = app_models_toml(&[("glm-b", "B")]);
+        let before = format!(
+            r#"# leave this section alone
+[model.zhipu__glm-b]
+model = "do-not-touch"
+name = "foreign"
+
+[model.zhipu]
+model = "glm-b"
+base_url = "https://z.example/v1"
+api_key = "sk"
+name = "智谱"
+api_backend = "chat_completions"
+app_models = {app_models}
+"#
+        );
+        let once = sync_generic_model_sections_in_text(&before);
+        let twice = sync_generic_model_sections_in_text(&once);
+        assert_eq!(once, twice);
+        assert_eq!(
+            field_of(&once, "zhipu__glm-b", "model").as_deref(),
+            Some("do-not-touch")
+        );
+        assert!(field_of(&once, "zhipu__glm-b", APP_PARENT_PROVIDER_KEY).is_none());
+        assert_eq!(
+            field_of(&once, "zhipu__glm-b-2", "model").as_deref(),
+            Some("glm-b")
+        );
+        assert_eq!(
+            field_of(&once, "zhipu__glm-b-2", APP_PARENT_PROVIDER_KEY).as_deref(),
+            Some("zhipu")
+        );
+        assert!(once.contains("# leave this section alone"));
+    }
+
+    #[test]
+    fn sync_generic_model_sections_leaves_proxy_channels_alone() {
+        let app_models = app_models_toml(&[("grok-4.6", "Grok 4.6"), ("grok-4.5", "Grok 4.5")]);
+        let before = format!(
+            r#"[model.proxy]
+model = "grok-4.6"
+base_url = "https://relay.example/v1"
+api_key = "sk"
+name = "Proxy"
+api_backend = "responses"
+app_provider_mode = "grok_build_proxy"
+app_models = {app_models}
+
+[model.proxy__old]
+model = "old"
+base_url = "https://relay.example/v1"
+name = "Old"
+app_parent_provider = "proxy"
+"#
+        );
+        let once = sync_generic_model_sections_in_text(&before);
+        let twice = sync_generic_model_sections_in_text(&once);
+        assert_eq!(once, twice);
+        assert!(!once.contains(APP_PARENT_PROVIDER_KEY));
+        assert!(parse_model_sections(&once)
+            .iter()
+            .all(|s| s.id != "proxy__old"));
+        assert_eq!(
+            field_of(&once, "proxy", "model").as_deref(),
+            Some("grok-4.6")
+        );
+    }
+
+    #[test]
+    fn generic_model_sections_round_trip_on_agent_home() {
+        let _lock = crate::paths::APP_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!(
+            "grok-app-generic-sections-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let previous = std::env::var_os("GROK_APP_HOME");
+        std::env::set_var("GROK_APP_HOME", &home);
+        let _ = std::fs::create_dir_all(home.join("agent-home"));
+        let prelude = "# user comment\n\n[model.hand]\nmodel = \"keep-me\"\nbase_url = \"https://hand.example/v1\"\napi_key = \"sk-hand\"\nname = \"Hand\"\n";
+        std::fs::write(agent_config_toml(), prelude).expect("seed");
+
+        let listed = upsert_custom_provider(UpsertProviderInput {
+            id: "zhipu".into(),
+            model: "glm-a".into(),
+            base_url: "https://open.bigmodel.cn/api/paas/v4".into(),
+            name: Some("智谱".into()),
+            api_key: Some("sk-z".into()),
+            api_backend: Some("chat_completions".into()),
+            provider_mode: Some(PROVIDER_MODE_GENERIC.into()),
+            set_as_default: Some(false),
+            create_only: Some(true),
+            models: Some(vec![
+                ProviderModelEntry::named("glm-a", "GLM A"),
+                ProviderModelEntry::named("glm/b", "GLM B"),
+            ]),
+            efforts: None,
+            context_window: None,
+            base_url_full_path: Some(true),
+            append_prompt: None,
+            supports_vision: None,
+            extra_headers: None,
+        })
+        .expect("upsert");
+        assert!(listed.providers.iter().any(|p| p.id == "zhipu"));
+        assert!(listed.providers.iter().all(|p| p.id != "zhipu__glm-b"));
+
+        let after = std::fs::read_to_string(agent_config_toml()).expect("config");
+        assert!(after.contains("# user comment"));
+        assert_eq!(
+            field_of(&after, "hand", "model").as_deref(),
+            Some("keep-me")
+        );
+        assert_eq!(
+            field_of(&after, "zhipu__glm-a", "model").as_deref(),
+            Some("glm-a")
+        );
+        assert_eq!(
+            field_of(&after, "zhipu__glm-b", "model").as_deref(),
+            Some("glm/b")
+        );
+        assert_eq!(session_set_model_id_for("zhipu", "glm/b"), "zhipu__glm-b");
+        assert_eq!(
+            session_set_model_id_for("zhipu", "zhipu__glm-a"),
+            "zhipu__glm-a"
+        );
+        assert_eq!(session_set_model_id_for("zhipu", "not-a-model"), "zhipu");
+        assert_eq!(session_set_model_id_for("zhipu", ""), "zhipu");
+
+        let again = list_custom_providers().expect("list");
+        let reread = std::fs::read_to_string(agent_config_toml()).expect("config");
+        assert_eq!(after, reread, "second list must not rewrite agent-home");
+        assert_eq!(again.providers.len(), listed.providers.len());
+
+        upsert_custom_provider(UpsertProviderInput {
+            id: "zhipu".into(),
+            model: "glm-a".into(),
+            base_url: "https://open.bigmodel.cn/api/paas/v4".into(),
+            name: Some("智谱".into()),
+            api_key: None,
+            api_backend: Some("chat_completions".into()),
+            provider_mode: Some(PROVIDER_MODE_GENERIC.into()),
+            set_as_default: Some(false),
+            create_only: Some(false),
+            models: Some(vec![ProviderModelEntry::named("glm-a", "GLM A")]),
+            efforts: None,
+            context_window: None,
+            base_url_full_path: Some(true),
+            append_prompt: None,
+            supports_vision: None,
+            extra_headers: None,
+        })
+        .expect("drop glm/b");
+        let dropped = std::fs::read_to_string(agent_config_toml()).expect("config");
+        assert!(parse_model_sections(&dropped)
+            .iter()
+            .all(|s| s.id != "zhipu__glm-b"));
+        assert_eq!(
+            field_of(&dropped, "zhipu__glm-a", "model").as_deref(),
+            Some("glm-a")
+        );
+        assert_eq!(session_set_model_id_for("zhipu", "glm/b"), "zhipu");
+
+        remove_custom_provider("zhipu").expect("remove");
+        let removed = std::fs::read_to_string(agent_config_toml()).expect("config");
+        assert!(parse_model_sections(&removed)
+            .iter()
+            .all(|s| s.id != "zhipu"));
+        assert!(parse_model_sections(&removed).iter().all(|s| s
+            .fields
+            .get(APP_PARENT_PROVIDER_KEY)
+            .map(String::as_str)
+            != Some("zhipu")));
+        assert_eq!(
+            field_of(&removed, "hand", "model").as_deref(),
+            Some("keep-me")
+        );
+
+        upsert_custom_provider(UpsertProviderInput {
+            id: "beef-relay".into(),
+            model: "grok-4.6".into(),
+            base_url: "https://relay.example/v1".into(),
+            name: Some("Beef".into()),
+            api_key: Some("sk".into()),
+            api_backend: Some("responses".into()),
+            provider_mode: Some(PROVIDER_MODE_GROK_BUILD_PROXY.into()),
+            set_as_default: Some(false),
+            create_only: Some(true),
+            models: Some(vec![
+                ProviderModelEntry::named("grok-4.6", "Grok 4.6"),
+                ProviderModelEntry::named("grok-4.5", "Grok 4.5"),
+            ]),
+            efforts: None,
+            context_window: None,
+            base_url_full_path: None,
+            append_prompt: None,
+            supports_vision: None,
+            extra_headers: None,
+        })
+        .expect("proxy");
+        let proxy = std::fs::read_to_string(agent_config_toml()).expect("config");
+        assert!(!proxy.contains("app_parent_provider = \"beef-relay\""));
+        assert_eq!(
+            session_set_model_id_for("beef-relay", "grok-4.5"),
+            "grok-4.5"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("GROK_APP_HOME", value),
+            None => std::env::remove_var("GROK_APP_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

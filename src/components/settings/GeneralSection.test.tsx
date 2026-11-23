@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { renderToString } from "react-dom/server";
 import { SettingsModelProvider } from "@/providers/SettingsModelContext";
 import { GeneralSection } from "@/components/settings/GeneralSection";
+import { mapProbeToCliInfo } from "@/lib/cliVersionStatus";
 import type { SettingsViewModel } from "./types";
 
 function buildModel(overrides: Partial<SettingsViewModel> = {}): SettingsViewModel {
@@ -51,6 +52,48 @@ function renderSection(model: SettingsViewModel): string {
     </SettingsModelProvider>,
   );
 }
+
+describe("GeneralSection composer", () => {
+  it("shows the live-turn insert switch next to the send key", () => {
+    const html = renderSection(
+      buildModel({
+        activeTab: "composer",
+        composerMinRows: "3",
+        composerSendKeyPref: "enter",
+        composerEnterInsertsLive: false,
+        setComposerEnterInsertsLive: vi.fn(),
+        availableModels: [],
+      }),
+    );
+    expect(html).toContain("settings-anchor-composerEnterInsertsLive");
+    expect(html).toContain("settings.composerEnterInsertsLive");
+    expect(html).toContain('aria-checked="false"');
+  });
+});
+
+describe("GeneralSection agent", () => {
+  it("shows Director mode under Allow plan mode", () => {
+    const html = renderSection(
+      buildModel({
+        activeTab: "agent",
+        planEnabled: true,
+        onPlanEnabled: vi.fn(),
+        cliInfo: mapProbeToCliInfo({
+          found: true,
+          version: "1.0.62",
+          source: "test",
+          cliAuthPresent: false,
+        }),
+      }),
+    );
+    const planAt = html.indexOf("settings-anchor-planEnabled");
+    const directorAt = html.indexOf("settings-anchor-directorEnabled");
+    expect(planAt).toBeGreaterThan(-1);
+    expect(directorAt).toBeGreaterThan(planAt);
+    expect(html).toContain("settings.directorMode");
+    expect(html).toContain('aria-checked="false"');
+  });
+});
 
 describe("GeneralSection voice — custom STT", () => {
   it("shows the engine selector in the voice card", () => {

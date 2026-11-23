@@ -20,10 +20,12 @@ import {
 import { composerHasSendPayload } from "@/lib/composerQuotes";
 import {
   composerSteerLive,
-  resolveComposerSubmitAction,
+  decideComposerEnterAction,
+  sendKeyRedirectsToLiveInsert,
   type ComposerSendKeyPref,
 } from "@/lib/composerSendKey";
 import { isDraftEmpty, parseStoredContent } from "@/lib/draftDoc";
+import { shouldEnqueueSend } from "@/lib/sendQueue";
 import type { SessionState } from "@/lib/session/types";
 import type { SlashItem } from "@/lib/slashCatalog";
 
@@ -81,6 +83,8 @@ export type ComposerKeyDownCtx = {
   >;
   // Enter / send resolution
   composerSendKeyPref: ComposerSendKeyPref;
+  /** Send key inserts into the live turn. Default off. */
+  enterInsertsLive: boolean;
   canGuideQueuedMessage: boolean;
   sessionState: SessionState;
   steerFromComposer: () => unknown;
@@ -123,6 +127,7 @@ export function useComposerKeyDown(ctx: ComposerKeyDownCtx) {
       composerMenuEntriesRef,
       composerMenuOpen,
       composerSendKeyPref,
+      enterInsertsLive,
       getDraft,
       messagesRef,
       openPromptHistory,
@@ -340,20 +345,45 @@ export function useComposerKeyDown(ctx: ComposerKeyDownCtx) {
         return;
       }
     }
-    const submit = resolveComposerSubmitAction({
+    const canSteer = composerSteerLive({
+      canGuideQueuedMessage,
+      sessionState: sessionState,
+    });
+    // `queue` is the existing send() path: a busy chat enqueues and keeps
+    // today's toasts. Steer-unavailable (no insertable turn) uses that path.
+    const decision = decideComposerEnterAction({
       event: e,
       sendPref: composerSendKeyPref,
-      canSteer: composerSteerLive({
-        canGuideQueuedMessage,
-        sessionState: sessionState,
-      }),
+      canSteer,
+      enterInsertsLive,
+      wouldEnqueue: shouldEnqueueSend(sessionState, false),
     });
-    if (submit === "steer") {
+    if (decision === "steer") {
       e.preventDefault();
+      // Send-key insert needs a draft. Empty Ctrl+Enter still steers the queue head.
+      if (
+        sendKeyRedirectsToLiveInsert({
+          event: e,
+          sendPref: composerSendKeyPref,
+          canSteer,
+          enterInsertsLive,
+        })
+      ) {
+        const hasBody = composerHasSendPayload({
+          draftEmpty: isDraftEmpty(parseStoredContent(getDraft())),
+          attachmentCount: attachments.length,
+          chatAttachmentCount: chatAttachments.length,
+          quoteCount: quotesRef.current.length,
+        });
+        if (hasBody && sessionState !== "awaiting_permission") {
+          void steerFromComposer();
+        }
+        return;
+      }
       void steerFromComposer();
       return;
     }
-    if (submit === "send") {
+    if (decision === "send" || decision === "queue") {
       e.preventDefault();
       const hasBody = composerHasSendPayload({
         draftEmpty: isDraftEmpty(parseStoredContent(getDraft())),

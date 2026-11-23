@@ -25,7 +25,10 @@ HEAD abcdef0123456789
 branch refs/heads/master
 `;
 
-function renderChip(worktrees: ReturnType<typeof parseWorktreePorcelain>) {
+function renderChip(
+  worktrees: ReturnType<typeof parseWorktreePorcelain>,
+  extra: Record<string, unknown> = {},
+) {
   return renderToString(
     React.createElement(ComposerWorktreeMenu, {
       activePath: "/Users/me/typebooks",
@@ -37,6 +40,7 @@ function renderChip(worktrees: ReturnType<typeof parseWorktreePorcelain>) {
       onCreate: vi.fn(),
       onCreateAndChat: vi.fn(),
       onGc: vi.fn(),
+      ...extra,
     }),
   );
 }
@@ -60,5 +64,36 @@ describe("ComposerWorktreeMenu branch chip", () => {
     const html = renderChip(next);
     expect(html).toContain("feat/session-branch");
     expect(html).not.toContain("master");
+  });
+});
+
+describe("ComposerWorktreeMenu chip watch count", () => {
+  const labels = {
+    ...LABELS,
+    prChipCount: "{count} watching",
+    prChipCountTip: "This chat follows {count} pull request(s)",
+  };
+
+  it("counts the PRs this chat follows, without naming one", () => {
+    const html = renderChip(parseWorktreePorcelain(PORCELAIN), {
+      prWatchingCount: 2,
+      labels,
+    });
+    expect(html).toContain("composer__context-pr");
+    expect(html).toContain("2 watching");
+    expect(html).toContain("has-pr");
+    expect(html).toContain("master");
+    // A pull request belongs to the repository, so no number rides the chip.
+    expect(html).not.toContain("#1316");
+  });
+
+  it("keeps the branch area clean while this chat follows nothing", () => {
+    const html = renderChip(parseWorktreePorcelain(PORCELAIN), {
+      prWatchingCount: 0,
+      labels,
+    });
+    expect(html).not.toContain("composer__context-pr");
+    expect(html).not.toContain("has-pr");
+    expect(html).toContain("master");
   });
 });

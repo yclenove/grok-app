@@ -70,6 +70,7 @@ import {
   saveComposerSendKeyPref,
   type ComposerSendKeyPref,
 } from "@/lib/composerSendKey";
+import { saveComposerEnterInsertsLive } from "@/lib/composerEnterInsertsLive";
 import { saveComposerDraftStatsPref } from "@/lib/draftStats";
 import { saveComposerSpellcheck } from "@/lib/composerSpellcheck";
 import { COMPOSER_MIN_ROWS_OPTIONS } from "@/lib/composerMinRows";
@@ -89,12 +90,14 @@ import { SettingsTabStrip, UiCheck } from "./shared";
 import { resolveLocale } from "@/i18n";
 import type { MessageKey } from "@/i18n";
 import * as api from "@/lib/api";
+import { useDirectorSettingEnabled, commitDirectorSetting } from "@/lib/directorSetting";
 import {
   buildOpenTargetSelectOptions,
   resolveOpenEditorEmptyState,
 } from "@/lib/openEditorHonesty";
 
 export function GeneralSection() {
+  const directorEnabled = useDirectorSettingEnabled();
   const s = useSettingsModel();
   const {
     title,
@@ -119,6 +122,8 @@ export function GeneralSection() {
     composerDraftStats,
     composerMinRows,
     composerSendKeyPref,
+    composerEnterInsertsLive,
+    setComposerEnterInsertsLive,
     composerSpellcheck,
     defaultOpenTarget = "finder",
     disableWebSearch,
@@ -403,6 +408,31 @@ export function GeneralSection() {
                       label: t("settings.composerSendKey.modEnter"),
                     },
                   ]}
+                />
+              </div>
+              <div
+                className={
+                  "settings-row" +
+                  rowHighlight("settings-anchor-composerEnterInsertsLive")
+                }
+                id="settings-anchor-composerEnterInsertsLive"
+              >
+                <div className="settings-row__text">
+                  <div className="settings-row__label">
+                    {t("settings.composerEnterInsertsLive")}
+                  </div>
+                  <div className="settings-row__desc">
+                    {t("settings.composerEnterInsertsLiveDesc")}
+                  </div>
+                </div>
+                <UiCheck
+                  checked={composerEnterInsertsLive}
+                  onChange={() => {
+                    const next = !composerEnterInsertsLive;
+                    setComposerEnterInsertsLive(next);
+                    saveComposerEnterInsertsLive(next);
+                  }}
+                  ariaLabel={t("settings.composerEnterInsertsLive")}
                 />
               </div>
               <div
@@ -1420,6 +1450,30 @@ export function GeneralSection() {
                   />
                 </div>
               ) : null}
+              <div
+                className={"settings-row" + rowHighlight("settings-anchor-directorEnabled")}
+                id="settings-anchor-directorEnabled"
+              >
+                <div className="settings-row__text">
+                  <div className="settings-row__label">
+                    {t("settings.directorMode")}
+                  </div>
+                  <div className="settings-row__desc">
+                    {t("settings.directorModeDesc")}
+                  </div>
+                </div>
+                <UiCheck
+                  checked={directorEnabled}
+                  onChange={() => {
+                    const next = !directorEnabled;
+                    void commitDirectorSetting(next, async (value) => {
+                      const cur = await api.settingsGet();
+                      await api.settingsSet({ ...cur, directorEnabled: value });
+                    });
+                  }}
+                  ariaLabel={t("settings.directorMode")}
+                />
+              </div>
               {onTodoGateEnabled ? (
                 (() => {
                   const todoGateView = describeTodoGateSettings({
@@ -2284,6 +2338,7 @@ export function GeneralSection() {
                     { value: "it", label: "Italiano" },
                     { value: "pt-BR", label: "Português (Brasil)" },
                     { value: "ru", label: "Русский" },
+                    { value: "tr", label: "Türkçe" },
                     { value: "uk", label: "Українська" },
                     { value: "ta", label: "தமிழ்" },
                     { value: "ja", label: "日本語" },

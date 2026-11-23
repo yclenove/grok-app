@@ -13,6 +13,10 @@ import {
   type ComposerSendKeyPref,
 } from "@/lib/composerSendKey";
 import {
+  loadComposerEnterInsertsLive,
+  COMPOSER_ENTER_INSERTS_LIVE_CHANGED_EVENT,
+} from "@/lib/composerEnterInsertsLive";
+import {
   loadComposerSpellcheck,
   COMPOSER_SPELLCHECK_CHANGED_EVENT,
 } from "@/lib/composerSpellcheck";
@@ -70,6 +74,11 @@ import {
   loadWelcomeMotionPref,
   WELCOME_MOTION_CHANGE_EVENT,
 } from "@/lib/welcomeMotionPref";
+import {
+  applyOutputMotionToDocument,
+  loadOutputMotionPref,
+  OUTPUT_MOTION_CHANGE_EVENT,
+} from "@/lib/outputMotionPref";
 import {
   applyWindowAlwaysOnTop,
   loadWindowAlwaysOnTopPref,
@@ -129,6 +138,9 @@ export function useWorkbenchDisplayPrefs() {
   const [welcomeMotionEnabled, setWelcomeMotionEnabled] = useState(() =>
     loadWelcomeMotionPref(localStorage),
   );
+  const [outputMotionEnabled, setOutputMotionEnabled] = useState(() =>
+    loadOutputMotionPref(localStorage),
+  );
   const [goalOrchUiEnabled, setGoalOrchUiEnabled] = useState(() =>
     loadGoalOrchUiEnabled(localStorage),
   );
@@ -153,6 +165,9 @@ export function useWorkbenchDisplayPrefs() {
   );
   const [composerSendKeyPref, setComposerSendKeyPref] =
     useState<ComposerSendKeyPref>(() => loadComposerSendKeyPref());
+  const [composerEnterInsertsLive, setComposerEnterInsertsLive] = useState(
+    () => loadComposerEnterInsertsLive(),
+  );
   const [showComposerDraftStats, setShowComposerDraftStats] = useState(() =>
     loadComposerDraftStatsPref(),
   );
@@ -190,6 +205,11 @@ export function useWorkbenchDisplayPrefs() {
     setWelcomeMotionEnabled,
   );
   useBooleanPrefSync(
+    OUTPUT_MOTION_CHANGE_EVENT,
+    () => loadOutputMotionPref(localStorage),
+    setOutputMotionEnabled,
+  );
+  useBooleanPrefSync(
     GOAL_ORCH_UI_CHANGE_EVENT,
     () => loadGoalOrchUiEnabled(localStorage),
     setGoalOrchUiEnabled,
@@ -224,6 +244,9 @@ export function useWorkbenchDisplayPrefs() {
   );
   useReloadPrefSync(COMPOSER_SEND_KEY_CHANGED_EVENT, () =>
     setComposerSendKeyPref(loadComposerSendKeyPref()),
+  );
+  useReloadPrefSync(COMPOSER_ENTER_INSERTS_LIVE_CHANGED_EVENT, () =>
+    setComposerEnterInsertsLive(loadComposerEnterInsertsLive()),
   );
   useReloadPrefSync(COMPOSER_DRAFT_STATS_CHANGED_EVENT, () =>
     setShowComposerDraftStats(loadComposerDraftStatsPref()),
@@ -267,6 +290,10 @@ export function useWorkbenchDisplayPrefs() {
     void applyWindowAlwaysOnTop(windowAlwaysOnTop);
   }, [windowAlwaysOnTop]);
 
+  useEffect(() => {
+    applyOutputMotionToDocument(outputMotionEnabled);
+  }, [outputMotionEnabled]);
+
   return {
     showMessageTimestamps,
     setShowMessageTimestamps,
@@ -276,6 +303,8 @@ export function useWorkbenchDisplayPrefs() {
     setReplaceProviderBrandLogo,
     welcomeMotionEnabled,
     setWelcomeMotionEnabled,
+    outputMotionEnabled,
+    setOutputMotionEnabled,
     goalOrchUiEnabled,
     setGoalOrchUiEnabled,
     goalOrchEvents,
@@ -294,6 +323,8 @@ export function useWorkbenchDisplayPrefs() {
     setWinTaskbarOverlay,
     composerSendKeyPref,
     setComposerSendKeyPref,
+    composerEnterInsertsLive,
+    setComposerEnterInsertsLive,
     showComposerDraftStats,
     setShowComposerDraftStats,
     composerSpellcheck,

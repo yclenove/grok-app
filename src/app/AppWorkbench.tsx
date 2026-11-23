@@ -13,6 +13,7 @@ import {
 import { useThemeShell } from "@/providers/ThemeShellContext";
 import { useSshWatch } from "@/providers/SshWatchProvider";
 import { usePetCompanion } from "@/hooks/usePetCompanion";
+import { useAutomationRunNow } from "@/hooks/useAutomationRunNow";
 import { useFloatingMenu } from "@/lib/floatingMenu";
 import { restoreSessionGate } from "@/lib/sessionGateRestore";
 import { DEFAULT_WALLPAPER_FOCUS } from "@/lib/themeSkin";
@@ -49,7 +50,7 @@ import {
   shouldSkipHtml5AfterNative,
 } from "@/lib/fileDrop";
 import { writeOpenTargetStorage } from "@/lib/openEditorHonesty";
-import { buildContinueAgentPrompt } from "@/lib/continueInterruptedTurn";
+import { useEndAndContinue } from "@/hooks/useEndAndContinue";
 import {
   APP_CLOSE_REQUESTED_EVENT,
   loadAlwaysQuitWithoutAskingPref,
@@ -120,6 +121,7 @@ import {
 } from "@/lib/session";
 import {
   INITIAL_CONTEXT_USAGE,
+  formatTokenCount,
   resolveContextUsageDisplay,
   type ContextUsageState,
 } from "@/lib/contextUsage";
@@ -354,10 +356,8 @@ import { mapStoredMessagesToChat } from "@/lib/mapStoredMessages";
 import {
   rankAtFileHits,
   removeAtTokenFromDraft,
+  toAtFileHits,
 } from "@/lib/atFileQuery";
-import {
-  type ComposerAtFileEntry,
-} from "@/components/ComposerAtPanel";
 import {
   formatAttachErrorMessage,
   isAttachPayloadTooLarge,
@@ -365,13 +365,18 @@ import {
   resolveHostOnlyAttach,
   resolveNativeClipboardEmpty,
 } from "@/lib/attachmentsPro";
-import { fileKey as clipboardFileKey, readClipboardMediaFiles } from "@/lib/clipboardPaste";
+import {
+  clipboardTextIsFileList,
+  fileKey as clipboardFileKey,
+  readClipboardMediaFiles,
+  readClipboardPlainText,
+} from "@/lib/clipboardPaste";
 import {
   applyPluginAtSlash,
   applySkillAtSlash,
   isDraftEmpty,
   detectSlashRangeOnStored,
-  parseStoredContent,
+  parseStoredContent, parseStoredContentWithRefs,
   serializeForAgent,
 } from "@/lib/draftDoc";
 import {
@@ -443,12 +448,25 @@ import {
   useSendQueue,
   type ExecuteSendFromQueue,
 } from "@/hooks/useSendQueue";
+import { parsePetQuickPrompt, type PetQuickPrompt } from "@/lib/api/petQuick";
+import { runPetQuickPrompt } from "@/lib/petQuickPromptRun";
+import { parsePetQuickAction, runPetQuickAction, type PetQuickActionReq } from "@/lib/petQuickActions";
 import {
   buildSlashCatalog,
   countSlashByKind,
   flattenFilteredCatalog,
   type SlashItem,
 } from "@/lib/slashCatalog";
+import { parseContextInfoPayload } from "@/lib/contextInfoSnapshot";
+import {
+  contextWindowSlashFeedback,
+  leftoverContextWindowArgs,
+  positiveContextWindows,
+  resolveContextWindowCommand,
+  formatWindowLabel,
+  selectableContextWindows,
+  stripContextWindowSlashFromDraft,
+} from "@/lib/contextWindowCommand";
 import {
   leftoverWorkflowArgs,
   resolveWorkflowSlashAction,
@@ -525,8 +543,8 @@ import { PhoneComposerToolsSheet } from "@/components/PhoneComposerToolsSheet";
 import { type ContextMenuItem } from "@/components/ContextMenu";
 import {
   aiCreateSeedPrompt,
-  computeNextRunAt,
-  type Automation,
+  automationProjectOptions,
+  automationSessionOptions,
 } from "@/lib/automations";
 import { automationsBackgroundStatus } from "@/lib/automationsBackgroundStatus";
 import { recordAutomationRun } from "@/lib/automationRunHistory";
@@ -537,7 +555,10 @@ import {
   shouldAutoApplyAutomationFence,
 } from "@/lib/automationSetup";
 
-import type { ComposerModelPick } from "@/lib/composerModelGroups";
+import {
+  composerMenuProviders,
+  type ComposerModelPick,
+} from "@/lib/composerModelGroups";
 import {
   resolveProviderBrandId,
 } from "@/lib/providerPresets";
@@ -769,6 +790,8 @@ export function AppWorkbench() {
     setReplaceProviderBrandLogo,
     welcomeMotionEnabled,
     setWelcomeMotionEnabled,
+    outputMotionEnabled,
+    setOutputMotionEnabled,
     goalOrchUiEnabled,
     setGoalOrchUiEnabled,
     goalOrchEvents,
@@ -786,6 +809,7 @@ export function AppWorkbench() {
     winTaskbarOverlay,
     setWinTaskbarOverlay,
     composerSendKeyPref,
+    composerEnterInsertsLive,
     showComposerDraftStats,
     composerSpellcheck,
     sidebarDensity,
@@ -1273,12 +1297,14 @@ export function AppWorkbench() {
   const [mainPane, setMainPane] = useState<"chat" | "automations" | "kanban">(
     "chat",
   );
-  /** Prevent overlapping automation runs. */
-  const automationRunLock = useRef(false);
   /** Conversation is guiding the user to create a scheduled task. */
   const automationSetupDraftRef = useRef(false);
   const automationSetupSessionsRef = useRef(new Set<string>());
   const automationAppliedRef = useRef(new Set<string>());
+  /** Full provider list for composer model menu groups. */
+  const [customProviders, setCustomProviders] = useState<api.CustomProvider[]>(
+    [],
+  );
   const sessionNavHostRef = useRef(createSessionNavHost());
   const sessionConnectHostRef = useRef(createSessionConnectHost());
   const gitWorktreeHostRef = useRef(createGitWorktreeChromeHost());
@@ -2370,6 +2396,7 @@ export function AppWorkbench() {
         prefs,
         catalog,
         providers: sessionProviderChip.providersSnapshot(),
+        draft: sessionProviderChip.draftComposerRouteRef.current,
       });
       setModelId(next.modelId);
       setEffort(next.effort);
@@ -2377,9 +2404,7 @@ export function AppWorkbench() {
       setPolicy(
         isValidPolicy(prefs.permissionPolicy) ? prefs.permissionPolicy : "ask",
       );
-      if (isValidPrefsScope(prefs.scope)) {
-        setPrefsScope(prefs.scope);
-      }
+      if (isValidPrefsScope(prefs.scope)) setPrefsScope(prefs.scope);
     },
     [sessionProviderChip],
   );
@@ -2427,6 +2452,7 @@ export function AppWorkbench() {
                 source: m.source,
                 isDefault: m.isDefault,
                 contextWindow: m.contextWindow ?? null,
+                contextWindows: positiveContextWindows(m.contextWindows),
               }))
             : GROK_BUILD_MODELS;
         setAvailableModels(catalog);
@@ -2595,6 +2621,7 @@ export function AppWorkbench() {
                 isDefault: m.isDefault,
                 reasoningEfforts: efforts,
                 contextWindow: m.contextWindow ?? null,
+                contextWindows: positiveContextWindows(m.contextWindows),
               };
             })
           : GROK_BUILD_MODELS;
@@ -3879,290 +3906,37 @@ export function AppWorkbench() {
     return groups;
   }, [sessions, projects, tr]);
 
-  /**
-   * Run a scheduled automation now: open chat under its project (or orphan),
-   * connect, and send the stored prompt.
-   * @returns true if the prompt was handed to the agent (mark_run applied).
-   */
-  const runAutomation = useCallback(
-    async (
-      auto: Automation,
-      opts?: { fromScheduler?: boolean },
-    ): Promise<boolean> => {
-      if (automationRunLock.current) {
-        // Soft skip — do not invent a fire; only note busy contention.
-        recordAutomationRun({
-          scheduleId: auto.id,
-          name: auto.title,
-          outcome: "skipped",
-          source: "run_now",
-          error: "busy",
-        });
-        return false;
-      }
-      if (opts?.fromScheduler && (session.state === "streaming" || connecting)) {
-        recordAutomationRun({
-          scheduleId: auto.id,
-          name: auto.title,
-          outcome: "skipped",
-          source: "run_now",
-          error: "session_busy",
-        });
-        return false;
-      }
-      automationRunLock.current = true;
-      let createdSessionId: string | null = null;
-      try {
-        const proj = auto.projectId
-          ? projects.find((p) => p.id === auto.projectId) ?? null
-          : null;
-        if (proj && !proj.trusted) {
-          const detail = tr("project.trustFirst", { name: proj.name });
-          setLocalError(detail);
-          recordAutomationRun({
-            scheduleId: auto.id,
-            name: auto.title,
-            outcome: "error",
-            source: "run_now",
-            error: detail,
-          });
-          return false;
-        }
-        if (proj && isProjectFolderMissing(proj)) {
-          const detail = tr("project.pathMissing", { name: proj.name });
-          setLocalError(detail);
-          recordAutomationRun({
-            scheduleId: auto.id,
-            name: auto.title,
-            outcome: "error",
-            source: "run_now",
-            error: detail,
-          });
-          return false;
-        }
-        setMainPane("chat");
-        closeSettings();
-        setActiveProject(proj);
-        if (proj) {
-          setExpandedProjects((e) => ({ ...e, [proj.id]: true }));
-        } else {
-          setHistoryOpen(true);
-        }
-        openingSessionIdRef.current = null;
-        invalidateOpenPipelines();
-        bumpViewEpoch();
-        viewingSessionIdRef.current = null;
-        sessionTranscriptStore.setViewingSessionId(null);
-        sessionTranscriptStore.clearJournalLoad();
-        setMessages([]);
-        setAttachments([]);
-        setQuotes([]);
-        setPerm(null);
-        setAskUser(null);
-        setRetryStatus(null);
-        setLocalError(null);
-        setDraft("");
-        if (api.isTauri()) {
-          try {
-            await api.sessionDisconnect();
-          } catch {
-            /* ignore */
-          }
-        }
-        setSession({
-          ...IDLE_SNAPSHOT,
-          sessionId: null,
-          title: auto.title || tr("session.new"),
-          state: "idle",
-          backend: "grok_agent_stdio",
-        });
-        {
-          const idle = { ...IDLE_SNAPSHOT };
-          setLiveHost(idle);
-          liveHostRef.current = idle;
-        }
-
-        let sessionId: string | null = null;
-        if (api.isTauri()) {
-          const meta = (await api.sessionCreate(
-            proj?.id,
-            auto.title || tr("session.new"),
-            { scheduled: true },
-          )) as { id: string; title?: string; scheduled?: boolean };
-          sessionId = meta.id;
-          createdSessionId = meta.id;
-          viewingSessionIdRef.current = meta.id;
-          setSession((prev) => ({
-            ...prev,
-            sessionId: meta.id,
-            title: meta.title || auto.title,
-          }));
-          await refreshSessions();
-        }
-
-        // Persist model/effort for this session before connect when possible.
-        if (sessionId && api.isTauri() && (auto.modelId || auto.effort)) {
-          try {
-            await api.composerPrefsSet({
-              sessionId,
-              projectId: proj?.id ?? null,
-              modelId: auto.modelId,
-              effort: auto.effort,
-            });
-          } catch {
-            /* soft-fail */
-          }
-        }
-
-        const snap = await api.sessionConnect({
-          projectPath: proj?.path || generalWorkspacePath || undefined,
-          sessionId: sessionId ?? undefined,
-          mode: "agent",
-          sshAlias: proj?.sshAlias ?? null,
-        });
-        setLiveHost(snap);
-        liveHostRef.current = snap;
-        if (snap.sessionId) {
-          viewingSessionIdRef.current = snap.sessionId;
-          sessionId = snap.sessionId;
-        }
-        setSession({
-          ...snap,
-          title: snap.title || auto.title || snap.title,
-        });
-        if (snap.lastError || snap.state !== "ready") {
-          const code = snap.lastError?.code ?? "AGENT_CRASHED";
-          const msg = snap.lastError?.message ?? "connect failed";
-          const detail = `${code}: ${msg}`;
-          setLocalError(
-            tr("automations.connectFailed", { detail }),
-          );
-          recordAutomationRun({
-            scheduleId: auto.id,
-            name: auto.title,
-            outcome: "error",
-            source: "run_now",
-            error: detail,
-          });
-          // Drop empty shell sessions so sidebar does not show SuperGrok ghosts.
-          if (createdSessionId && api.isTauri()) {
-            try {
-              await api.sessionDelete(createdSessionId);
-              await refreshSessions();
-            } catch {
-              /* ignore */
-            }
-            if (viewingSessionIdRef.current === createdSessionId) {
-              viewingSessionIdRef.current = null;
-              setMessages([]);
-              setSession({ ...IDLE_SNAPSHOT, state: "idle" });
-            }
-          }
-          return false;
-        }
-
-        if (sessionId && auto.modelId && api.isTauri()) {
-          try {
-            await api.sessionSetModel(auto.modelId, {
-              sessionId,
-              projectId: proj?.id ?? null,
-            });
-          } catch {
-            /* soft-fail */
-          }
-        }
-
-        const header = `[Scheduled: ${auto.title}]\n\n`;
-        const promptBody = header + auto.prompt;
-        const autoMsgs: ChatMessage[] = [
-          {
-            id: `u-auto-${Date.now()}`,
-            role: "user",
-            content: promptBody,
-            createdAt: new Date().toISOString(),
-          },
-        ];
-        if (sessionId) {
-          messagesBySessionRef.current.set(sessionId, autoMsgs);
-        }
-        setMessages(autoMsgs);
-        setSession((prev) => ({
-          ...prev,
-          state: "streaming",
-          lastError: null,
-          title: auto.title || prev.title,
-        }));
-
-        try {
-          await api.sessionSend(promptBody, null, sessionId);
-        } catch (sendErr) {
-          const errText = String(sendErr);
-          const failed: ChatMessage[] = [
-            ...autoMsgs,
-            {
-              id: `err-auto-${Date.now()}`,
-              role: "assistant",
-              content: errText,
-              isError: true,
-              createdAt: new Date().toISOString(),
-            },
-          ];
-          if (sessionId) {
-            messagesBySessionRef.current.set(sessionId, failed);
-          }
-          setMessages(failed);
-          setLocalError(errText);
-          setSession((prev) =>
-            prev.sessionId === sessionId
-              ? { ...prev, state: "ready" }
-              : prev,
-          );
-          recordAutomationRun({
-            scheduleId: auto.id,
-            name: auto.title,
-            outcome: "error",
-            source: "run_now",
-            error: errText,
-          });
-          return false;
-        }
-
-        const lastRunAt = new Date().toISOString();
-        const nextRunAt =
-          auto.frequency === "once"
-            ? null
-            : computeNextRunAt(
-                { ...auto, enabled: auto.frequency !== "once" },
-                new Date(Date.now() + 60_000),
-              );
-        await api.automationMarkRun(auto.id, lastRunAt, nextRunAt);
-        if (auto.frequency === "once") {
-          await api.automationSetEnabled(auto.id, false);
-        }
-        recordAutomationRun({
-          scheduleId: auto.id,
-          name: auto.title,
-          outcome: "ok",
-          source: "run_now",
-          at: lastRunAt,
-        });
-        return true;
-      } catch (e) {
-        setLocalError(String(e));
-        recordAutomationRun({
-          scheduleId: auto.id,
-          name: auto.title,
-          outcome: "error",
-          source: "run_now",
-          error: e,
-        });
-        return false;
-      } finally {
-        automationRunLock.current = false;
-      }
-    },
-    [projects, session.state, connecting, tr],
-  );
+  const runAutomation = useAutomationRunNow({
+    projects,
+    sessions,
+    availableModels,
+    customProviders,
+    generalWorkspacePath,
+    tr,
+    applyComposerPrefs,
+    setLocalError,
+    setMainPane,
+    closeSettings,
+    setActiveProject,
+    setExpandedProjects,
+    setHistoryOpen,
+    invalidateOpenPipelines,
+    bumpViewEpoch,
+    composer: { setDraft, setAttachments, setQuotes },
+    setMessages,
+    setPerm,
+    setAskUser,
+    setRetryStatus,
+    setSession,
+    setLiveHost,
+    refreshSessions,
+    openSessionRef,
+    openingSessionIdRef,
+    viewingSessionIdRef,
+    liveHostRef,
+    messagesBySessionRef,
+    sessionNavHostRef,
+  });
 
   // Host automation_runner ticks while the process is alive (including tray).
   // UI only surfaces toasts / refreshes list — do not double-fire from WebView.
@@ -5616,6 +5390,8 @@ export function AppWorkbench() {
     sessionGoalClear.flush(session.sessionId, session.state);
   }, [session.sessionId, session.state]);
 
+  const contextWindowSlashRef = useRef<(args: string) => void>(() => {});
+  const contextSlashRef = useRef<(announce: boolean) => void>(() => {});
   const {
     executeSend,
     send,
@@ -5670,6 +5446,12 @@ export function AppWorkbench() {
     getDraft,
     requestComposerFocus,
     openWorkflowsSettings,
+    onContextWindowSlash: (args) => {
+      contextWindowSlashRef.current(args);
+    },
+    onContextSlash: () => {
+      contextSlashRef.current(true);
+    },
     applySessionTitle,
     restartTurnClock,
     syncViewedTurnClock,
@@ -5944,18 +5726,13 @@ export function AppWorkbench() {
    */
   const pasteIntoComposer = useCallback(() => {
     void (async () => {
-      // 1. Text on the clipboard.
-      let text = "";
-      try {
-        text = ((await navigator.clipboard.readText()) ?? "").trim();
-      } catch {
-        /* not readable as text — fall through to media */
-      }
-      // Bare file:// URL(s) from copying a file in the OS — not useful as
-      // draft text; the real payload is handled by the media paths below.
-      const lines = text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-      const fileUrlOnly =
-        lines.length > 0 && lines.every((l) => /^file:\/\//i.test(l));
+      // 1. Text. The web clipboard is often empty on Linux; the host clipboard
+      // is the one Ctrl+V reads.
+      const text = (
+        await readClipboardPlainText(() => api.clipboardReadText())
+      ).trim();
+      // file:// list from an OS file copy — attach it, do not insert the URL.
+      const fileUrlOnly = clipboardTextIsFileList(text);
       if (text && !fileUrlOnly) {
         setDraft((prev) => {
           if (!prev) return text;
@@ -6347,7 +6124,7 @@ export function AppWorkbench() {
     return () => {
       cancelled = true;
     };
-  }, [activeProject?.path, activeProject?.sshAlias, skillsReloadToken]);
+  }, [activeProject?.path, activeProject?.sshAlias, skillsReloadToken, session.sessionId]);
 
   const slashCatalog = useMemo(
     () => buildSlashCatalog(skillInfos),
@@ -6553,6 +6330,7 @@ export function AppWorkbench() {
             query: q,
             mode: "name",
             limit: 40,
+            includeDirs: true,
           });
           if (gen !== atSearchGenRef.current) return;
           if (res.softFail) {
@@ -6560,15 +6338,7 @@ export function AppWorkbench() {
             setAtEntries([]);
           } else {
             setAtSoftFail(null);
-            const hits: ComposerAtFileEntry[] = rankAtFileHits(
-              (res.hits ?? []).map((h) => ({
-                path: h.path,
-                name: h.name,
-                relativePath: h.relativePath,
-                mtimeMs: h.mtimeMs,
-              })),
-              q,
-            );
+            const hits = rankAtFileHits(toAtFileHits(res.hits ?? []), q);
             setAtEntries(hits);
           }
         } catch (e) {
@@ -7351,21 +7121,6 @@ export function AppWorkbench() {
       .catch((e) => showToast(String(e), 4000));
   }, [activeProject?.id, session.sessionId, showToast]);
 
-  const sendQueueLabels = useMemo(
-    () => ({
-      sendFailed: tr("composer.queueSendFailed"),
-      droppedOldest: (n: number, max: number) =>
-        tr("composer.queueDroppedOldest", {
-          n: String(n),
-          max: String(max),
-        }),
-      externalAdded: (preview: string) =>
-        tr("composer.queueExternalAdded", { preview }),
-      externalAddedOther: (preview: string) =>
-        tr("composer.queueExternalAddedOther", { preview }),
-    }),
-    [tr],
-  );
   const sendQueue = useSendQueue({
     sessionId: session.sessionId,
     sessionState: session.state,
@@ -7378,7 +7133,7 @@ export function AppWorkbench() {
     executeSendRef: executeSendFromQueueRef,
     showToast,
     acceptExternal: !isSecondaryWindow,
-    labels: sendQueueLabels,
+    tr,
   });
 
   sendQueueRef.current = sendQueue;
@@ -7534,7 +7289,7 @@ export function AppWorkbench() {
         return;
       }
       const quotesForGuide = item.quotes ?? [];
-      const segments = parseStoredContent(item.storedDisplay);
+      const segments = parseStoredContentWithRefs(item.storedDisplay);
       const agentBody = serializeQuotesForAgent(
         quotesForGuide,
         serializeForAgent(segments, { goalMode: item.goalMode }),
@@ -8798,6 +8553,36 @@ export function AppWorkbench() {
         return;
       }
 
+      if (item.kind === "action" && item.action === "context-window") {
+        const stored = getDraft();
+        const leftover = q ? leftoverContextWindowArgs(stored, q.end) : "";
+        if (q) {
+          setDraft((d) =>
+            stripContextWindowSlashFromDraft(d, q.start, q.end),
+          );
+          requestComposerStoredCaret(q.start);
+        }
+        const fromQuery = (q?.query ?? "")
+          .replace(/^context-window\s*/i, "")
+          .trim();
+        contextWindowSlashRef.current(leftover || fromQuery);
+        return;
+      }
+
+      if (item.kind === "action" && item.action === "context") {
+        if (q) {
+          const stored = getDraft();
+          const lineEnd = stored.slice(q.end).search(/[\r\n]/);
+          const cut = lineEnd === -1 ? stored.length : q.end + lineEnd;
+          setDraft((d) =>
+            (d.slice(0, q.start) + d.slice(cut)).replace(/[ \t]+$/u, ""),
+          );
+          requestComposerStoredCaret(q.start);
+        }
+        contextSlashRef.current(true);
+        return;
+      }
+
       if (item.kind === "skill" || item.kind === "plugin") {
         const applyAtSlash =
           item.kind === "plugin" ? applyPluginAtSlash : applySkillAtSlash;
@@ -9068,6 +8853,10 @@ export function AppWorkbench() {
   // welcome logo paints immediately — the SVG itself is inline, not a fetch.
   const [cachedBrandKind, setCachedBrandKind] =
     useState<SuperGrokBrandKind | null>(() => loadCachedSuperGrokBrand());
+  /** Window picked on the new-chat composer, before a chat row exists. */
+  const [draftContextWindow, setDraftContextWindow] = useState<number | null>(
+    null,
+  );
   /** Active inference channel: custom relay identity replaces official account chrome. */
   const [activeCustomProvider, setActiveCustomProvider] =
     useState<api.CustomProvider | null>(null);
@@ -9087,13 +8876,18 @@ export function AppWorkbench() {
         modelId,
         models: availableModels,
         // Prefer live agent occupancy denominator (Grok Build 1.0 → 500k).
-        agentContextWindow: contextUsage.agentContextWindow,
+        // A new chat has no agent yet; the draft choice is what the menu shows.
+        agentContextWindow:
+          contextUsage.agentContextWindow ??
+          (session.sessionId ? null : draftContextWindow),
       }),
     [
       activeCustomProvider,
       modelId,
       availableModels,
       contextUsage.agentContextWindow,
+      draftContextWindow,
+      session.sessionId,
     ],
   );
   useEffect(() => {
@@ -9131,6 +8925,9 @@ export function AppWorkbench() {
                   m.contextWindow != null && m.contextWindow > 0
                     ? m.contextWindow
                     : (prior?.contextWindow ?? null),
+                contextWindows:
+                  positiveContextWindows(m.contextWindows) ??
+                  prior?.contextWindows,
               };
             });
           });
@@ -9139,21 +8936,20 @@ export function AppWorkbench() {
     }
   }, [session.state, session.sessionId]);
   /** Context usage chip label/state from compact events + message estimate. */
-  const contextUsageDisplay = useMemo(
-    () =>
-      resolveContextUsageDisplay(
-        contextUsage,
-        messages,
-        locale,
-        currentModelWindow,
-      ),
-    [contextUsage, messages, locale, currentModelWindow],
-  );
+  const contextUsageDisplay = useMemo(() => {
+    const base = resolveContextUsageDisplay(
+      contextUsage,
+      messages,
+      locale,
+      currentModelWindow,
+    );
+    return {
+      ...base,
+      contextInfo: contextUsage.contextInfo ?? null,
+      contextInfoNonce: contextUsage.contextInfoNonce ?? 0,
+    };
+  }, [contextUsage, messages, locale, currentModelWindow]);
   const sessionSpend = useSessionSpend(session.sessionId);
-  /** Full provider list for composer model menu groups. */
-  const [customProviders, setCustomProviders] = useState<api.CustomProvider[]>(
-    [],
-  );
   const [providerActiveSource, setProviderActiveSource] =
     useState<string>("official");
   const [providerActiveId, setProviderActiveId] = useState<string | null>(null);
@@ -9161,18 +8957,7 @@ export function AppWorkbench() {
   const modelPickBusyRef = useRef(false);
   const customRouteActive = activeCustomProvider != null;
   const composerProviderInputs = useMemo(
-    () =>
-      customProviders.map((p) => ({
-        id: p.id,
-        name: p.name,
-        model: p.model,
-        models: (p.models?.length
-          ? p.models
-          : p.model
-            ? [{ id: p.model, name: p.model }]
-            : []
-        ).map((m) => ({ id: m.id, name: m.name || m.id })),
-      })),
+    () => composerMenuProviders(customProviders),
     [customProviders],
   );
   sessionProviderChip.bind({
@@ -9477,30 +9262,136 @@ export function AppWorkbench() {
   );
   const handleContextWindow = useCallback(
     async (tokens: number) => {
-      if (!api.isTauri() || !activeCustomProvider) return;
+      if (!api.isTauri()) return false;
+      if (activeCustomProvider) {
+        try {
+          await api.providersUpsert({
+            id: activeCustomProvider.id,
+            model: activeCustomProvider.model,
+            baseUrl: activeCustomProvider.baseUrl,
+            name: activeCustomProvider.name,
+            apiBackend: activeCustomProvider.apiBackend,
+            models: withModelContextWindow(
+              activeCustomProvider.models,
+              activeCustomProvider.model,
+              tokens,
+            ),
+            efforts: activeCustomProvider.efforts,
+            setAsDefault: false,
+            contextWindow: tokens,
+          });
+          await refreshProviderRoute();
+          return true;
+        } catch (e) {
+          showToast(String(e), 4000);
+          return false;
+        }
+      }
+      const model = availableModels.find((m) => m.id === modelId);
+      const options = selectableContextWindows(model);
+      if (!options.includes(tokens)) {
+        showToast(
+          tr("slash.contextWindowUnknown", {
+            token: String(tokens),
+            options: options.map((n) => formatWindowLabel(n)).join(", "),
+          }),
+          4000,
+        );
+        return false;
+      }
       try {
-        await api.providersUpsert({
-          id: activeCustomProvider.id,
-          model: activeCustomProvider.model,
-          baseUrl: activeCustomProvider.baseUrl,
-          name: activeCustomProvider.name,
-          apiBackend: activeCustomProvider.apiBackend,
-          models: withModelContextWindow(
-            activeCustomProvider.models,
-            activeCustomProvider.model,
-            tokens,
-          ),
-          efforts: activeCustomProvider.efforts,
-          setAsDefault: false,
-          contextWindow: tokens,
+        await api.sessionSetContextWindow(tokens, {
+          sessionId: session.sessionId,
         });
-        await refreshProviderRoute();
+        if (!session.sessionId) setDraftContextWindow(tokens);
+        setContextUsage((prev) => ({
+          ...prev,
+          agentContextWindow: tokens,
+        }));
+        return true;
       } catch (e) {
         showToast(String(e), 4000);
+        return false;
       }
     },
-    [activeCustomProvider, refreshProviderRoute, showToast],
+    [
+      activeCustomProvider,
+      availableModels,
+      modelId,
+      refreshProviderRoute,
+      session.sessionId,
+      showToast,
+      tr,
+    ],
   );
+  const runContextWindowSlash = useCallback(
+    async (args: string) => {
+      const model = availableModels.find((m) => m.id === modelId);
+      const result = resolveContextWindowCommand({
+        args,
+        hasModel: Boolean(modelId),
+        hasSession: Boolean(session.sessionId),
+        options: activeCustomProvider ? [] : selectableContextWindows(model),
+        current: currentModelWindow,
+      });
+      if (result.kind === "switch") {
+        const ok = await handleContextWindow(result.window);
+        if (ok) {
+          showToast(
+            tr("slash.contextWindowSwitched", {
+              size: formatTokenCount(result.window, locale),
+            }),
+            2500,
+          );
+        }
+        return;
+      }
+      const feedback = contextWindowSlashFeedback(result);
+      showToast(tr(feedback.key, feedback.vars), 4000);
+    },
+    [
+      activeCustomProvider,
+      availableModels,
+      currentModelWindow,
+      handleContextWindow,
+      locale,
+      modelId,
+      session.sessionId,
+      showToast,
+      tr,
+    ],
+  );
+  contextWindowSlashRef.current = runContextWindowSlash;
+  const runContextSlash = useCallback(
+    async (announce: boolean) => {
+      if (!api.isTauri() || !session.sessionId) {
+        if (announce) showToast(tr("slash.contextNoSession"), 4000);
+        return;
+      }
+      try {
+        const raw = await api.sessionContextInfo(session.sessionId);
+        const view = parseContextInfoPayload(raw);
+        if (!view) {
+          if (announce) showToast(tr("slash.contextUnavailable"), 4000);
+          return;
+        }
+        setContextUsage((prev) => ({
+          ...prev,
+          knownTokens: view.used,
+          agentContextWindow:
+            view.total > 0 ? view.total : prev.agentContextWindow,
+          agentPercentage: null,
+          lastCompactMessageId: null,
+          contextInfo: view,
+          contextInfoNonce: (prev.contextInfoNonce ?? 0) + 1,
+        }));
+      } catch (e) {
+        if (announce) showToast(String(e), 4000);
+      }
+    },
+    [session.sessionId, showToast, tr],
+  );
+  contextSlashRef.current = runContextSlash;
   const liveBrandKind = useMemo(
     () =>
       superGrokBrandKind(
@@ -9615,18 +9506,21 @@ export function AppWorkbench() {
     welcomeSession,
   ]);
 
-  const stop = async () => {
+  const stop = async (explicitSessionId?: string | null): Promise<boolean> => {
     const now = Date.now();
     // Composer Stop scope = current viewed chat only (not global Stop-all).
     // Preferring the Host live slot cancelled a foreign turn whenever the
     // viewed chat had been demoted to background.
+    // An explicit id (end-and-continue) stays on that chat after a switch.
     const sid =
+      explicitSessionId?.trim() ||
       resolveStopTargets({
         scope: "current",
         currentSessionId:
           viewingSessionIdRef.current || liveHostRef.current.sessionId || null,
         busySessionIds: [],
-      })[0] ?? null;
+      })[0] ||
+      null;
     const armed = armStopLatch(stopLatchRef.current, sid, now);
     stopLatchRef.current = armed;
     setStopLatch(armed);
@@ -9702,8 +9596,9 @@ export function AppWorkbench() {
         forceUnlockLocal(id, "force");
       }
     }, STOP_LATCH_MS + 50);
+    let cancelDelivered = false;
     try {
-      await api.sessionStop(sid);
+      cancelDelivered = (await api.sessionStopReport(sid)).cancelDelivered === true;
       setRetryStatus(null);
       setStreamStall(null);
       clearTurnClock(sid);
@@ -9734,6 +9629,7 @@ export function AppWorkbench() {
       const settled = settleStopLatchAfterSessionStop(stopLatchRef.current);
       stopLatchRef.current = settled;
       setStopLatch(settled);
+      return cancelDelivered;
     } catch (e) {
       // Host stop can fail ("no active session") while UI still shows thinking.
       // Always finish local unlock so Stop never leaves a dead busy shell.
@@ -9742,6 +9638,7 @@ export function AppWorkbench() {
       stopLatchRef.current = settled;
       setStopLatch(settled);
       setLocalError(String(e));
+      return false;
     }
   };
 
@@ -10466,6 +10363,8 @@ export function AppWorkbench() {
     /** Omit section to restore last settings route. */
     openSettings: (_section?: SettingsSectionId) => {},
     openDoctor: () => {},
+    quickPrompt: (_p: PetQuickPrompt) => {},
+    quickAction: (_a: PetQuickActionReq) => {},
   });
   const openSessionByIdHandler = (id: string) => {
     void (async () => {
@@ -10557,6 +10456,21 @@ export function AppWorkbench() {
     openDoctor: () => {
       void openDoctor();
     },
+    quickPrompt: (p: PetQuickPrompt) => {
+      void runPetQuickPrompt(p, {
+        sessions, projects, openSession, newChat, showToast, tr,
+        sessionsList: api.sessionsList, mapRow: mapSessionListRow,
+        send: (o) => executeSendLatestRef.current(o),
+      });
+    },
+    quickAction: (a: PetQuickActionReq) => {
+      void runPetQuickAction(a, {
+        activePerm: perm, pendingPerms: pendingPermBySessionRef.current,
+        buttonsFor: (p) => mapPermissionButtons(p.options, { allowOnce: tr("perm.allowOnce"), allowSession: tr("perm.allowSession"), deny: tr("perm.deny") }, p.toolName),
+        resolve: resolvePermission, stop: (sid) => stop(sid), open: openSessionByIdHandler,
+        notify: () => showToast(tr("pet.quick.noPending"), 3000),
+      }).catch(() => {});
+    },
   };
 
   // Desktop notification click → open the session that fired the notify.
@@ -10622,6 +10536,16 @@ export function AppWorkbench() {
         unsubs.push(
           await listen("tray://open-doctor", () => {
             trayHandlersRef.current.openDoctor();
+          }),
+        );
+        unsubs.push(
+          await listen("pet://quick-prompt", (ev) => {
+            const p = parsePetQuickPrompt(ev.payload);
+            if (p) trayHandlersRef.current.quickPrompt(p);
+          }),
+          await listen("pet://quick-action", (ev) => {
+            const a = parsePetQuickAction(ev.payload);
+            if (a) trayHandlersRef.current.quickAction(a);
           }),
         );
       } catch (e) {
@@ -11292,7 +11216,7 @@ export function AppWorkbench() {
         showToast(tr(opts?.busyToastKey ?? "message.editBusy"));
         return;
       }
-      const segments = parseStoredContent(storedDisplay);
+      const segments = parseStoredContentWithRefs(storedDisplay);
       if (isDraftEmpty(segments) && !att.length) return;
 
       const agentBody = serializeForAgent(segments, { goalMode });
@@ -11553,28 +11477,17 @@ export function AppWorkbench() {
     ],
   );
 
-  const onThreadContinueInterrupted = useCallback(() => {
-    const sid = session.sessionId;
-    if (!sid) return;
-    if (
-      session.state === "streaming" ||
-      session.state === "awaiting_permission" ||
-      session.state === "connecting"
-    ) {
-      return;
-    }
-    void (async () => {
-      const ctx = await api.sessionInterruptContext(sid);
-      const journal = tr("endOfTurn.continuePrompt");
-      await executeSendLatestRef.current({
-        storedDisplay: journal,
-        att: [],
-        goalMode: false,
-        targetSessionId: sid,
-        agentTextOverride: buildContinueAgentPrompt(ctx),
-      });
-    })();
-  }, [session.sessionId, session.state, tr]);
+  const { endAndContinueBusy, endAndContinue, onThreadContinueInterrupted } =
+    useEndAndContinue({
+      stop,
+      sendContinue: (args) => executeSendLatestRef.current(args),
+      showToast,
+      tr,
+      readHostState: (sid) =>
+        liveMapRef.current[sid]?.state ||
+        (liveHostRef.current.sessionId === sid ? liveHostRef.current.state : null),
+      readViewedSessionId: () => session.sessionId,
+    });
 
   const onThreadAddQuote = useCallback(
     (quote: { text: string; comment: string; sourceMessageId?: string }) => {
@@ -11843,6 +11756,7 @@ export function AppWorkbench() {
     composerMenuEntriesRef,
     composerMenuOpen,
     composerSendKeyPref,
+    enterInsertsLive: composerEnterInsertsLive,
     getDraft,
     messagesRef,
     openPromptHistory,
@@ -12107,6 +12021,8 @@ export function AppWorkbench() {
         replaceProviderBrandLogo={replaceProviderBrandLogo}
         welcomeMotionEnabled={welcomeMotionEnabled}
         setWelcomeMotionEnabled={setWelcomeMotionEnabled}
+        outputMotionEnabled={outputMotionEnabled}
+        setOutputMotionEnabled={setOutputMotionEnabled}
         restoreSessions={restoreSessions}
         runAccountLogin={runAccountLogin}
         runAccountLogout={runAccountLogout}
@@ -12473,7 +12389,14 @@ export function AppWorkbench() {
               t={(k, vars) =>
               tr(k as Parameters<typeof tr>[0], vars as Record<string, string | number>)
               }
-              projects={projects.map((p) => ({ id: p.id, name: p.name }))}
+              projects={automationProjectOptions(projects)}
+              sessionOptions={automationSessionOptions(sessions)}
+              providers={customProviders}
+              defaultProviderId={
+                providerActiveSource === "custom"
+                  ? (providerActiveId ?? "official")
+                  : "official"
+              }
               defaultModelId={modelId}
               defaultEffort={effort}
               models={availableModels}
@@ -12528,7 +12451,7 @@ export function AppWorkbench() {
               setToast(tr("automations.aiComposerHint"));
               window.setTimeout(() => setToast(null), 4200);
               }}
-              onRunNow={(auto) => void runAutomation(auto)}
+              onRunNow={runAutomation}
               />            </Suspense>
           ) : (
           <>
@@ -12619,6 +12542,10 @@ export function AppWorkbench() {
             onThreadAddAttachmentToComposer={onThreadAddAttachmentToComposer}
             onThreadAddQuote={onThreadAddQuote}
             onThreadContinueInterrupted={onThreadContinueInterrupted}
+            endAndContinueBusy={endAndContinueBusy}
+            onStallEndAndContinue={(sid) => {
+              void endAndContinue(sid);
+            }}
             onThreadOpenError={onThreadOpenError}
             onThreadOpenModifiedPath={onThreadOpenModifiedPath}
             onThreadOpenResource={onThreadOpenResource}
@@ -12724,6 +12651,9 @@ export function AppWorkbench() {
             confirmRemoveWorktree={confirmRemoveWorktree}
             connecting={connecting}
             contextUsageDisplay={contextUsageDisplay}
+            refreshContextInfo={() => {
+              contextSlashRef.current(false);
+            }}
             currentModelWindow={currentModelWindow}
             customRouteActive={customRouteActive}
             cycleAttachedChatScope={cycleAttachedChatScope}

@@ -14,7 +14,8 @@ use crate::acp_client::{
     parse_ask_user_question_params, rewind_execute_method_candidates, wire_ask_user_result,
     wire_exit_plan_mode_result, wire_initialize_params, wire_jsonrpc_result,
     wire_permission_result, wire_session_cancel_params, wire_session_interject_params,
-    wire_session_prompt_params, AcpEvent, AskUserOutcome, PermissionOutcome, StreamKind,
+    wire_session_new_params, wire_session_prompt_params, AcpEvent, AskUserOutcome,
+    PermissionOutcome, StreamKind,
 };
 use crate::mock_acp::{chunk_text, mock_reply_for, spawn_fake_stream_channel};
 use crate::permission::pick_option_id;
@@ -396,6 +397,29 @@ fn exit_plan_mode_and_plan_update_match_fixture() {
     }
 }
 
+#[test]
+fn session_new_rules_match_fixture() {
+    let fx = load_fixture("session_new_rules.json");
+    let cwd = fx["cwd"].as_str().unwrap();
+    let servers = &fx["mcpServers"];
+    assert_eq!(
+        wire_session_new_params(cwd, servers, None),
+        fx["expectWithoutRules"]
+    );
+    assert_eq!(
+        wire_session_new_params(cwd, servers, Some("")),
+        fx["expectWithoutRules"]
+    );
+    assert_eq!(
+        wire_session_new_params(cwd, servers, Some("   ")),
+        fx["expectWithoutRules"]
+    );
+    assert_eq!(
+        wire_session_new_params(cwd, servers, Some(fx["rules"].as_str().unwrap())),
+        fx["expectWithRules"]
+    );
+}
+
 // ── mock_acp stream golden ──────────────────────────────────────────────────
 
 #[test]
@@ -481,4 +505,117 @@ fn print_mock_stream_chunks() {
         "expectedChunks:\n{}",
         serde_json::to_string_pretty(&pieces).unwrap()
     );
+}
+
+// ── Subagent lifecycle ─────────────────────────────────────────────
+
+/// The whole subagent lifecycle decodes from `_x.ai/session_notification`:
+/// spawned → progress → finished, each carrying the authoritative subagent id.
+#[test]
+fn subagent_lifecycle_decodes_from_notification_frames() {
+    let fx = load_fixture("subagent_lifecycle.json");
+    let frames = fx["frames"].as_array().expect("frames array");
+    let expected = &fx["expect"];
+
+    let phases = ["spawned", "progress", "finished"];
+    assert_eq!(frames.len(), phases.len());
+
+    for (i, frame) in frames.iter().enumerate() {
+        let params = frame.get("params").expect("params");
+        let events = decode_session_update(params);
+        assert_eq!(events.len(), 1, "frames[{i}] should decode to one event");
+
+        let AcpEvent::Subagent(sub) = &events[0] else {
+            panic!("frames[{i}] expected Subagent, got {:?}", events[0]);
+        };
+        let exp = &expected[phases[i]];
+        let payload = sub.to_payload("app-session-1");
+
+        assert_eq!(
+            payload["phase"].as_str(),
+            Some(phases[i]),
+            "frames[{i}].phase"
+        );
+        assert_eq!(
+            payload["subagentId"], exp["subagentId"],
+            "frames[{i}].subagentId"
+        );
+    }
+}
+
+/// Field-by-field projection of the three phases onto the `session://subagent`
+/// payload the frontend consumes. Absent fields must stay `null`, never a
+/// fabricated default.
+#[test]
+fn subagent_payload_matches_fixture_expectations() {
+    let fx = load_fixture("subagent_lifecycle.json");
+    let frames = fx["frames"].as_array().expect("frames array");
+    let expected = &fx["expect"];
+
+    let payloads: Vec<Value> = frames
+        .iter()
+        .map(|f| {
+            let events = decode_session_update(f.get("params").expect("params"));
+            let AcpEvent::Subagent(sub) = &events[0] else {
+                panic!("expected Subagent");
+            };
+            sub.to_payload("app-session-1")
+        })
+        .collect();
+
+    let spawned = &payloads[0];
+    for key in ["phase", "subagentId"] {
+        assert_eq!(spawned[key], expected["spawned"][key], "spawned.{key}");
+    }
+    assert_eq!(spawned["subagentType"], expected["spawned"]["subagentType"]);
+    assert_eq!(spawned["description"], expected["spawned"]["description"]);
+    assert!(spawned["output"].is_null(), "spawned has no output yet");
+    assert!(
+        spawned["status"].is_null(),
+        "spawned has no terminal status"
+    );
+
+    let progress = &payloads[1];
+    for key in [
+        "phase",
+        "durationMs",
+        "turnCount",
+        "toolCallCount",
+        "tokensUsed",
+        "contextWindowTokens",
+    ] {
+        assert_eq!(progress[key], expected["progress"][key], "progress.{key}");
+    }
+    assert!(
+        progress["status"].is_null(),
+        "progress has no terminal status"
+    );
+
+    let finished = &payloads[2];
+    for key in [
+        "phase",
+        "status",
+        "durationMs",
+        "turnCount",
+        "toolCallCount",
+        "tokensUsed",
+        "output",
+    ] {
+        assert_eq!(finished[key], expected["finished"][key], "finished.{key}");
+    }
+    assert_eq!(finished["sessionId"].as_str(), Some("app-session-1"));
+}
+
+/// An id-less subagent notification cannot be tracked or de-duplicated, so the
+/// decoder drops it instead of surfacing an anonymous row.
+#[test]
+fn subagent_update_without_id_is_dropped() {
+    let fx = load_fixture("subagent_lifecycle.json");
+    for ignored in fx["ignored"].as_array().expect("ignored array") {
+        let events = decode_session_update(ignored.get("params").expect("params"));
+        assert!(
+            events.is_empty(),
+            "id-less subagent update must not decode to an event"
+        );
+    }
 }

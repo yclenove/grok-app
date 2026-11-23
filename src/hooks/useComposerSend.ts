@@ -21,6 +21,8 @@ import {
   looksLikeScheduleIntent,
   looksLikeScheduleUpdateIntent,
 } from "@/lib/automationSetup";
+import { openAgentSessionId, wrapDirectorSend } from "@/lib/directorMode";
+import { directorSettingEnabled } from "@/lib/directorSetting";
 import {
   addChatRef,
   lookupChatTitle,
@@ -54,6 +56,7 @@ import {
 import {
   isDraftEmpty,
   parseStoredContent,
+  parseStoredContentWithRefs,
   serializeForAgent,
 } from "@/lib/draftDoc";
 import { pluginSkillsMap, type SkillInfo } from "@/lib/slashCatalog";
@@ -64,6 +67,7 @@ import {
 } from "@/lib/jsonSchema";
 import { canLiveParticipate } from "@/lib/multiWindow";
 import { recordRecentPrompt } from "@/lib/recentPromptHistory";
+import { isBackgroundQueuedSend } from "@/lib/backgroundQueueDrain";
 import { queueSessionKey, shouldEnqueueSend } from "@/lib/sendQueue";
 import {
   clearPriorTurnStreaming,
@@ -82,6 +86,8 @@ import {
   resolveComposerSendSessionId,
   type ViewFocus,
 } from "@/lib/viewFocus";
+import { classifyContextSlashLine } from "@/lib/contextInfoSnapshot";
+import { classifyContextWindowSlashLine } from "@/lib/contextWindowCommand";
 import { classifyWorkflowSlashLine } from "@/lib/workflowSlash";
 import type { ExecuteSendFromQueue } from "@/hooks/useSendQueue";
 
@@ -158,6 +164,10 @@ export type ComposerSendHost = {
   getDraft: () => string;
   requestComposerFocus: () => void;
   openWorkflowsSettings: () => void;
+  /** Lone `/context-window` line. Args are the size token, or empty. */
+  onContextWindowSlash: (args: string) => void;
+  /** Lone `/context` line. Opens the pager usage snapshot. */
+  onContextSlash: () => void;
   applySessionTitle: (sessionId: string, title: string) => void;
   restartTurnClock: (sessionId?: string | null, at?: number) => void;
   syncViewedTurnClock: (sessionId: string) => void;
@@ -237,6 +247,8 @@ export function useComposerSend(host: ComposerSendHost) {
     getDraft,
     requestComposerFocus,
     openWorkflowsSettings,
+    onContextWindowSlash,
+    onContextSlash,
     applySessionTitle,
     restartTurnClock,
     syncViewedTurnClock,
@@ -286,7 +298,9 @@ const executeSend = async (opts: {
   const { storedDisplay, att, goalMode: useGoal, fromQueue } = opts;
   const quotesForSend = opts.quotes ?? [];
   await awaitComposerSendBarrier(!!fromQueue, effortApplyRef.current);
-  const segments = parseStoredContent(storedDisplay);
+  // Keep [[file:]] / [[url:]] segments so serializeForAgent emits @path.
+  // parseStoredContent drops them to literal token text.
+  const segments = parseStoredContentWithRefs(storedDisplay);
   if (isDraftEmpty(segments) && !att.length && !quotesForSend.length) {
     sendInFlightRef.current = false;
     return false;
@@ -352,6 +366,13 @@ const executeSend = async (opts: {
   if (inAutomationSetup) {
     agentText = wrapAutomationSetupAgentText(agentText);
   }
+  const openAgent = openAgentSessionId({
+    sendTargetId,
+    viewedSessionId: session.sessionId,
+    viewedAgentSessionId: session.agentSessionId,
+    rows: sessions,
+  });
+  agentText = wrapDirectorSend(agentText, directorSettingEnabled() && openAgent.length > 0);
   const titleSeed =
     serializeForAgent(segments, { pluginSkills }).replace(/\n/g, " ").trim() ||
     quotesForSend[0]?.text.replace(/\n/g, " ").trim() ||
@@ -477,6 +498,14 @@ const executeSend = async (opts: {
   try {
     let sessionId: string | null = null;
     const live = liveHostRef.current;
+    // A follow-up queued on a chat the user is not looking at. Host
+    // `session_send` prompts a warm background/parked agent in place.
+    // `ensureConnected` would adopt the workbench and yank this view.
+    const backgroundQueueSend = isBackgroundQueuedSend({
+      fromQueue: !!fromQueue,
+      targetSessionId: sendTargetId,
+      viewingSessionId: viewingSessionIdRef.current,
+    });
     if (
       sendTargetId &&
       live.sessionId === sendTargetId &&
@@ -484,13 +513,8 @@ const executeSend = async (opts: {
       !live.lastError
     ) {
       sessionId = sendTargetId;
-    } else if (
-      fromQueue &&
-      sendTargetId &&
-      viewingSessionIdRef.current !== sendTargetId
-    ) {
-      failStrip();
-      return false;
+    } else if (backgroundQueueSend) {
+      sessionId = sendTargetId;
     } else {
       sessionId = await ensureConnected({ sessionId: sendTargetId });
     }
@@ -526,13 +550,18 @@ const executeSend = async (opts: {
       liveHostRef.current = next;
       return next;
     });
-    setLiveMap((prev) =>
-      projectHostIntoLiveMap(prev, {
-        sessionId,
-        state: "streaming",
-        streamingMessageId: null,
-      }),
-    );
+    // Background drains paint streaming only after `session_send` accepts.
+    // Painting it first sticks the chat on "working" when the send fails,
+    // and the next queued line waits forever.
+    if (!backgroundQueueSend) {
+      setLiveMap((prev) =>
+        projectHostIntoLiveMap(prev, {
+          sessionId,
+          state: "streaming",
+          streamingMessageId: null,
+        }),
+      );
+    }
     // Draft sends materialize a real id during ensureConnected. Atomically
     // migrate the claim so a second call targeting the new id cannot slip
     // through, while a newly opened draft remains independent.
@@ -584,6 +613,7 @@ const executeSend = async (opts: {
     if (
       fromQueue &&
       sendTargetId &&
+      !backgroundQueueSend &&
       liveHostRef.current.sessionId &&
       liveHostRef.current.sessionId !== sendTargetId
     ) {
@@ -628,6 +658,9 @@ const executeSend = async (opts: {
       // (idle recycle / crash while `liveHost` still looked ready).
       // Cold-connect that chat once, then retry the same turn.
       if (!isSessionNotLiveError(sendErr)) throw sendErr;
+      // Cold-connect would focus this chat and steal the workbench.
+      // Leave the follow-up queued; opening the chat retries it.
+      if (backgroundQueueSend) throw sendErr;
       if (!sendEpochCurrent()) return false;
       const reconnected = await ensureConnected({
         sessionId,
@@ -852,6 +885,26 @@ const send = async () => {
         sessionDraftId: viewingSessionIdRef.current ?? session.sessionId,
       });
       openWorkflowsSettings();
+      return;
+    }
+    const contextWindow = classifyContextWindowSlashLine(plain);
+    if (contextWindow) {
+      clearComposerAfterSubmit({
+        clearProjectDraft: session.sessionId == null,
+        clearSessionDraft: session.sessionId != null,
+        sessionDraftId: viewingSessionIdRef.current ?? session.sessionId,
+      });
+      onContextWindowSlash(contextWindow.args);
+      return;
+    }
+    const contextSlash = classifyContextSlashLine(plain);
+    if (contextSlash) {
+      clearComposerAfterSubmit({
+        clearProjectDraft: session.sessionId == null,
+        clearSessionDraft: session.sessionId != null,
+        sessionDraftId: viewingSessionIdRef.current ?? session.sessionId,
+      });
+      onContextSlash();
       return;
     }
   }

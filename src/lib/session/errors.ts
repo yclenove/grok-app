@@ -229,7 +229,7 @@ export function formatTurnErrorBody(
   // custom route) get honest bubble copy instead of the generic 401 line.
   // Pass rawCombined so bwrap/userns in "; stderr: …" survives stripErrorNoise.
   const deckish = resolveErrorDeckCode(code, `${rawCombined}\n${rest}\n${cleaned}`, opts);
-  if (isAuthDeckCode(deckish) || deckish === "PERMISSION_DENIED" || deckish === "MCP_AUTH_FAILED" || deckish === "OAUTH_EXPIRED" || deckish === "WORKSPACE_UNTRUSTED" || deckish === "PROJECT_MISSING" || deckish === "SANDBOX_BLOCKED" || deckish === "QUOTA_EXCEEDED" || deckish === "RATE_LIMITED") {
+  if (isAuthDeckCode(deckish) || deckish === "PERMISSION_DENIED" || deckish === "MCP_AUTH_FAILED" || deckish === "OAUTH_EXPIRED" || deckish === "WORKSPACE_UNTRUSTED" || deckish === "PROJECT_MISSING" || deckish === "SANDBOX_BLOCKED" || deckish === "QUOTA_EXCEEDED" || deckish === "RATE_LIMITED" || deckish === "MODEL_NOT_ALLOWED") {
     return errorCopyFromDeck(deckish, locale);
   }
 
@@ -298,6 +298,43 @@ export function formatTurnErrorBody(
       .find((l) => l && !/connection refused|worker quit|hyper_util|reqwest/i.test(l)) ||
     t(locale, "error.requestFailedRetry");
   return first.length > 200 ? `${first.slice(0, 200)}…` : first;
+}
+
+const RETRY_CONTINUES_CODES = new Set([
+  "NETWORK_PROVIDER",
+  "TURN_TIMEOUT",
+  "AGENT_DISCONNECTED",
+  "CONNECT_FAILED",
+  "AGENT_CRASHED",
+]);
+
+function hostCodeFromTurnError(raw: string): string | null {
+  const matched = raw.match(/^\*\*([A-Z0-9_]+)\*\*/);
+  return matched?.[1] ?? null;
+}
+
+/**
+ * Error-row retry continues the interrupted turn.
+ * Regenerate rewinds the last user prompt. After these failures the agent
+ * rewind RPC fails and the click sends nothing (#1324).
+ * Quota, auth, sandbox, and permission stay on regenerate / their own actions.
+ */
+export function turnErrorContinuesOnRetry(
+  content: string | null | undefined,
+): boolean {
+  const raw = (content || "").trim();
+  if (!raw) return false;
+  const code = resolveErrorDeckCode(hostCodeFromTurnError(raw), raw);
+  if (RETRY_CONTINUES_CODES.has(code)) return true;
+  if (code !== "GENERIC") return false;
+  const lower = raw.toLowerCase();
+  return (
+    /\bturn_timeout\b/.test(lower) ||
+    /\bagent_disconnected\b/.test(lower) ||
+    /rpc channel closed|transport channel closed|stream disconnected|stream closed before|connection reset/.test(
+      lower,
+    )
+  );
 }
 
 export type ErrorBannerView = {

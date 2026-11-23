@@ -13,6 +13,20 @@
 
 探测：`scripts/probe-models.sh`。Host：`models_list_available`。
 
+Host 同时读取当前会话数据模式的 `GROK_HOME/models_cache.json` 与终端 `~/.grok/models_cache.json`，按有效 RFC3339 `fetched_at` 选择最新的完整目录。有效时间优先于缺失或无效时间；时间相同或两者均未知时保留当前 home 优先。模型、来源和刷新时间来自同一份快照，不合并旧目录，也不重新补齐最新目录已隐藏或移除的模型。损坏、缺失、空 `models` 的缓存跳过；没有可用快照才用静态兜底。最新快照若所有条目都标为隐藏，结果保持空。读取不改写共享配置，不递归扫描历史 `agent-proc` 目录。
+
+## 上下文窗口
+
+CLI `models_cache.json` 的 `info.context_window` 是目录默认值（Grok 4.7 / Fast / 4.6 / 4.5 当前为 **256000**）。可选长度在 `info.context_windows`（当前 `[256000, 500000]`）。静态兜底与此相同。`initialize` 的 live 覆盖只改默认值，不抹掉列表。
+
+列表多于一项时，Composer 高级菜单列出这些长度。选中后对**当前 live 会话**发 `session/set_model`，只带 `_meta.contextWindow`（正整数 token 数），不带 `reasoningEffort`，CLI 因此保持当前推理档。不改已保存的模型偏好。
+
+`/context-window` 与 Grok Build pager 相同：接受 `256k` / `1m`（大小写不敏感）或原始 token 数；空参数给出用法和当前值；不在列表里则报未知。新对话还没有 `session/new` 时，选择会记在 composer 上并在第一次建会话的 `session/set_model` 里带上 `_meta.contextWindow`，菜单立刻显示新长度。只有一个或没有可选窗口时命令说明该模型不能选。缩到比当前用量更小的窗口时，自动压缩由 CLI 自己做。
+
+自定义提供商仍在同一行手填 token，写入通道配置，不走这条 ACP。
+
+`/context` 读取 live 会话的 `x.ai/session/info`（先 `_x.ai/session/info`）。用量菜单按 pager 拆成系统提示、消息、推理/开销、空闲，工具定义、技能、工作流、MCP 标成已经算进上面的行。自动压缩阈值和剩余 token 用快照里的 `autoCompactThresholdPercent`。没有活动会话时命令报错，不把这行发给模型。会话信息拿不到时，菜单仍用原来的角色估算。
+
 Spawn 顺序（CLI 0.2.x）：
 
 ```text

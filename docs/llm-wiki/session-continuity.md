@@ -54,6 +54,8 @@ stream / tool / journal side effects:
 - no `session://tool` storms  
 - **no journal rewrites** (`messages.json` stays the UI source of truth)
 
+**A live workflow result is not load replay.** When a background workflow finishes, Grok Build starts its own turn on the same ACP connection (`promptId` prefix `workflow-completed-`). There is no Host `session/prompt` for that turn. If this chat's own `session/load` is not still pending, the Host adopts it: a prompt is in flight, a quiet `auto_wake` line is journaled, the chunks apply, and `turn_completed` finishes the turn. Prompt ids seen during that session's load stay dropped. A load of another chat does not drop them. Switching away keeps the visit bit, and a parked chat is brought back only for the workflow start (or an end that is already open). Stream and tool chunks from a workflow turn that is not the armed one are dropped.
+
 **Human gates are not load-replay.** Grok Build may re-issue
 `_x.ai/exit_plan_mode` after resume (`RestorePlanApproval` /
 `awaiting_plan_approval`) with **no** prompt in flight. Host accepts Plan
@@ -71,6 +73,22 @@ event; UI also saves on dismiss/approve. On session open the UI loads chrome +
 `session_agent_plan_snapshot` (agent `plan_mode.json` + `plan.md`). Restored
 state never carries a live `rpcId` — Approve waits for Build re-park. Sticky
 bar uses `planBar.resume` while `gateStale` / `awaitingAgentApproval`.
+
+**Post-turn disk recovery after rewind:** reconcile matches CLI user prompts to
+surviving journal prompts in order, after stripping sole-line attachment paths.
+A matching prompt count alone does not authorize a row: a replacement prompt
+can occupy the removed turn's ordinal. Assistant coverage, extension, and insert
+positions are scoped to the matched turn; unmatched branches contribute neither
+answers nor tool rows. The journal read-modify-write holds the same file lock as
+rewind replacement and stream appends, so a delayed recovery snapshot cannot
+reintroduce rows removed by a concurrent rewind.
+Before native rewind, Host captures digests of the abandoned prompts and
+assistant/tool rows. It persists that fence under the journal lock before
+truncation. Disk recovery never imports those rows again; repeated identical
+prompts conservatively use live output only because legacy logs have no stable
+branch identity. Unreadable/incomplete history or a corrupt fence disables disk
+recovery for that session, while live replies remain intact. Exclusions survive
+restart and are bounded; they never edit CLI history.
 
 Live turns (`prompt_in_flight == true`) still apply stream + tools normally.
 See crash investigation notes: ungated tool_call replay on open could thrash
@@ -236,7 +254,7 @@ When Settings flips `session_data_mode` independent↔shared, Host calls `recycl
 
 **New chat / disconnect:** `newChat` must **not** call `sessionDisconnect` (that killed the live ACP and aborted turns when users hit 新建会话 right after send). Host `disconnect` demotes busy → background and parks Ready instead of killing. In-flight `executeSend` still runs `sessionSend` after `ensureConnected` even if the user already switched the draft UI.
 
-**Send queue (per viewed session):** Follow-up enqueue only when *this* chat’s FSM is busy (`streaming` / `connecting` state). The process-global UI `connecting` flag (any `ensureConnected`) must **not** gate enqueue — that re-parked SuperGrok new-chat sends into “本会话队列” while another connect was in flight. Host mid-turn on another chat must **not** enqueue either — that send demotes the foreign turn and spawns concurrent work. Flush claims only the *viewed* session key (never fall back to live host id). Hold flush only when the claimed session is the busy live one.
+**Send queue (per session):** Follow-up enqueue only when *this* chat’s FSM is busy (`streaming`). The process-global UI `connecting` flag (any `ensureConnected`) must **not** gate enqueue — that re-parked SuperGrok new-chat sends into “本会话队列” while another connect was in flight. Host mid-turn on another chat must **not** enqueue a composer send either — that send demotes the foreign turn and spawns concurrent work. Each session keeps its own queue. Auto-flush runs for every session that is `ready` / `idle` with a composer item at the head, including chats that are not on screen. Flush claims that session’s own key (never the live host id). A background flush calls `session_send` for that id and does **not** `ensureConnected` (connect would adopt the workbench view). External (`session://send_queue`) items stay Host-drained. Hold flush only when *that* session is the busy live one. One session’s send failure holds only that key. Deleted sessions and a `disconnected` row drop their queue.
 
 ### 4b. Session-scoped Host commands (no live-slot guessing)
 
@@ -467,3 +485,8 @@ Old sessions without woven segments may still show tools after the answer body a
 8. Reopening a chat that is streaming in background shows the live spinner / streaming bubble, not an idle-looking finished thread.
 9. Send, then immediately open a new chat in another project → you stay on the new draft when the agent starts executing.
 10. Switch away mid-turn and back → the thread reads user → thinking → tools → answer, with no prompt stranded at the bottom.
+
+
+### CLI 批量导入统计（#1413）
+
+列表返回 `bulkImportable`，与宿主全部导入共享同一过滤规则：排除已关联、删除墓碑、空 stub 和噪声目录。按钮统计下一批（最多 50 条）候选，仍可能因文件损坏或并发删除而失败。候选实际尝试后全部失败时返回首个原始错误，不能显示成功导入 0 条。独立模式继续只扫描当前 GROK_HOME；不得因相似标题、同项目或相同正文自动合并不同 agent id 的会话，也不扩大磁盘删除允许范围。

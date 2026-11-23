@@ -91,6 +91,8 @@ export interface SettingsPageProps {
   onReplaceProviderBrandLogo?: (v: boolean) => void;
   welcomeMotionEnabled?: boolean;
   onWelcomeMotionEnabled?: (v: boolean) => void;
+  outputMotionEnabled?: boolean;
+  onOutputMotionEnabled?: (v: boolean) => void;
   goalOrchUiEnabled?: boolean;
   onGoalOrchUiEnabled?: (v: boolean) => void;
   messageTimeFormat?: MessageTimeFormat;
@@ -381,6 +383,7 @@ export type SettingsViewModel = SettingsPageProps & {
   composerDraftStats: boolean;
   composerMinRows: ComposerMinRows;
   composerSendKeyPref: ComposerSendKeyPref;
+  composerEnterInsertsLive: boolean;
   composerSpellcheck: boolean;
   confirmExternalLinks: boolean;
   editors: DetectedEditor[];
@@ -430,6 +433,7 @@ export type SettingsViewModel = SettingsPageProps & {
   setCodeWrapDefault: Dispatch<SetStateAction<boolean>>;
   setComposerDraftStats: Dispatch<SetStateAction<boolean>>;
   setComposerSendKeyPref: Dispatch<SetStateAction<ComposerSendKeyPref>>;
+  setComposerEnterInsertsLive: Dispatch<SetStateAction<boolean>>;
   setComposerSpellcheck: Dispatch<SetStateAction<boolean>>;
   setConfirmExternalLinks: Dispatch<SetStateAction<boolean>>;
   setMemoryBrowserEpoch: Dispatch<SetStateAction<number>>;
