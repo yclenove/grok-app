@@ -122,6 +122,53 @@ function toolSegmentLooksRunning(t: MessageToolSegment): boolean {
 }
 
 /**
+ * Keep id / host-family indexes aligned after an in-place tool merge.
+ * Indexes stay valid because compaction never removes a tool row, only
+ * replaces it. A linear map replaces the old per-tool `findIndex` scan,
+ * which was quadratic on multi-hour turns (thousands of tool segments,
+ * once per stream token and again on every paint).
+ */
+function rememberToolSlot(
+  byId: Map<string, number>,
+  byFamily: Map<string, number>,
+  index: number,
+  before: MessageToolSegment | null,
+  after: MessageToolSegment,
+): void {
+  if (before && before.toolCallId !== after.toolCallId) {
+    if (byId.get(before.toolCallId) === index) byId.delete(before.toolCallId);
+  }
+  if (before) {
+    const prevFam = hostToolFamilyKey(
+      before.toolCallId,
+      before.toolKind,
+      before.title,
+    );
+    const nextFam = hostToolFamilyKey(
+      after.toolCallId,
+      after.toolKind,
+      after.title,
+    );
+    if (prevFam && prevFam !== nextFam && byFamily.get(prevFam) === index) {
+      byFamily.delete(prevFam);
+    }
+  }
+  // First matching row wins, same as the old left-to-right findIndex.
+  // An in-place id merge must not retarget the index onto a later duplicate.
+  const idOwner = byId.get(after.toolCallId);
+  if (idOwner === undefined || idOwner === index) {
+    byId.set(after.toolCallId, index);
+  }
+  const fam = hostToolFamilyKey(after.toolCallId, after.toolKind, after.title);
+  if (fam) {
+    const famOwner = byFamily.get(fam);
+    if (famOwner === undefined || famOwner === index) {
+      byFamily.set(fam, index);
+    }
+  }
+}
+
+/**
  * Compact a segment timeline for display / persistence hygiene:
  * - drop empty thought/content pieces
  * - merge adjacent same-kind text segments (spurious "new" thought phases after
@@ -133,12 +180,12 @@ export function compactMessageSegments(
   segments: MessageSegment[],
 ): MessageSegment[] {
   const out: MessageSegment[] = [];
+  const byId = new Map<string, number>();
+  const byFamily = new Map<string, number>();
   for (const raw of segments) {
     if (raw.kind === "tool") {
-      const existingById = out.findIndex(
-        (s) => s.kind === "tool" && s.toolCallId === raw.toolCallId,
-      );
-      if (existingById >= 0) {
+      const existingById = byId.get(raw.toolCallId);
+      if (existingById !== undefined) {
         const prev = out[existingById] as MessageToolSegment;
         const title =
           (raw.title && !isGenericToolLabel(raw.title) ? raw.title : "") ||
@@ -147,7 +194,7 @@ export function compactMessageSegments(
           (raw.detail || "").length >= (prev.detail || "").length
             ? raw.detail || prev.detail
             : prev.detail || raw.detail;
-        out[existingById] = {
+        const merged: MessageToolSegment = {
           ...prev,
           ...raw,
           title,
@@ -164,24 +211,27 @@ export function compactMessageSegments(
               : prev.output,
           toolKind: raw.toolKind || prev.toolKind,
         };
+        out[existingById] = merged;
+        rememberToolSlot(byId, byFamily, existingById, prev, merged);
         continue;
       }
       // Host side-channel: only one vision / one X row even if toolCallIds differ
       // (live + journal weave race used to paint "识别图片内容" twice).
       const family = hostToolFamilyKey(raw.toolCallId, raw.toolKind, raw.title);
       if (family) {
-        const existingFamily = out.findIndex(
-          (s) =>
-            s.kind === "tool" &&
-            hostToolFamilyKey(s.toolCallId, s.toolKind, s.title) === family,
-        );
-        if (existingFamily >= 0) {
+        const existingFamily = byFamily.get(family);
+        if (existingFamily !== undefined) {
           const prev = out[existingFamily] as MessageToolSegment;
-          out[existingFamily] = preferRicherTool(prev, raw);
+          const merged = preferRicherTool(prev, raw);
+          out[existingFamily] = merged;
+          rememberToolSlot(byId, byFamily, existingFamily, prev, merged);
           continue;
         }
       }
-      out.push({ ...raw });
+      const index = out.length;
+      const copy: MessageToolSegment = { ...raw };
+      out.push(copy);
+      rememberToolSlot(byId, byFamily, index, null, copy);
       continue;
     }
     if (!raw.text.trim()) continue;
@@ -189,15 +239,65 @@ export function compactMessageSegments(
     if (last && last.kind === raw.kind) {
       if (raw.kind === "thought" && last.kind === "thought") {
         // Preserve a readable break between formerly split phases.
-        last.text = `${last.text.replace(/\s+$/, "")}\n\n${raw.text.replace(/^\s+/, "")}`;
+        mergeThoughtText(last, raw);
       } else if (raw.kind === "content" && last.kind === "content") {
-        last.text += raw.text;
+        const bridge = last.text.length;
+        const prior = last.chunkEnds;
+        const incoming = raw.chunkEnds;
+        const merged = `${last.text}${raw.text}`;
+        last.text = merged;
+        if (prior || incoming) {
+          // `prior ?? [bridge]` keeps the painted part as one whole, so offsets
+          // never get recomputed from 0.
+          last.chunkEnds = [
+            ...(prior ?? [bridge]),
+            ...shiftEnds(incoming, bridge),
+          ];
+        }
       }
       continue;
     }
-    out.push({ kind: raw.kind, text: raw.text });
+    out.push(
+      raw.kind === "content"
+        ? { kind: "content", text: raw.text, chunkEnds: raw.chunkEnds }
+        : { kind: "thought", text: raw.text, chunkEnds: raw.chunkEnds },
+    );
   }
   return out;
+}
+
+/**
+ * Merges two adjacent thought segments: keeps a readable blank line and shifts
+ * the later segment's chunk boundaries. Thought joining trims leading and
+ * trailing whitespace, so offsets cannot simply add the raw lengths the way
+ * body text can.
+ */
+function mergeThoughtText(
+  last: { text: string; chunkEnds?: number[] },
+  raw: { text: string; chunkEnds?: number[] },
+): void {
+  const head = last.text.replace(/\s+$/, "");
+  const tail = raw.text.replace(/^\s+/, "");
+  const bridge = head.length + 2;
+  const prior = last.chunkEnds;
+  const incoming = raw.chunkEnds;
+  last.text = `${head}\n\n${tail}`;
+  if (!prior && !incoming) return;
+  // Old boundaries that fall inside the trimmed trailing whitespace clamp to
+  // the join point; boundaries of the trailing fragment join the new segment.
+  const priorEnds = (prior ?? [head.length]).map((end) =>
+    Math.min(end, head.length),
+  );
+  const incomingShift = bridge - (raw.text.length - tail.length);
+  const incomingEnds = shiftEnds(incoming, incomingShift).map((end) =>
+    Math.max(end, bridge),
+  );
+  const merged = [...priorEnds, ...incomingEnds];
+  // A segment without a length table must still be covered: otherwise the
+  // threshold would stall on the old boundary after a remount and the trailing
+  // segment would replay.
+  if ((merged.at(-1) ?? 0) < last.text.length) merged.push(last.text.length);
+  last.chunkEnds = merged;
 }
 
 export function buildSegmentsFromLegacy(
@@ -284,34 +384,92 @@ export function ensureSegments(prev: ChatMessage): MessageSegment[] {
   return buildSegmentsFromLegacy(prev.content, prev.thought, prev.thoughtPhases);
 }
 
+/**
+ * Appends a thought segment and records the model chunk boundaries by the same
+ * rules as body text.
+ *
+ * @param chunkLens UTF-16 lengths of this segment's chunks; when omitted no
+ * boundaries are added (history messages).
+ */
 export function appendThoughtToSegments(
   segs: MessageSegment[],
   text: string,
   _phaseHint: string,
+  chunkLens?: readonly number[],
 ): MessageSegment[] {
   if (!text) return segs;
   const last = segs[segs.length - 1];
+  const ends = chunkLens?.length ? chunkLens : undefined;
   // New thought block only after body (or at start). Never open a second
   // adjacent thought — host `thoughtPhase: "new"` after empty assistant ticks
   // used to produce trailing 思考 2 / 思考 3 rows under the answer.
   if (!last || last.kind !== "thought") {
-    segs.push({ kind: "thought", text });
-  } else {
-    last.text += text;
+    segs.push({
+      kind: "thought",
+      text,
+      ...(ends ? { chunkEnds: cumulativeEnds(0, ends) } : {}),
+    });
+    return segs;
+  }
+  const prior = last.chunkEnds;
+  // Same as body text: the later segment's boundaries start at the length
+  // before appending, with a bridge boundary when the length table is missing.
+  const base = last.text.length;
+  const covered = prior?.at(-1) ?? 0;
+  last.text += text;
+  if (ends) {
+    const next = [...(prior ?? [])];
+    if (covered < base) next.push(base);
+    last.chunkEnds = [...next, ...cumulativeEnds(base, ends)];
+  } else if (prior) {
+    // This segment has no length table but the painted length changed; add an
+    // end boundary to cover the gap.
+    last.chunkEnds = [...prior, last.text.length];
   }
   return segs;
+}
+
+/** Accumulates chunk lengths into end offsets starting at `base`. */
+function cumulativeEnds(base: number, lens: readonly number[]): number[] {
+  let end = base;
+  return lens.map((len) => {
+    end += len;
+    return end;
+  });
+}
+
+/** Shifts a later content segment's boundaries by `shift` when merging. */
+function shiftEnds(ends: readonly number[] | undefined, shift: number): number[] {
+  return (ends ?? []).map((end) => end + shift);
 }
 
 export function appendContentToSegments(
   segs: MessageSegment[],
   text: string,
+  chunkLens?: readonly number[],
 ): MessageSegment[] {
   if (!text) return segs;
   const last = segs[segs.length - 1];
+  const ends = chunkLens?.length ? chunkLens : undefined;
   if (last?.kind === "content") {
+    const prior = last.chunkEnds;
+    // The later segment's boundaries must start at the pre-append text length;
+    // otherwise a segment without a length table swallows the offset and lands
+    // new boundaries inside old text.
+    const base = last.text.length;
+    const covered = prior?.at(-1) ?? 0;
     last.text += text;
+    if (ends) {
+      const next = [...(prior ?? [])];
+      if (covered < base) next.push(base);
+      last.chunkEnds = [...next, ...cumulativeEnds(base, ends)];
+    }
   } else {
-    segs.push({ kind: "content", text });
+    segs.push({
+      kind: "content",
+      text,
+      ...(ends ? { chunkEnds: cumulativeEnds(0, ends) } : {}),
+    });
   }
   return segs;
 }

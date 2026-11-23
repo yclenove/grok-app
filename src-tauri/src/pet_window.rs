@@ -55,8 +55,6 @@ static LAST_IGNORE_CURSOR: std::sync::atomic::AtomicU8 = std::sync::atomic::Atom
 static CACHED_SIZE_PX: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(128);
 static SHOW_LOCK: Mutex<()> = Mutex::new(());
 
-const PET_INIT_SCRIPT_PREFIX: &str = r#"(function(){try{document.documentElement.setAttribute("data-pet-shell","1");var s=document.createElement("style");s.setAttribute("data-pet-boot","1");s.textContent="html,html[data-theme],body,#root,.boot-gate{background:transparent!important;background-image:none!important;background-color:transparent!important;} .boot-gate{display:none!important;visibility:hidden!important;opacity:0!important;}";document.documentElement.appendChild(s);"#;
-
 fn pet_init_script(prefs: &PetPrefs) -> String {
     let boot = serde_json::json!({
         "shape": prefs.shape,
@@ -71,9 +69,12 @@ fn pet_init_script(prefs: &PetPrefs) -> String {
         "bubbleStyle": prefs.bubble_style,
     });
     let locale = crate::tray_i18n::Locale::parse(&crate::store::load_settings().locale);
+    // Boot globals must be assigned before any documentElement access. WebView2
+    // runs this script before the document element exists; a throw there used
+    // to skip `__GROK_PET_BOOT__`, so the overlay fell back to size 128, resized,
+    // and the mark landed somewhere else on every launch.
     format!(
-        "{prefix}window.__GROK_PET_BOOT__={boot};window.__GROK_BOOT_LOCALE__={locale:?};window.__GROK_BOOT_OS_LANG__={os:?};var d=document.documentElement;if(d)d.setAttribute(\"lang\",{html:?});}}catch(e){{}}}})();",
-        prefix = PET_INIT_SCRIPT_PREFIX,
+        r#"(function(){{try{{window.__GROK_PET_BOOT__={boot};window.__GROK_BOOT_LOCALE__={locale:?};window.__GROK_BOOT_OS_LANG__={os:?};var d=document.documentElement;if(d){{d.setAttribute("data-pet-shell","1");d.setAttribute("lang",{html:?});var s=document.createElement("style");s.setAttribute("data-pet-boot","1");s.textContent="html,html[data-theme],body,#root,.boot-gate{{background:transparent!important;background-image:none!important;background-color:transparent!important;}} .boot-gate{{display:none!important;visibility:hidden!important;opacity:0!important;}}";d.appendChild(s);}}}}catch(e){{}}}})();"#,
         boot = boot,
         locale = locale.as_tag(),
         os = crate::tray_i18n::detect_os_lang_tag(),
@@ -345,13 +346,7 @@ fn normalize_prefs(mut p: PetPrefs) -> PetPrefs {
     if !expressions.contains(&p.expression.as_str()) {
         p.expression = default_expression();
     }
-    p.size_px = if p.size_px <= 112 {
-        96
-    } else if p.size_px >= 144 {
-        160
-    } else {
-        128
-    };
+    p.size_px = normalize_size_px(p.size_px);
     let bubble_shapes = ["round", "pill", "card", "ticket", "cloud", "slash"];
     if !bubble_shapes.contains(&p.bubble_shape.as_str()) {
         p.bubble_shape = default_bubble_shape();
@@ -362,6 +357,16 @@ fn normalize_prefs(mut p: PetPrefs) -> PetPrefs {
     }
     p.bubble_dismiss_sec = p.bubble_dismiss_sec.clamp(3, 120);
     p
+}
+
+/// Pet size slider range (mirrors `normalizePetSize` in petIdentity.ts).
+pub const PET_SIZE_MIN: u32 = 96;
+pub const PET_SIZE_MAX: u32 = 200;
+pub const PET_SIZE_STEP: u32 = 8;
+
+pub fn normalize_size_px(px: u32) -> u32 {
+    let stepped = ((px + PET_SIZE_STEP / 2) / PET_SIZE_STEP) * PET_SIZE_STEP;
+    stepped.clamp(PET_SIZE_MIN, PET_SIZE_MAX)
 }
 
 fn window_logical_size(size_px: u32) -> f64 {
@@ -1277,8 +1282,9 @@ pub fn pet_prefs_get() -> PetPrefs {
     normalize_prefs(load_prefs())
 }
 
+/// Async: may create the overlay webview (see pet_quick.rs on main-thread deadlock).
 #[tauri::command]
-pub fn pet_prefs_set(app: AppHandle, prefs: PetPrefs) -> Result<PetPrefs, String> {
+pub async fn pet_prefs_set(app: AppHandle, prefs: PetPrefs) -> Result<PetPrefs, String> {
     persist_window_pos(&app);
     let prev = load_prefs();
     let mut next = normalize_prefs(prefs);
@@ -1298,8 +1304,9 @@ pub fn pet_prefs_set(app: AppHandle, prefs: PetPrefs) -> Result<PetPrefs, String
     Ok(saved)
 }
 
+/// Async: may create the overlay webview (see pet_quick.rs on main-thread deadlock).
 #[tauri::command]
-pub fn pet_show(app: AppHandle) -> Result<PetPrefs, String> {
+pub async fn pet_show(app: AppHandle) -> Result<PetPrefs, String> {
     show_pet(&app)?;
     let prefs = normalize_prefs(load_prefs());
     emit_prefs(&app, &prefs);
@@ -1314,8 +1321,9 @@ pub fn pet_hide(app: AppHandle) -> Result<PetPrefs, String> {
     Ok(prefs)
 }
 
+/// Async: may create the overlay webview (see pet_quick.rs on main-thread deadlock).
 #[tauri::command]
-pub fn pet_toggle(app: AppHandle) -> Result<PetPrefs, String> {
+pub async fn pet_toggle(app: AppHandle) -> Result<PetPrefs, String> {
     // Follow the real HWND, not just prefs — File>Close / failed hide used to
     // invert the next /pet click so the overlay looked stuck.
     if overlay_is_up(&app) {
@@ -1515,6 +1523,12 @@ mod tests {
         assert!(script.contains("__GROK_BOOT_LOCALE__"));
         assert!(script.contains("__GROK_BOOT_OS_LANG__"));
         assert!(script.contains("green"));
+        let boot_at = script.find("__GROK_PET_BOOT__").unwrap();
+        let dom_at = script.find("documentElement").unwrap();
+        assert!(
+            boot_at < dom_at,
+            "boot prefs must be assigned before documentElement access"
+        );
     }
 
     #[test]
@@ -1542,6 +1556,9 @@ mod tests {
         assert_eq!(p.color, "green");
         assert_eq!(p.eye_color, "auto");
         assert_eq!(p.size_px, 96);
+        assert_eq!(normalize_size_px(500), 200);
+        assert_eq!(normalize_size_px(131), 128);
+        assert_eq!(normalize_size_px(140), 144);
         let eyes = normalize_prefs(PetPrefs {
             eye_color: "neon".into(),
             ..Default::default()

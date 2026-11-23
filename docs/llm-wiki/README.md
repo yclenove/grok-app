@@ -11,7 +11,7 @@ Agent 与贡献者的**可执行知识库**。改产品行为或 UI 文案前，
 | [automations.md](./automations.md) | 自动化任务设计（Build `/loop` / scheduler；不阻塞 P0） |
 | [slash-composer.md](./slash-composer.md) | 斜杠面板、技能标签、Goal 模式、Doctor |
 | [session-continuity.md](./session-continuity.md) | Agent 续会话（load/bootstrap）、自动压缩归属 |
-| [session-api.md](./session-api.md) | **本机会话接口**：列表 + session id 续跑（#626 第一刀；非新建、非打断） |
+| [session-api.md](./session-api.md) | **本机会话接口**：列表 + session id 续跑（#626）；已信任项目内新建 + 单条状态 + 可选已有 worktree（#1356，无 badge） |
 | [ssh-remote.md](./ssh-remote.md) | **SSH 远端工作区**：OpenSSH Host、Watch、远端会话/文件/终端/Skills/localhost 转发；远端路径不当本地盘 |
 | [account.md](./account.md) | 官方登录 / 会员额度 / 热力图 / 调用日志 |
 | [providers.md](./providers.md) | 自定义中转、agent GROK_HOME、编辑器探测 |
@@ -41,3 +41,5 @@ Agent 与贡献者的**可执行知识库**。改产品行为或 UI 文案前，
 - i18n：`src/i18n/`
 - Build 目录：`src/lib/grokCatalog.ts`
 - UI 入口：`src/App.tsx`
+
+- [composer-markdown.md](./composer-markdown.md) — Markdown 输入框的来源感知粘贴、标记状态与兼容路径。

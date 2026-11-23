@@ -57,8 +57,13 @@ pub struct AvailableModel {
     pub reasoning_efforts: Vec<ReasoningEffort>,
     /// Model context window in tokens (live-merged from `initialize` first,
     /// then cache `info.totalContextTokens` / `info.context_window`).
+    /// This is the catalog default, not the only size the model accepts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    /// Selectable windows from `info.context_windows` / `info.contextWindows`.
+    /// Order is the catalog order. Empty when the CLI did not advertise a list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_windows: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,11 +79,61 @@ struct ParsedCacheModel {
     label: String,
     reasoning_efforts: Vec<ReasoningEffort>,
     context_window: Option<u64>,
+    context_windows: Vec<u64>,
+}
+
+/// New official chats start here when the model advertises it.
+/// The CLI catalog field `context_window` stays 256k.
+pub const APP_DEFAULT_CONTEXT_WINDOW: u64 = 500_000;
+
+/// 500k when this model lists it, otherwise no app override.
+pub fn app_default_context_window(model: &AvailableModel) -> Option<u64> {
+    if model_supports_context_window(model, APP_DEFAULT_CONTEXT_WINDOW) {
+        Some(APP_DEFAULT_CONTEXT_WINDOW)
+    } else {
+        None
+    }
+}
+
+/// Catalog default or an entry in `context_windows`. Matches the CLI agent.
+pub fn model_supports_context_window(model: &AvailableModel, window: u64) -> bool {
+    if window == 0 {
+        return false;
+    }
+    if model.context_window == Some(window) {
+        return true;
+    }
+    model.context_windows.contains(&window)
+}
+
+/// Positive integers from `info.context_windows` or `info.contextWindows`.
+/// Non-arrays, empties, and non-positive values yield an empty list. Order kept.
+fn parse_context_windows(body: &serde_json::Value) -> Vec<u64> {
+    let raw = body
+        .pointer("/info/context_windows")
+        .or_else(|| body.pointer("/info/contextWindows"));
+    let Some(arr) = raw.and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for value in arr {
+        let Some(n) = value.as_u64().filter(|n| *n > 0) else {
+            continue;
+        };
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    }
+    out
 }
 
 fn user_grok_home() -> PathBuf {
     crate::process_util::user_home().join(".grok")
 }
+
+/// Static fallback matches the live CLI cache: default 256k, also 500k.
+const OFFICIAL_FALLBACK_CONTEXT_WINDOW: u64 = 256_000;
+const OFFICIAL_FALLBACK_CONTEXT_WINDOWS: [u64; 2] = [256_000, 500_000];
 
 /// Newest official catalog id used as the empty-cache / preferred default.
 pub const OFFICIAL_FALLBACK_MODEL_ID: &str = "grok-4.7";
@@ -129,7 +184,8 @@ fn insert_fallback_model(
             source: "official".into(),
             is_default: false,
             reasoning_efforts: efforts,
-            context_window: Some(500_000),
+            context_window: Some(OFFICIAL_FALLBACK_CONTEXT_WINDOW),
+            context_windows: OFFICIAL_FALLBACK_CONTEXT_WINDOWS.to_vec(),
         },
     );
 }
@@ -312,22 +368,29 @@ fn parse_reasoning_efforts(body: &serde_json::Value) -> Vec<ReasoningEffort> {
     efforts
 }
 
-#[allow(clippy::type_complexity)]
-fn read_models_cache(
-    path: &PathBuf,
-) -> Option<(
-    BTreeMap<String, ParsedCacheModel>,
-    Option<String>,
-    Option<String>,
-)> {
+struct ParsedModelsCache {
+    models: BTreeMap<String, ParsedCacheModel>,
+    origin: Option<String>,
+    fetched_at: Option<String>,
+}
+
+fn read_models_cache(path: &Path) -> Option<ParsedModelsCache> {
     let raw = fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let models_obj = v.get("models")?.as_object()?;
     let mut map = BTreeMap::new();
+    let mut has_valid_entry = false;
     for (id, body) in models_obj {
-        if id.trim().is_empty() {
+        // Keep the existing ID-only fallback for object bodies without `info`.
+        // Scalar bodies / malformed `info` are corrupt entries, not selectable
+        // model IDs, and cannot make a newer snapshot authoritative.
+        if id.trim().is_empty()
+            || !body.is_object()
+            || body.get("info").is_some_and(|info| !info.is_object())
+        {
             continue;
         }
+        has_valid_entry = true;
         let hidden = body
             .pointer("/info/hidden")
             .and_then(|x| x.as_bool())
@@ -348,18 +411,27 @@ fn read_models_cache(
         let context_window = body
             .pointer("/info/totalContextTokens")
             .and_then(|v| v.as_u64())
+            .filter(|n| *n > 0)
             .or_else(|| {
                 body.pointer("/info/context_window")
                     .and_then(|v| v.as_u64())
+                    .filter(|n| *n > 0)
             });
+        let context_windows = parse_context_windows(body);
         map.insert(
             id.clone(),
             ParsedCacheModel {
                 label,
                 reasoning_efforts,
                 context_window,
+                context_windows,
             },
         );
+    }
+    // No usable entries means this snapshot cannot mask another home. Valid
+    // hidden entries still count, so an all-hidden latest snapshot stays empty.
+    if !has_valid_entry {
+        return None;
     }
     let origin = v
         .get("origin")
@@ -369,7 +441,11 @@ fn read_models_cache(
         .get("fetched_at")
         .and_then(|x| x.as_str())
         .map(|s| s.to_string());
-    Some((map, origin, fetched_at))
+    Some(ParsedModelsCache {
+        models: map,
+        origin,
+        fetched_at,
+    })
 }
 
 /// Models the user can select in the composer.
@@ -381,42 +457,64 @@ pub fn list_available_models() -> AvailableModelsResult {
     let settings = store::load_settings();
     let agent_home = resolve_agent_grok_home(&settings.session_data_mode);
 
-    let mut by_id: BTreeMap<String, AvailableModel> = BTreeMap::new();
+    list_available_models_from_caches(
+        &[
+            agent_home.join("models_cache.json"),
+            user_grok_home().join("models_cache.json"),
+        ],
+        settings.model_id.as_deref(),
+    )
+}
+
+/// Select one complete snapshot, never a union: newer hidden / removed entries
+/// must not be resurrected from an older home. Valid RFC3339 timestamps win over
+/// missing / invalid timestamps. Ties keep the first path (the configured home).
+fn newest_models_cache(paths: &[PathBuf]) -> Option<ParsedModelsCache> {
+    let mut selected = None;
+    let mut newest_time = None;
+    for path in paths {
+        let Some(cache) = read_models_cache(path) else {
+            continue;
+        };
+        let time = cache
+            .fetched_at
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
+        if selected.is_none() || time > newest_time {
+            newest_time = time;
+            selected = Some(cache);
+        }
+    }
+    selected
+}
+
+fn list_available_models_from_caches(
+    paths: &[PathBuf],
+    settings_model: Option<&str>,
+) -> AvailableModelsResult {
+    let mut by_id = BTreeMap::new();
     let mut origin = None;
     let mut fetched_at = None;
-
-    // Prefer agent-home cache (GROK_HOME for independent mode), then ~/.grok.
-    // Do NOT merge agent config.toml [model.*] provider routes into this list.
-    for cache in [
-        agent_home.join("models_cache.json"),
-        user_grok_home().join("models_cache.json"),
-    ] {
-        if let Some((map, o, f)) = read_models_cache(&cache) {
-            if origin.is_none() {
-                origin = o;
-            }
-            if fetched_at.is_none() {
-                fetched_at = f;
-            }
-            for (id, parsed) in map {
-                by_id.entry(id.clone()).or_insert(AvailableModel {
+    if let Some(cache) = newest_models_cache(paths) {
+        origin = cache.origin;
+        fetched_at = cache.fetched_at;
+        for (id, parsed) in cache.models {
+            by_id.insert(
+                id.clone(),
+                AvailableModel {
                     id,
                     label: parsed.label,
                     source: "official".into(),
                     is_default: false,
                     reasoning_efforts: parsed.reasoning_efforts,
                     context_window: parsed.context_window,
-                });
-            }
-            if !by_id.is_empty() {
-                break;
-            }
+                    context_windows: parsed.context_windows,
+                },
+            );
         }
-    }
-
-    // Hard fallback — known official ids when cache is empty / offline.
-    // Live CLI cache replaces this list, including Fast when the CLI ships it.
-    if by_id.is_empty() {
+    } else {
+        // Only no usable snapshot permits the offline fallback. In particular,
+        // do not restore known IDs hidden by an authoritative live catalog.
         insert_static_fallback(&mut by_id);
     }
 
@@ -434,8 +532,8 @@ pub fn list_available_models() -> AvailableModelsResult {
     }
 
     // Prefer a saved official catalog id; ignore stale provider route ids
-    // (e.g. "yunyi"). Otherwise newest official present (4.6 > 4.5).
-    let preferred = preferred_official_model_id(&by_id, settings.model_id.as_deref());
+    // (e.g. "yunyi"). Otherwise prefer the newest official present.
+    let preferred = preferred_official_model_id(&by_id, settings_model);
 
     let mut models: Vec<AvailableModel> = by_id.into_values().collect();
     models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -473,7 +571,11 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let (map, origin, _) = read_models_cache(&path).expect("cache");
+        let ParsedModelsCache {
+            models: map,
+            origin,
+            ..
+        } = read_models_cache(&path).expect("cache");
         assert_eq!(
             map.get("grok-4.5").map(|m| m.label.as_str()),
             Some("Grok 4.5")
@@ -619,7 +721,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let (map, _, _) = read_models_cache(&path).expect("cache");
+        let ParsedModelsCache { models: map, .. } = read_models_cache(&path).expect("cache");
         let m = map.get("grok-4.5").expect("model");
         assert_eq!(m.reasoning_efforts.len(), 1);
         assert_eq!(m.reasoning_efforts[0].id, "high");
@@ -656,7 +758,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let (map, _, _) = read_models_cache(&path).expect("cache");
+        let ParsedModelsCache { models: map, .. } = read_models_cache(&path).expect("cache");
         assert_eq!(
             map.get("grok-4.5").and_then(|m| m.context_window),
             Some(256000)
@@ -666,6 +768,78 @@ mod tests {
             Some(128000)
         );
         assert_eq!(map.get("grok-mini").and_then(|m| m.context_window), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_cache_parses_context_windows_list() {
+        let dir = std::env::temp_dir().join(format!(
+            "grok-app-models-cw-list-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("models_cache.json");
+        fs::write(
+            &path,
+            r#"{
+              "models": {
+                "grok-4.7": {
+                  "info": {
+                    "name": "Grok 4.7",
+                    "context_window": 256000,
+                    "context_windows": [256000, 500000, 0, "nope", 256000]
+                  }
+                },
+                "grok-camel": {
+                  "info": { "name": "Camel", "contextWindows": [128000, 256000] }
+                },
+                "grok-empty": {
+                  "info": { "name": "Empty", "context_windows": [] }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let ParsedModelsCache { models: map, .. } = read_models_cache(&path).expect("cache");
+        let grok = map.get("grok-4.7").expect("4.7");
+        assert_eq!(grok.context_window, Some(256000));
+        assert_eq!(grok.context_windows, vec![256000, 500000]);
+        let supported = AvailableModel {
+            id: "grok-4.7".into(),
+            label: "Grok 4.7".into(),
+            source: "official".into(),
+            is_default: false,
+            reasoning_efforts: Vec::new(),
+            context_window: grok.context_window,
+            context_windows: grok.context_windows.clone(),
+        };
+        assert!(model_supports_context_window(&supported, 256000));
+        assert!(model_supports_context_window(&supported, 500000));
+        assert!(!model_supports_context_window(&supported, 128000));
+        assert!(!model_supports_context_window(&supported, 0));
+        assert_eq!(app_default_context_window(&supported), Some(500_000));
+        let camel_only = AvailableModel {
+            id: "grok-camel".into(),
+            label: "Camel".into(),
+            source: "official".into(),
+            is_default: false,
+            reasoning_efforts: Vec::new(),
+            context_window: Some(256_000),
+            context_windows: vec![128_000, 256_000],
+        };
+        assert_eq!(app_default_context_window(&camel_only), None);
+        assert_eq!(
+            map.get("grok-camel").map(|m| m.context_windows.clone()),
+            Some(vec![128000, 256000])
+        );
+        assert_eq!(
+            map.get("grok-empty").map(|m| m.context_windows.len()),
+            Some(0)
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -696,6 +870,7 @@ mod tests {
             is_default: false,
             reasoning_efforts: Vec::new(),
             context_window: Some(500_000),
+            context_windows: Vec::new(),
         }
     }
 
@@ -748,3 +923,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+#[path = "models_catalog_cache_tests.rs"]
+mod cache_tests;

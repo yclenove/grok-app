@@ -6,6 +6,7 @@ import {
   isRealLocalAbsolutePath,
   isSiteRootAbsolutePath,
   isWindowsStylePath,
+  localPathIdentity,
   normalizeLocalPathToken,
   unescapeShellPath,
 } from "./pathNormalize";
@@ -61,6 +62,19 @@ describe("fused query keys never pass as local abs", () => {
 });
 
 describe("unescapeShellPath", () => {
+  it("does not throw when the token is not a string", () => {
+    expect(unescapeShellPath(null as unknown as string)).toBe("");
+    expect(unescapeShellPath(undefined as unknown as string)).toBe("");
+    expect(unescapeShellPath(12 as unknown as string)).toBe("");
+    expect(unescapeShellPath({ path: "/tmp/a.png" } as unknown as string)).toBe(
+      "",
+    );
+    expect(normalizeLocalPathToken(12 as unknown as string)).toBe("");
+    expect(isRealLocalAbsolutePath(12 as unknown as string)).toBe(false);
+    expect(isLocalMediaOpenable({} as unknown as string)).toBe(false);
+    expect(displayPathLabel(500000 as unknown as string)).toBe("");
+  });
+
   it("restores spaces and parens from shell escapes", () => {
     expect(
       unescapeShellPath(
@@ -100,6 +114,24 @@ describe("isRealLocalAbsolutePath / isSiteRootAbsolutePath", () => {
     expect(isRealLocalAbsolutePath("/a.png")).toBe(true);
   });
 
+  it("accepts a backslash UNC and a Win32 device path", () => {
+    expect(isRealLocalAbsolutePath("\\\\server\\share\\a.png")).toBe(true);
+    expect(isLocalMediaOpenable("\\\\server\\share\\a.png")).toBe(true);
+    expect(isRealLocalAbsolutePath("\\\\files.corp\\share\\a.png")).toBe(true);
+    expect(isRealLocalAbsolutePath("\\\\?\\C:\\Users\\a\\a.png")).toBe(true);
+    expect(isRealLocalAbsolutePath("\\\\.\\C:\\Users\\a\\a.png")).toBe(true);
+    expect(normalizeLocalPathToken("\\\\server\\share\\a.png")).toBe(
+      "\\\\server\\share\\a.png",
+    );
+    expect(displayPathLabel("\\\\server\\share\\a.png")).toBe("a.png");
+  });
+
+  it("keeps a forward-slash host as a protocol-relative URL", () => {
+    expect(isRealLocalAbsolutePath("//cdn.example.com/a.png")).toBe(false);
+    expect(isLocalMediaOpenable("//cdn.example.com/a.png")).toBe(false);
+    expect(isRealLocalAbsolutePath("//server/share/a.png")).toBe(false);
+  });
+
   it("does not treat site roots as openable local media", () => {
     expect(isLocalMediaOpenable("/images/x.png")).toBe(false);
     expect(
@@ -116,6 +148,15 @@ describe("normalizeLocalPathToken", () => {
       "/Users/ronglecat/Downloads/6A5ED46119BDACC7C24DC3B6FF3CF051 (1).png",
     );
     expect(isRealLocalAbsolutePath(normalizeLocalPathToken(raw))).toBe(true);
+  });
+
+  it("collapses Windows slash styles onto one identity", () => {
+    const back = "C:\\Users\\me\\AppData\\Local\\Temp\\paste.png";
+    const fwd = "C:/Users/me/AppData/Local/Temp/paste.png";
+    expect(localPathIdentity(back)).toBe(fwd);
+    expect(localPathIdentity(fwd)).toBe(localPathIdentity(back));
+    expect(localPathIdentity("")).toBe("");
+    expect(localPathIdentity("/tmp/a.png")).toBe("/tmp/a.png");
   });
 });
 

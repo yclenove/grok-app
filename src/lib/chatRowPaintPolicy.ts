@@ -3,7 +3,9 @@
  *
  * Compositor owns finger tracking (full refresh). This module only decides
  * which mounted rows run ReactMarkdown:
- * - During a gesture / fling, freeze the committed rich band (geo-clamped).
+ * - During a gesture / fling, freeze overscan hydration but still paint
+ *   rows that intersect the viewport (empty shells in the live view are
+ *   the "scroll up and nothing is rendered" hitch).
  * - Once idle, snap to the full target if the viewport moved; extra overscan
  *   beyond an overlapping band still hydrates a few rows per frame.
  * - Pin snaps to the tail when the finger is up.
@@ -16,6 +18,14 @@ export type ChatRichBand = {
 
 /** New markdown rows per idle commit when expanding overscan, not filling a hole. */
 export const CHAT_RICH_HYDRATE_ROWS_PER_COMMIT = 3;
+
+/**
+ * Rich-band shrink hysteresis in rows. Fingertip fling valleys release the
+ * scroll freeze between frames, so the target band oscillates ±1-2 rows at
+ * the boundary; shrinking eagerly remounted that row rich↔compact on every
+ * pass and its height churn moved the transcript mid-read (#1257).
+ */
+export const CHAT_RICH_SHRINK_HYSTERESIS_ROWS = 3;
 
 export function chatRichBandIsEmpty(band: ChatRichBand): boolean {
   return band.richEnd <= band.richStart;
@@ -85,8 +95,9 @@ export function chatRichBandNeedsFollowUp(
 /**
  * Step the committed markdown band toward `target`.
  *
- * Gesture/fling: freeze (geo-clamp only). Idle hole: whole target in one
- * commit. Idle overlap: expand at most hydrateRows. Pin: snap to tail.
+ * Gesture/fling: freeze overscan; always union the live viewport.
+ * Idle hole: whole target in one commit. Idle overlap: expand at most
+ * hydrateRows, then union the viewport. Pin: snap to tail.
  */
 export function nextChatRichBand(input: {
   target: ChatRichBand;
@@ -98,6 +109,11 @@ export function nextChatRichBand(input: {
   forceIndices?: readonly number[];
   hydrateRows?: number;
   maxRows?: number;
+  /** Rows that currently intersect the viewport — always paint, even mid-gesture. */
+  viewStart?: number;
+  viewEnd?: number;
+  /** Shrink hysteresis in rows; keep the live band unless the target pulls clearly past. */
+  shrinkHysteresisRows?: number;
 }): ChatRichBand {
   const geoStart = input.geoStart;
   const geoEnd = Math.max(geoStart, input.geoEnd);
@@ -119,8 +135,26 @@ export function nextChatRichBand(input: {
     input.forceIndices,
   );
 
+  const viewBand =
+    input.viewStart != null &&
+    input.viewEnd != null &&
+    input.viewEnd > input.viewStart
+      ? intersectChatRichBand(
+          { richStart: input.viewStart, richEnd: input.viewEnd },
+          geoStart,
+          geoEnd,
+        )
+      : null;
+
   if (input.scrolling) {
-    return live;
+    if (!viewBand || chatRichBandIsEmpty(viewBand)) return live;
+    if (chatRichBandIsEmpty(live) || !chatRichBandsOverlap(live, viewBand)) {
+      return viewBand;
+    }
+    return {
+      richStart: Math.min(live.richStart, viewBand.richStart),
+      richEnd: Math.max(live.richEnd, viewBand.richEnd),
+    };
   }
 
   if (chatRichBandIsEmpty(live) || !chatRichBandsOverlap(live, target)) {
@@ -140,8 +174,24 @@ export function nextChatRichBand(input: {
     const take = Math.min(budget, target.richEnd - e);
     e += take;
   }
-  if (target.richStart > s) s = target.richStart;
-  if (target.richEnd < e) e = target.richEnd;
+  // Shrink hysteresis: an oscillating target boundary (fling valleys release
+  // freezeRich between scroll frames) remounted boundary rows rich↔compact
+  // on every pass — the remount height churn is the mid-read jump (#1257).
+  // Keep the live band unless the target pulls clearly past it.
+  const hyst = Math.max(
+    0,
+    input.shrinkHysteresisRows ?? CHAT_RICH_SHRINK_HYSTERESIS_ROWS,
+  );
+  if (target.richStart > s && target.richStart - s > hyst) {
+    s = target.richStart;
+  }
+  if (target.richEnd < e && e - target.richEnd > hyst) {
+    e = target.richEnd;
+  }
+  if (viewBand && !chatRichBandIsEmpty(viewBand)) {
+    s = Math.min(s, viewBand.richStart);
+    e = Math.max(e, viewBand.richEnd);
+  }
   if (e <= s) return { richStart: geoStart, richEnd: geoStart };
   return { richStart: s, richEnd: e };
 }

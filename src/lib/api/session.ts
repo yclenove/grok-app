@@ -245,6 +245,19 @@ export async function sessionStop(
   );
 }
 
+/** Stop a turn and learn whether `session/cancel` reached the agent. */
+export async function sessionStopReport(
+  sessionId?: string | null,
+  opts?: { timeoutMs?: number },
+): Promise<{ snapshot: SessionSnapshot; cancelDelivered: boolean }> {
+  const budget = opts?.timeoutMs ?? SESSION_STOP_CLIENT_TIMEOUT_MS;
+  return withDeadline(
+    invoke("session_stop_report", { sessionId: sessionId ?? null }),
+    budget,
+    () => sessionStopTimeoutError(budget),
+  );
+}
+
 export async function sessionDisconnect(): Promise<SessionSnapshot> {
   return invoke("session_disconnect");
 }
@@ -524,6 +537,8 @@ export type CliSessionSummary = {
   dir: string;
   numMessages: number;
   alreadyLinked: boolean;
+  /** Host bulk-import policy; absent on older hosts and search-only hits. */
+  bulkImportable?: boolean;
   /** App session id when already linked (one-click open). */
   appSessionId?: string | null;
   /** GROK_HOME used for discovery (path clarity). */

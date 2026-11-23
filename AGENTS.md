@@ -15,13 +15,14 @@
    - [providers.md](docs/llm-wiki/providers.md) — custom relays, agent `GROK_HOME`, editors  
    - [model-routing.md](docs/llm-wiki/model-routing.md) — **official tool inject for custom main only** (never official subscription; MCP `official-aux` tools-first; Host vision for text-only custom)
    - [session-continuity.md](docs/llm-wiki/session-continuity.md) — load/bootstrap; **pasted UUIDs default to Grok App session ids** (not CLI agent ids)
-   - [session-api.md](docs/llm-wiki/session-api.md) — **local session API**: list + continue-by-id (#626 first slice)
+   - [session-api.md](docs/llm-wiki/session-api.md) — **local session API**: list + continue-by-id (#626); create in a trusted project + one-session status + optional existing worktree (#1356, no badge)
    - [setup.md](docs/llm-wiki/setup.md) — first-run gate (CLI required, account optional)  
    - [icons.md](docs/llm-wiki/icons.md) — app dock icons vs tray/status-bar icons (never mix)  
    - [remote-im.md](docs/llm-wiki/remote-im.md) — **Remote IM** GUI 配置全渠道 · Bridge · Grok Build；goal 见 `docs/plans/GOAL-remote-im.md`  
    - [maintain.md](docs/llm-wiki/maintain.md) — **open-source maintenance**: Issues triage, PR review, community intake, ship loop, **branch hygiene**, commit-then-push, **no remote-ahead after merge**, local CI before PR
    - [chatcut.md](docs/llm-wiki/chatcut.md) — **ChatCut Codex plugin**: adapter, MCP surface header, Resources browser handoff, re-pull migration
    - [appearance-skins.md](docs/llm-wiki/appearance-skins.md) — **appearance packs**: `.grokskin` layout, K19 allowlist, `grok://` + `grok-app:`, never auto-apply
+   - [pr-monitor.md](docs/llm-wiki/pr-monitor.md) — **PR monitor**: session-owned watches over the repo's open PRs (one row per PR, inline bell, chip count), host poll + fingerprint dedup, the host delivers the localized follow-up into the chat; **the agent gets its own MCP tools** (`pr_watch` / `pr_unwatch` / `pr_watches` over loopback `/v1/pr-monitor/watches`) so it watches the PR it just opened and stops when the PR is done; process-lifetime, watches not persisted (ADR 0005)
 
 1b. **Release (AI handoff)** — **[docs/llm-wiki/release.md](docs/llm-wiki/release.md)** is the single source for ship steps. Platforms / local build: [docs/BUILD.md](docs/BUILD.md). Window chrome: `tauri.macos.conf.json` (Overlay) vs `tauri.windows.conf.json` (frameless).  
    - Never tag without `## [X.Y.Z]` in `CHANGELOG.md`.  
@@ -32,7 +33,7 @@
 
 1c. **Open-source surface** — public docs: `README.md` / `README_EN.md`, `LICENSE`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `CHANGELOG.md`. Do not commit secrets, `auth.json`, or local agent homes.
 
-2. Do **not** hardcode user-facing copy in any language. Use `createT(locale)` / `t()`. Fifteen locales ship (`de` `en` `es` `fil` `fr` `id` `it` `ja` `ko` `pt-BR` `ru` `ta` `uk` `zh` `zh-TW`); `en` is the key authority. Complete catalogs must stay in lockstep with `en`. Never fork a date or number format on `locale === "zh"` — use `intlLocale()` / `isTightScript()`. See [i18n.md](docs/llm-wiki/i18n.md).
+2. Do **not** hardcode user-facing copy in any language. Use `createT(locale)` / `t()`. Sixteen locales ship (`de` `en` `es` `fil` `fr` `id` `it` `ja` `ko` `pt-BR` `ru` `ta` `tr` `uk` `zh` `zh-TW`); `en` is the key authority. Complete catalogs must stay in lockstep with `en`. Never fork a date or number format on `locale === "zh"` — use `intlLocale()` / `isTightScript()`. See [i18n.md](docs/llm-wiki/i18n.md).
 
 2b. **Dialogs & overlays** — never use `window.confirm` / `window.prompt` / `window.alert` in Tauri UI. Use App `setAppDialog`, `GlassModal`, or the same in-app portal + modal/menu CSS. Prefer existing panel styles (`.cmm__pop`, solid context `.menu-panel`, `.modal`); frosted glass is **not** required. Details: [docs/llm-wiki/dialogs.md](docs/llm-wiki/dialogs.md).
 

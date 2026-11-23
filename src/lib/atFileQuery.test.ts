@@ -5,6 +5,7 @@ import {
   rankAtFileHits,
   removeAtTokenFromDraft,
   scoreAtFileHit,
+  toAtFileHits,
 } from "./atFileQuery";
 
 describe("detectAtQuery", () => {
@@ -24,6 +25,12 @@ describe("detectAtQuery", () => {
   it("allows @ after newline", () => {
     expect(detectAtQuery("line1\n@src")).toEqual({ start: 6, query: "src" });
   });
+
+  it("treats a fullwidth ＠ from an IME as the same trigger", () => {
+    expect(detectAtQuery("＠src")).toEqual({ start: 0, query: "src" });
+    expect(detectAtQuery("see ＠packa")).toEqual({ start: 4, query: "packa" });
+    expect(detectAtQuery("user＠host")).toBeNull();
+  });
 });
 
 describe("detectAtQueryOnStored", () => {
@@ -37,6 +44,16 @@ describe("detectAtQueryOnStored", () => {
 
   it("uses the caret prefix, not a later @ in the rest of the draft", () => {
     expect(detectAtQueryOnStored("hello ")).toBeNull();
+  });
+
+  it("keeps stored indexes on the fullwidth ＠ still in the draft", () => {
+    const stored = "see ＠packa";
+    const range = detectAtQueryOnStored(stored);
+    expect(range).toEqual({ start: 4, query: "packa", end: 10 });
+    expect(stored.slice(range!.start, range!.end)).toBe("＠packa");
+    expect(removeAtTokenFromDraft(stored, range!.start, range!.end)).toBe(
+      "see ",
+    );
   });
 });
 
@@ -76,5 +93,67 @@ describe("scoreAtFileHit", () => {
 describe("removeAtTokenFromDraft", () => {
   it("strips @token range", () => {
     expect(removeAtTokenFromDraft("see @packa now", 4, 10)).toBe("see  now");
+  });
+});
+
+describe("toAtFileHits", () => {
+  it("keeps a directory hit marked as a directory", () => {
+    // Arrange — the composer picks the reference kind from this flag
+    const hits = [
+      {
+        path: "/p/src",
+        name: "src",
+        relativePath: "src",
+        mtimeMs: 2,
+        isDir: true,
+      },
+      {
+        path: "/p/src/a.ts",
+        name: "a.ts",
+        relativePath: "src/a.ts",
+        mtimeMs: 1,
+      },
+    ];
+
+    // Act
+    const entries = toAtFileHits(hits);
+
+    // Assert
+    expect(entries).toEqual([
+      {
+        path: "/p/src",
+        name: "src",
+        relativePath: "src",
+        mtimeMs: 2,
+        isDir: true,
+      },
+      {
+        path: "/p/src/a.ts",
+        name: "a.ts",
+        relativePath: "src/a.ts",
+        mtimeMs: 1,
+        isDir: false,
+      },
+    ]);
+  });
+
+  it("survives ranking, so the panel still knows it is a directory", () => {
+    // Arrange / Act — the @ panel ranks after mapping the hits
+    const ranked = rankAtFileHits(
+      toAtFileHits([
+        { path: "/p/other.md", name: "other.md", relativePath: "other.md" },
+        {
+          path: "/p/components",
+          name: "components",
+          relativePath: "components",
+          isDir: true,
+        },
+      ]),
+      "components",
+    );
+
+    // Assert
+    expect(ranked).toHaveLength(1);
+    expect(ranked[0]?.isDir).toBe(true);
   });
 });

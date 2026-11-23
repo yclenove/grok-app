@@ -55,6 +55,20 @@ describe("nextChatRichBand", () => {
     expect(next).toEqual(band(10, 22));
   });
 
+  it("still paints the live viewport while a gesture freezes overscan", () => {
+    const next = nextChatRichBand({
+      target: band(40, 52),
+      committed: band(10, 22),
+      geoStart: 0,
+      geoEnd: 80,
+      scrolling: true,
+      viewStart: 40,
+      viewEnd: 46,
+    });
+    expect(next.richStart).toBeLessThanOrEqual(40);
+    expect(next.richEnd).toBeGreaterThanOrEqual(46);
+  });
+
   it("fills the whole target in one idle commit after a hole", () => {
     const next = nextChatRichBand({
       target: band(90, 102),
@@ -77,6 +91,20 @@ describe("nextChatRichBand", () => {
     });
     expect(next).toEqual(band(10, 16));
     expect(chatRichBandNeedsFollowUp(next, band(10, 22))).toBe(true);
+  });
+
+  it("idle overlap still fills the live viewport in the same commit", () => {
+    const next = nextChatRichBand({
+      target: band(10, 30),
+      committed: band(20, 23),
+      geoStart: 0,
+      geoEnd: 80,
+      scrolling: false,
+      viewStart: 10,
+      viewEnd: 28,
+    });
+    expect(next.richStart).toBe(10);
+    expect(next.richEnd).toBeGreaterThanOrEqual(28);
   });
 
   it("shrinks to the target once idle", () => {
@@ -112,5 +140,47 @@ describe("nextChatRichBand", () => {
       pinToBottom: true,
     });
     expect(next).toEqual(band(68, 80));
+  });
+});
+
+describe("nextChatRichBand shrink hysteresis (#1257)", () => {
+  const band = (richStart: number, richEnd: number) => ({ richStart, richEnd });
+
+  it("keeps the live band when the target shrinks within the hysteresis", () => {
+    // Fling valley: target pulls back 2 rows (< 3) — boundary row must not
+    // remount compact and back rich on the next pass.
+    const next = nextChatRichBand({
+      target: band(14, 19),
+      committed: band(12, 19),
+      geoStart: 7,
+      geoEnd: 19,
+      scrolling: false,
+    });
+    expect(next.richStart).toBe(12);
+    expect(next.richEnd).toBe(19);
+  });
+
+  it("follows the target once it pulls clearly past the live band", () => {
+    const next = nextChatRichBand({
+      target: band(16, 19),
+      committed: band(12, 19),
+      geoStart: 7,
+      geoEnd: 19,
+      scrolling: false,
+    });
+    expect(next.richStart).toBe(16);
+  });
+
+  it("still expands toward the target without hysteresis", () => {
+    const next = nextChatRichBand({
+      target: band(12, 19),
+      committed: band(14, 16),
+      geoStart: 7,
+      geoEnd: 19,
+      scrolling: false,
+    });
+    expect(next.richStart).toBe(12);
+    // Hydrate budget is shared: 2 rows up front + 1 row at the tail = 3.
+    expect(next.richEnd).toBe(17);
   });
 });

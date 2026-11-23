@@ -1,6 +1,6 @@
 [package]
 name = "grok-app"
-version = "0.2.40"
+version = "0.2.51"
 description = "Grok — desktop workbench for Grok Build CLI"
 authors = ["RongleCat"]
 edition = "2021"
@@ -122,6 +122,7 @@ windows = { version = "0.61", features = [
     "Win32_System_Ole",
     "Win32_System_Pipes",
     "Win32_System_SystemServices",
+    "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
@@ -140,6 +141,8 @@ gtk = { version = "0.18", features = ["v3_24"] }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-window-state = "2"
+# Pet quick bar: system-wide show/focus hotkey (default Alt+Super+P).
+tauri-plugin-global-shortcut = "~2.3.2" # 2.4 needs tauri 2.12; stay on the locked 2.11
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mac-notification-sys = "0.6"

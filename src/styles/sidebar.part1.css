@@ -117,7 +117,13 @@ button:disabled {
  * border bugs). 0-blur 1px spread follows the radius. */
 .ui-tip {
   position: fixed;
-  z-index: 10050;
+  /* Top band. A tip annotates a control that can live in any surface — floating
+     menu (13000), space switcher menu (14000), GlassModal `.overlay` (12000),
+     `.app-dialog-overlay` / toast (14000) — and it is portaled to body, so DOM
+     order cannot put it on top: only the layer can. At 10050 a tip on a row
+     inside the branch menu painted behind the open menu (watch-bell tooltip).
+     Raise this above everything a tip can be anchored in, never down. */
+  z-index: 14100;
   /* Inline style also sets maxWidth from viewport clamp; keep a CSS fallback. */
   max-width: min(280px, calc(100vw - 16px));
   padding: 5px 8px;
@@ -153,11 +159,6 @@ button:disabled {
   padding: 8px 10px;
   line-height: 1.45;
   font-weight: 400;
-}
-
-/* Tips opened from a .overlay modal (z-index 12000) */
-.ui-tip--modal {
-  z-index: 13050;
 }
 
 /* File-path card hover: full path, wrap, show immediately (delayMs=0). */
@@ -253,6 +254,17 @@ textarea:focus-visible,
 [data-tauri-drag-region] {
   -webkit-app-region: drag;
   app-region: drag;
+}
+
+/* Windows: no CSS caption regions. Every layout change during
+ * streaming made WebView2 recompute them (Controller::UpdateDraggableRegions →
+ * SetWindowPos ≈98% of host CPU samples, upstream #1336), which stalled
+ * clicks, drag and resize. Dragging still works through Tauri's drag.js
+ * (`data-tauri-drag-region` → start_dragging, double-click maximize). */
+html.platform-win [data-tauri-drag-region],
+html.platform-win [data-tauri-drag-region] * {
+  -webkit-app-region: no-drag !important;
+  app-region: no-drag !important;
 }
 
 /* Interactive controls inside drag regions stay clickable.
@@ -630,6 +642,20 @@ html.platform-mac[data-theme="light"] .sidebar:not(.sidebar--overlay):not(.sideb
   background: var(--bg-sidebar);
   border-right: none;
   box-shadow: var(--sidebar-edge-shadow);
+}
+
+/*
+ * Default light rail ink (#1369). Resting session titles, project names, and
+ * nav labels use --text-secondary; meta uses --text-tertiary. Global light
+ * 0.55 / 0.36 composites to 4.57:1 and 2.47:1 on the solid plate #ececef
+ * (screenshot plate 4.67:1 / 2.50:1). 0.72 / 0.50 land at 8.50:1 and 3.85:1
+ * there; the time row's extra 0.9 opacity stays at 3.26:1. Skins, wallpaper,
+ * and custom chrome ink keep their own variables. Dark theme is untouched.
+ */
+html[data-theme="light"]:not([data-skin]):not([data-wallpaper="1"]):not([data-text-color="custom"])
+  .sidebar {
+  --text-secondary: rgba(0, 0, 0, 0.72);
+  --text-tertiary: rgba(0, 0, 0, 0.5);
 }
 
 /* Solid elevated content columns — pure white, sit above glass rail */
