@@ -56,6 +56,7 @@ unsafe extern "C" {
         context: Ref,
     ) -> Ref;
     fn CGEventTapIsEnabled(tap: Ref) -> bool;
+    fn CGEventTapEnable(tap: Ref, enable: bool);
     fn CGEventGetIntegerValueField(event: Ref, field: u32) -> i64;
     fn CGEventGetFlags(event: Ref) -> u64;
 }
@@ -79,9 +80,10 @@ struct Context {
 }
 
 impl Context {
+    /// Lose the listener. Foreground input fails closed while it is gone. This
+    /// is not a user Stop, so it latches nothing that needs a manual resume.
     fn revoke(&self) {
         self.monitor.connected(false);
-        self.guards.request_stop();
     }
 }
 
@@ -94,6 +96,7 @@ unsafe extern "C" fn input_callback(_proxy: Ref, kind: u32, event: Ref, context:
     let context = unsafe { &*context.cast::<Context>() };
     let result = catch_unwind(AssertUnwindSafe(|| {
         if kind == u32::MAX || kind == u32::MAX - 1 {
+            // Disabled by timeout or user input; the run loop turns it back on.
             context.revoke();
             return;
         }
@@ -288,9 +291,9 @@ fn listen(context: &Context, quit: &AtomicBool) {
         CFRunLoopAddSource(loop_, resources.source, kCFRunLoopDefaultMode);
     }
     context.monitor.connected(true);
-    if register_hotkey(&mut resources, &context.monitor, &context.config)
-        != Registration::Registered
-    {
+    let hotkey = register_hotkey(&mut resources, &context.monitor, &context.config)
+        == Registration::Registered;
+    if !hotkey {
         tracing::warn!("macos Stop hotkey conflict or registration failure");
     }
     while !quit.load(Ordering::Acquire) {
@@ -300,16 +303,33 @@ fn listen(context: &Context, quit: &AtomicBool) {
             CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, true);
         }
         // SAFETY: `tap` remains owned by Resources. Preflights do not prompt.
-        let healthy = unsafe {
-            CGEventTapIsEnabled(resources.tap)
-                && CGPreflightListenEventAccess()
+        let permitted = unsafe {
+            CGPreflightListenEventAccess()
                 && crate::diagnostics::ax_call("AXIsProcessTrusted", 0, "listener_health", || {
                     AXIsProcessTrusted()
                 })
         };
-        if !healthy || !context.monitor.is_available() {
+        if !permitted {
             context.revoke();
             return;
+        }
+        // The system disables a tap whose callback ran late (load, a stalled
+        // VM) or during secure input. Turn it back on rather than give up.
+        // SAFETY: `tap` remains owned by Resources on this thread.
+        let enabled = unsafe {
+            CGEventTapIsEnabled(resources.tap) || {
+                CGEventTapEnable(resources.tap, true);
+                CGEventTapIsEnabled(resources.tap)
+            }
+        };
+        if !enabled {
+            context.revoke();
+            continue;
+        }
+        if !context.monitor.is_available() {
+            // Back after a stall or a re-enabled tap. Idle time restarts unknown.
+            context.monitor.connected(true);
+            context.monitor.hotkey_registered(hotkey);
         }
         context.monitor.heartbeat();
     }
