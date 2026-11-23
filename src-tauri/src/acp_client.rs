@@ -2558,6 +2558,7 @@ impl AcpClient {
             wsl_active: false,
             proc_home: std::sync::Mutex::new(None),
             use_app_director_rules,
+            computer_use_entry: ParkingMutex::new(None),
         })
     }
 
