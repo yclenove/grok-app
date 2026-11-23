@@ -69,7 +69,7 @@ fn assess_with_browser(
 ) -> RiskAssessment {
     let resolved = tree.and_then(|tree| target::resolve(tree, intent));
     let web = resolved.as_ref().is_some_and(|hit| hit.in_web);
-    let elevated = web || browser || unknown(resolved.as_ref(), intent);
+    let elevated = web || browser || unknown(resolved.as_ref());
     let signal = term_hit(terms, resolved.as_ref())
         || password(tree, resolved.as_ref(), intent.tool)
         || chord_signal(intent, elevated)
@@ -138,14 +138,30 @@ fn newline_text(intent: &ActionIntent, elevated: bool) -> bool {
             .is_some_and(|text| text.contains('\n') || text.contains('\r'))
 }
 
-fn unknown(resolved: Option<&Resolved<'_>>, intent: &ActionIntent) -> bool {
+fn unknown(resolved: Option<&Resolved<'_>>) -> bool {
+    // A point with no element under it (a canvas, a drawing surface) in a native
+    // app is not treated as unknown: confirming every such click made those
+    // apps unusable. Web and browser targets stay elevated by their own rules.
     let Some(hit) = resolved else {
-        return intent.tool.is_mutating();
+        return false;
     };
     if hit.execution {
         return false;
     }
-    let name = hit.node.node.name.as_deref().unwrap_or("").trim();
+    let node = &hit.node.node;
+    // A pop-up or combo box often has no name, only its current value.
+    let value_label = match (&node.value, node.role) {
+        (Some(crate::model::NodeValue::Text(text)), Role::PopUpButton | Role::ComboBox) => {
+            text.as_str()
+        }
+        _ => "",
+    };
+    let name = node
+        .name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(value_label)
+        .trim();
     let named_control = !name.is_empty()
         && matches!(
             hit.node.node.role,
