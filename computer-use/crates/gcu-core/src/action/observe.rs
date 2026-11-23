@@ -134,10 +134,9 @@ impl ActionRouter {
         // Auto captures speculatively to detect visual changes that the tree
         // cannot express. Only a synchronized, redacted image can reach policy
         // comparison or delivery; an omitted image never enters SnapshotStore.
-        if mode != ScreenshotMode::Explicit(false) {
-            if raw.incomplete.is_some() {
-                return Err(ErrorCode::HandoffRequired.into());
-            }
+        // An incomplete tree cannot prove where secrets are, so no image is
+        // delivered; the tree itself still is (usability first, 2026-11).
+        if mode != ScreenshotMode::Explicit(false) && raw.incomplete.is_none() {
             let shot = self
                 .native(
                     session,
@@ -158,25 +157,29 @@ impl ActionRouter {
                 .await
                 .map_err(|e| CallError::from_driver(&e))?;
             if after.incomplete.is_some() {
-                return Err(ErrorCode::HandoffRequired.into());
-            }
-            if ax_signature != signature(&after)? {
+                // Keep the live handles; drop the capture it cannot vouch for.
+                if let Some(root) = &mut after.root {
+                    refresh_tree(root, Fingerprint::default(), 0);
+                }
+                raw = after;
+            } else if ax_signature != signature(&after)? {
                 return Err(ErrorCode::StaleScreenshot.into());
+            } else {
+                let current = self
+                    .native(session, &cancel, false, self.driver.window_geometry(win))
+                    .await
+                    .map_err(|e| CallError::from_driver(&e))?;
+                if geometry != current || shot.geometry != geometry {
+                    return Err(ErrorCode::StaleGeometry.into());
+                }
+                capture = Some(shot);
+                // Same content, but a real driver retired the first read's handles
+                // when it took this one; later actions must carry these.
+                if let Some(root) = &mut after.root {
+                    refresh_tree(root, Fingerprint::default(), 0);
+                }
+                raw = after;
             }
-            let current = self
-                .native(session, &cancel, false, self.driver.window_geometry(win))
-                .await
-                .map_err(|e| CallError::from_driver(&e))?;
-            if geometry != current || shot.geometry != geometry {
-                return Err(ErrorCode::StaleGeometry.into());
-            }
-            capture = Some(shot);
-            // Same content, but a real driver retired the first read's handles
-            // when it took this one; later actions must carry these.
-            if let Some(root) = &mut after.root {
-                refresh_tree(root, Fingerprint::default(), 0);
-            }
-            raw = after;
         } else {
             captured_at = self.epoch.elapsed();
         }
@@ -189,8 +192,8 @@ impl ActionRouter {
                 .map_err(|e| CallError::from_driver(&e))?;
             raw = aligned;
         }
-        if mode != ScreenshotMode::Explicit(false) && raw.incomplete.is_some() {
-            return Err(ErrorCode::HandoffRequired.into());
+        if raw.incomplete.is_some() {
+            capture = None;
         }
         let merged_signature = signature(&raw)?;
         let mut tree = Pipeline::default().run(raw.clone(), opts);

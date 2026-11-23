@@ -201,7 +201,7 @@ async fn auto_unknown_sensitive_region_refuses_image_even_when_tree_is_rich() {
 }
 
 #[tokio::test]
-async fn auto_incomplete_before_or_after_capture_requires_handoff() {
+async fn auto_incomplete_before_or_after_capture_delivers_the_tree_without_an_image() {
     for after_capture in [false, true] {
         for reason in [
             IncompleteReason::Deadline,
@@ -221,9 +221,9 @@ async fn auto_incomplete_before_or_after_capture_requires_handoff() {
             } else {
                 h.driver.replace(raw);
             }
-            let error = h.observe(json!("auto")).await.unwrap_err();
-            assert_eq!(error.code, ErrorCode::HandoffRequired);
-            assert!(error.state.is_none());
+            // The tree is still useful; an image it cannot vouch for is not sent.
+            let state = h.observe(json!("auto")).await.unwrap();
+            assert!(state.image.is_none());
             if !after_capture {
                 assert_eq!(h.driver.captures(), 0);
             }
