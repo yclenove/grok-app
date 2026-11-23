@@ -610,7 +610,8 @@ fn call_form_sensitive_mutations_are_denied_and_observation_image_survives_exit(
     // sensitive confirmation; it is not foreground. Unindexed typing into the
     // focused field is no longer an unknown target (usability, 2026-11).
     // ADR 0017 §3: an app grant does not confirm a sensitive mutation.
-    for (tool, args) in [("click", r#"{"app":"fake.form","element_index":3}"#)] {
+    {
+        let (tool, args) = ("click", r#"{"app":"fake.form","element_index":3}"#);
         std::fs::remove_file(&oracle).unwrap();
         let denied = command(&h)
             .env("GCU_APPROVAL", "auto-allow-session")
@@ -822,7 +823,8 @@ fn mcp_form_sensitive_mutations_are_denied_without_changing_fake_oracle() {
     // As in the one-shot test, the explicit Name click needs only the app grant;
     // Submit needs a sensitive confirm. Close a separate process after the
     // refusal to check its independent oracle.
-    for (tool, args) in [("click", json!({"app":"fake.form","element_index":3}))] {
+    {
+        let (tool, args) = ("click", json!({"app":"fake.form","element_index":3}));
         let h = TempDir::new().unwrap();
         let mut m = Mcp::start(&h, "default");
         m.request("tools/list", json!({}));
