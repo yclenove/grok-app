@@ -256,6 +256,9 @@ pub struct ActionSummary {
     pub snapshot_id: String,
     /// Digest of the action parameters.
     pub action_digest: [u8; 32],
+    /// True when foreground input is the only reason to confirm; no sensitive
+    /// signal applies. Eval auto-approval may allow these and still deny the rest.
+    pub foreground_only: bool,
 }
 
 /// Point in the Host's screen coordinate space, in physical pixels.

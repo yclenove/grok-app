@@ -36,6 +36,8 @@ pub struct HookRequest<'a> {
     pub summary: &'a str,
     /// Whether a redacted crop is attached. Bytes stay in memory.
     pub crop_attached: bool,
+    /// The confirmation is for foreground input only (no sensitive signal).
+    pub foreground_only: bool,
 }
 
 /// Read the test hook. The production provider never calls this.
@@ -73,11 +75,13 @@ pub async fn confirm_for_test(req: &HookRequest<'_>) -> bool {
     }
     let answer = async {
         if let Some(policy) = eval_policy(req.mode) {
-            // The Host API shares this callback between sensitive and foreground
-            // confirmations. Neither is implied by an app grant. Until trusted,
-            // action-bound manifest approvals exist, both default to deny; never
-            // infer the confirmation kind or permission from summary text.
-            return policy.sensitive && policy.foreground;
+            // The engine marks foreground-only confirmations; anything with a
+            // sensitive signal needs both. Never infer the kind from summary text.
+            return if req.foreground_only {
+                policy.foreground
+            } else {
+                policy.sensitive && policy.foreground
+            };
         }
         if let Some(hook) = req.autoclick {
             return match hook {
@@ -167,6 +171,7 @@ impl ApprovalProvider for Approvals {
             interactive: desktop_available(),
             summary: "",
             crop_attached: false,
+            foreground_only: false,
         })
         .await;
         if decision == ApprovalDecision::Always {
@@ -197,6 +202,7 @@ impl ApprovalProvider for Approvals {
             interactive: desktop_available(),
             summary: summary.text.as_str(),
             crop_attached: crop.is_some(),
+            foreground_only: summary.foreground_only,
         })
         .await
     }
@@ -301,10 +307,13 @@ fn eval_policy(mode: Option<&str>) -> Option<EvalPolicy> {
             Some("auto-deny") => Some(ApprovalDecision::Deny),
             _ => None,
         };
+        // Allow modes accept foreground-only confirmations so foreground
+        // routes (drag, pointer clicks, keys) can be evaluated; sensitive
+        // confirmations stay denied.
         app.map(|app| EvalPolicy {
+            foreground: app != ApprovalDecision::Deny,
             app,
             sensitive: false,
-            foreground: false,
         })
     }
     #[cfg(not(all(feature = "eval-autoapprove", debug_assertions)))]

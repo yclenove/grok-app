@@ -128,7 +128,8 @@ fn activity_own_marker_does_not_refresh_and_failure_returns_none() {
     f.monitor.connected(false);
     assert_eq!(f.monitor.ms_since_physical_input(), None);
     f.monitor.connected(true);
-    assert_eq!(f.monitor.ms_since_physical_input(), None);
+    // Reattached: old history is gone and idle time restarts at zero.
+    assert_eq!(f.monitor.ms_since_physical_input(), Some(0));
     assert!(!f.monitor.stop_available());
 }
 
@@ -198,10 +199,13 @@ async fn foreground_stolen_between_posts_stops_sequence_and_releases() {
 }
 
 #[tokio::test]
-async fn unknown_activity_never_guesses_idle_or_activates() {
+async fn idle_counts_from_listener_attach_and_never_from_a_detached_one() {
     let f = Fixture::new();
-    f.monitor.connected(true);
+    f.monitor.connected(false);
     assert_eq!(f.monitor.ms_since_physical_input(), None);
+    f.monitor.connected(true);
+    // Just attached: idle time starts now, so foreground still waits.
+    assert_eq!(f.monitor.ms_since_physical_input(), Some(0));
     assert_eq!(f.run(true).await, Err(DriverError::CapabilityUnavailable));
     assert!(f.events.calls().is_empty());
 }

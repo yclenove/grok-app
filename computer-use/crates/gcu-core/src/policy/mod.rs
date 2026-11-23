@@ -514,7 +514,10 @@ fn foreground_or_allow(
         ),
         gcu_host_api::ForegroundPolicy::Ask => PolicyDecision::NeedConfirm(ConfirmRequest {
             kind: ConfirmKind::Foreground,
-            summary: summary_of(intent, node),
+            summary: ActionSummary {
+                foreground_only: true,
+                ..summary_of(intent, node)
+            },
             risk: Risk::Low,
             binding: binding.clone(),
         }),
@@ -562,6 +565,7 @@ fn summary_of(intent: &ActionIntent, node: Option<&ProcessedNode>) -> ActionSumm
         text: format!("{verb} \"{}\"", truncate(label)),
         snapshot_id: intent.snapshot_id.clone(),
         action_digest: intent.action_digest,
+        foreground_only: false,
     }
 }
 

@@ -43,11 +43,13 @@ impl ActivityMonitor {
     }
     /// Attach/detach a listener. Reattachment discards stale input history and
     /// requires an explicit successful hotkey registration before enabling Stop.
+    /// Idle time counts from the attach: a healthy listener that has seen no
+    /// input since then is evidence the user has been idle, not a guess.
     pub fn connected(&self, available: bool) {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.connected = available;
         state.hotkey = false;
-        state.last_input = None;
+        state.last_input = available.then(|| self.clock.now());
         state.heartbeat = self.clock.now();
     }
     /// Record Carbon registration success or failure independently of activity.

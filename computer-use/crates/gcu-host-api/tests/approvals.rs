@@ -166,6 +166,7 @@ fn confirm_action_records_snapshot_digest_and_crop_bytes() {
         text: "click Send".into(),
         snapshot_id: "s_7f3a".into(),
         action_digest: [0xab; 32],
+        foreground_only: false,
     };
     let crop = ImageRef::from_bytes("image/png", 2, 2, vec![9, 8, 7, 6]);
     approvals.push_confirm(true);
@@ -200,6 +201,7 @@ fn confirm_action_cancel_returns_false_and_keeps_answer() {
             text: "click Send".into(),
             snapshot_id: "s_7f3a".into(),
             action_digest: [0xab; 32],
+            foreground_only: false,
         },
         None,
         &cancel,

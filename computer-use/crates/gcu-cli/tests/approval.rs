@@ -61,6 +61,7 @@ fn hook<'a>(
         interactive: false,
         summary: "click Send",
         crop_attached: false,
+        foreground_only: false,
     }
 }
 
