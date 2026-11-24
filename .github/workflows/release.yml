@@ -300,6 +300,15 @@ jobs:
             echo "Apple certificate present but no APPLE_API_KEY_P8 — will sign without notarizing"
           fi
 
+      # A version with a pre-release part (0.2.51-cu.1) ships as a GitHub
+      # pre-release and never becomes "latest".
+      - name: Pre-release from the app version
+        id: channel
+        shell: bash
+        run: |
+          ver="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+          if [[ "$ver" == *-* ]]; then echo "prerelease=true" >> "$GITHUB_OUTPUT"; else echo "prerelease=false" >> "$GITHUB_OUTPUT"; fi
+
       - name: Build Tauri app & attach to GitHub Release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -318,7 +327,7 @@ jobs:
           releaseName: "Grok App v__VERSION__"
           releaseBody: ${{ env.RELEASE_BODY }}
           releaseDraft: false
-          prerelease: false
+          prerelease: ${{ steps.channel.outputs.prerelease == 'true' }}
           # --config injects pubkey/endpoint + createUpdaterArtifacts and/or Windows thumbprint.
           # GROK_UPDATER_* env (above) enables build.rs registration cfg.
           args: >-
@@ -456,6 +465,11 @@ jobs:
           # Hint locks the ARM64 AppImage to Tauri's linux-aarch64 key. Filename
           # heuristic in assemble-updater-manifest.sh is the fallback.
           VER="${TAG#v}"
+          # A pre-release must not move installed apps: leave grok-desktop-latest alone.
+          if [[ "$VER" == *-* ]]; then
+            echo "Pre-release $VER — rolling updater manifest unchanged"
+            exit 0
+          fi
           TAG="$TAG" REPO="$GITHUB_REPOSITORY" \
             PLATFORM_HINTS="linux-aarch64:Grok_${VER}_aarch64.AppImage" \
             bash scripts/assemble-updater-manifest.sh
