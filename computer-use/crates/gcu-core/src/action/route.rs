@@ -212,7 +212,14 @@ pub(crate) fn plan(
                     && !n.states.contains(States::PASSWORD)
                     && !matches!(n.role, Role::WebArea | Role::Document)
             }) {
-                if let Some(NodeValue::Text(previous)) = &n.value {
+                // An empty field often exposes no value at all (Windows UIA): treat
+                // it as empty text instead of refusing as not settable.
+                let previous = match &n.value {
+                    Some(NodeValue::Text(previous)) => Some(previous.as_str()),
+                    None => Some(""),
+                    Some(_) => None,
+                };
+                if let Some(previous) = previous {
                     let value = if let Some(range) = n.text_extras.as_ref().and_then(|t| t.selected)
                     {
                         previous
