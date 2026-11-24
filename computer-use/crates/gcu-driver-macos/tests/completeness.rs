@@ -21,7 +21,9 @@ fn root(children: usize) -> FakeAxNode {
     }
 }
 
-#[tokio::test]
+// Paused clock: the walk's wall-clock budget must not turn a loaded host into a
+// Deadline stop before the node cap is reached.
+#[tokio::test(start_paused = true)]
 async fn traversal_hard_node_cap_sets_incomplete() {
     for count in [4999, 5000] {
         let tree = build_raw_tree(

@@ -13,11 +13,49 @@ See `docs/llm-wiki/release.md`.
 
 ## [Unreleased]
 
+## [0.2.51-cu.1] - 2026-11-24
+
+> **Highlight:** Preview build with Computer Use: Grok can see and operate apps on your desktop.
+>
+> **中文 · 亮点：** 带电脑操作的预览版：Grok 可以查看并操作桌面上的应用。
+
 ### Added
-- Computer Use stays experimental until its release gate passes. The switch does not become a finished feature by default.
+- Computer Use preview lets Grok observe and operate desktop apps. It stays experimental and off until you turn it on.
+
+### Known issues
+- This pre-release is unsigned. macOS Gatekeeper and Windows SmartScreen will warn.
+- On Linux, text fields in AccessKit (egui) apps cannot be filled yet; GTK and Qt apps work.
+- On Windows, Computer Use does not run in the built-in Administrator account.
 
 **中文 · 新增**
-- 电脑操作在发布门槛通过前保持实验。开关不会默认变成正式功能。
+- 电脑操作预览：Grok 可以查看并操作桌面应用。仍为实验功能，默认关闭，需要手动开启。
+
+**中文 · 已知问题**
+- 本预发布未签名，macOS Gatekeeper 和 Windows SmartScreen 会提示风险。
+- Linux 上暂时无法填写 AccessKit（egui）应用的文本框；GTK、Qt 应用正常。
+- Windows 内置 Administrator 账号下无法使用电脑操作。
+
+## [0.1.0-preview.1] - 2026-11-24
+
+> **Highlight:** First preview of the standalone Computer Use package for the Grok CLI.
+>
+> **中文 · 亮点：** 面向 Grok CLI 的独立电脑操作包首个预览版。
+
+### Added
+- Computer Use package (`gcu` and the macOS helper app) for the Grok CLI. Run `gcu install grok` to register it.
+
+### Known issues
+- Unsigned: macOS needs Accessibility and Screen Recording for Grok Computer Use; Windows SmartScreen will warn.
+- On Linux, text fields in AccessKit (egui) apps cannot be filled yet; GTK and Qt apps work.
+- On Windows, it does not run in the built-in Administrator account.
+
+**中文 · 新增**
+- 面向 Grok CLI 的电脑操作包（`gcu` 与 macOS 辅助 App）。运行 `gcu install grok` 完成注册。
+
+**中文 · 已知问题**
+- 未签名：macOS 需要给 Grok Computer Use 开启辅助功能与屏幕录制权限；Windows SmartScreen 会提示风险。
+- Linux 上暂时无法填写 AccessKit（egui）应用的文本框；GTK、Qt 应用正常。
+- Windows 内置 Administrator 账号下无法使用。
 
 ## [0.2.51] - 2026-11-14
 
