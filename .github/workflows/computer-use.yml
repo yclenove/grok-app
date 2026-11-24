@@ -241,6 +241,11 @@ jobs:
         run: |
           dbus-run-session -- xvfb-run -a -s "-ac -screen 0 1280x1024x24 +extension GLX +render +extension Composite" bash scripts/smoke-linux.sh
 
+      - name: Linux MCP end-to-end smoke (gcu mcp, X11 route)
+        run: |
+          cargo build --locked -p gcu-cli --features native-x11,eval-autoapprove
+          dbus-run-session -- xvfb-run -a -s "-ac -screen 0 1280x1024x24 +extension GLX +render +extension Composite" python3 scripts/smoke-linux-mcp.py
+
       - name: Upload AT-SPI artifacts on failure
         if: failure()
         uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
@@ -251,6 +256,8 @@ jobs:
             /tmp/fixture_tree.json
             /tmp/fixture.log
             /tmp/fixture_state.json
+            /tmp/mcp_fixture.log
+            /tmp/mcp_gcu.err
 
   fixture-windows:
     name: Windows desktop contracts and system-app smoke

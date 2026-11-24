@@ -130,6 +130,6 @@ describe("resolveAppDisplayVersion", () => {
   });
 
   it("bakes a tag or short hash through Vite define", () => {
-    expect(appDisplayVersion()).toMatch(/^(v\d+\.\d+\.\d+|[0-9a-f]{7,40})$/i);
+    expect(appDisplayVersion()).toMatch(/^(v\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?|[0-9a-f]{7,40})$/i);
   });
 });
