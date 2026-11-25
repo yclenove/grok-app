@@ -251,8 +251,17 @@ jobs:
         with:
           persist-credentials: false
       - name: Native performance budget gate
+        env:
+          RELEASE_REF: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          # Owner decision 2026-11-24: pre-release tags (cu-vX.Y.Z-pre) ship before
+          # native measurements exist and say so in their notes; stable tags still
+          # need computer-use/bench/{macos,windows,linux-x11}.json within budget.
+          if [[ "${RELEASE_REF#cu-v}" == *-* ]]; then
+            echo "::notice::Pre-release ${RELEASE_REF}: native performance budgets not measured; gate skipped"
+            exit 0
+          fi
           rustup toolchain install --no-self-update
           cargo run --locked -q -p xtask -- bench-check
 

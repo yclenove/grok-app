@@ -48,6 +48,7 @@ See `docs/llm-wiki/release.md`.
 - Unsigned: macOS needs Accessibility and Screen Recording for Grok Computer Use; Windows SmartScreen will warn.
 - On Linux, text fields in AccessKit (egui) apps cannot be filled yet; GTK and Qt apps work.
 - On Windows, it does not run in the built-in Administrator account.
+- Performance budgets are not yet measured on real hardware for this pre-release.
 
 **中文 · 新增**
 - 面向 Grok CLI 的电脑操作包（`gcu` 与 macOS 辅助 App）。运行 `gcu install grok` 完成注册。
@@ -56,6 +57,7 @@ See `docs/llm-wiki/release.md`.
 - 未签名：macOS 需要给 Grok Computer Use 开启辅助功能与屏幕录制权限；Windows SmartScreen 会提示风险。
 - Linux 上暂时无法填写 AccessKit（egui）应用的文本框；GTK、Qt 应用正常。
 - Windows 内置 Administrator 账号下无法使用。
+- 本预发布尚未在真机上实测性能预算。
 
 ## [0.2.51] - 2026-11-14
 
