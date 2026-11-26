@@ -202,7 +202,7 @@ Onboarding fixes were exercised on a macOS 27 Mini. The full packaged helper-onl
 
 There is no TCC prompt. The driver reads UI Automation and refuses to raise its own integrity.
 
-A target at a higher integrity level, including an elevated installer or a Settings window at High integrity while `gcu` is Medium, returns `elevation_required`: "The target has a higher integrity level." The driver does not elevate and does not request UIAccess. UIPI is not bypassed. The secure desktop (UAC, sign-in, lock) is refused.
+`gcu` runs as an administrator, including the built-in Administrator account and "Run as administrator" (High integrity); it then also reaches elevated windows. A target at a higher integrity level than `gcu`, such as an elevated installer or a Settings window at High integrity while `gcu` is Medium, or a System process, returns `elevation_required`: "The target has a higher integrity level." The driver does not elevate and does not request UIAccess. UIPI is not bypassed. The secure desktop (UAC, sign-in, lock) is refused.
 
 `native-windows` uses UIA and WGC → PrintWindow inside a monitored Worker,
 with parent-owned hooks, hotkey, input release and Job cleanup. It never switches
@@ -471,7 +471,7 @@ Session secrets are not placed in the environment or in `argv`. Do not scrape ch
 | Screen Recording still fails after you allow it | Restart the helper. macOS applies that grant only to processes started afterward. Accessibility applies immediately. |
 | The first look at an egui / AccessKit window is a short tree, and there is no screenshot | The tree is published lazily and marked incomplete. On the macOS 27 Mini the fixture grew from 7 nodes to 54 after about 588 ms. An incomplete tree does not produce an image. A later read can be complete. The same lazy first read was seen on Windows UIA. |
 | `SetValue` returns not settable | AccessKit text fields on Linux do not implement editable text, and the egui field on macOS can report success while the text is unchanged. The driver reads the value back. Use `type_text`. On Linux that needs a foreground policy. Real GTK and Qt apps are **not_run**. |
-| `elevation_required` | The Windows target is higher integrity than `gcu`, or the engine itself has forbidden High/System integrity or UIAccess. `gcu` will not elevate. Run the target unelevated, or do the step yourself. |
+| `elevation_required` | The Windows target is higher integrity than `gcu`, or the engine itself runs as System or with UIAccess (both forbidden; an administrator / High engine is fine). `gcu` will not elevate. Run the target unelevated, start `gcu`'s client as administrator, or do the step yourself. |
 | Foreground actions unavailable on a Windows runner | The hosted runner's restricted token never delivered a synthetic mouse to the low-level hook. That is an environment result, not a promise about a PC with a physical mouse. |
 | Chromium ignores a background click on macOS | Measured on macOS 27. The driver does not switch to a foreground click to hide that. |
 | `Computer-use helper rejected the connection` | The CLI and the helper are not the same signed bytes, or the socket is not the one this user owns. Register the app that contains this `gcu`. |

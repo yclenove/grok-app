@@ -196,10 +196,11 @@ pub(super) fn security(pid: u32) -> Result<ProcessSecurity> {
         _ => IntegrityLevel::System,
     };
     let ui_access = token_info(token.0, TokenUIAccess)?[0] & 0xffff_ffff != 0;
-    // Refuse a known elevated engine before desktop/session probes can mask the
-    // reason with an unrelated WTS failure (for example in a System service).
+    // Refuse a System or UIAccess engine before desktop/session probes can mask
+    // the reason with an unrelated WTS failure (for example in a System service).
+    // An elevated (High) engine is allowed; see `gate::check_engine`.
     // SAFETY: no pointers/handles; current process ID is nonblocking.
-    if pid == unsafe { GetCurrentProcessId() } && (integrity >= IntegrityLevel::High || ui_access) {
+    if pid == unsafe { GetCurrentProcessId() } && (integrity >= IntegrityLevel::System || ui_access) {
         return Err(DriverError::ElevationRequired);
     }
     let mut session_id = 0;

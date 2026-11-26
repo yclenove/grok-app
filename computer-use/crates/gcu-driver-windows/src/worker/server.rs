@@ -63,7 +63,7 @@ impl Handles {
 /// Serve one trusted inherited stdin/stdout connection until EOF or invalid frame.
 /// Initialization and native work occur here, never in the supervisor. The caller
 /// receives the stable launcher-instance namespace in `initialize`. The caller
-/// must be the unelevated launcher; no public socket or model-facing worker RPC
+/// must be the launcher (Medium or elevated High, never System/UIAccess); no public socket or model-facing worker RPC
 /// exists. Dropping pipes terminates service; the parent watchdog kills stuck FFI.
 pub async fn serve<R, W, F, Fut>(mut input: R, mut output: W, initialize: F) -> Result<()>
 where

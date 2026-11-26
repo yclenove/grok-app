@@ -63,12 +63,9 @@ fn production_launch_is_the_worker_not_in_process() {
 }
 
 #[tokio::test]
-async fn elevated_uiaccess_and_secure_desktop_refuse_before_launch() {
+async fn system_uiaccess_and_secure_desktop_refuse_before_launch() {
+    // An elevated (High) engine is allowed: built-in Administrator support.
     let cases = [
-        (
-            security(IntegrityLevel::High, false, false, true),
-            DriverError::ElevationRequired,
-        ),
         (
             security(IntegrityLevel::System, false, false, true),
             DriverError::ElevationRequired,

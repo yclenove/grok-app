@@ -34,9 +34,12 @@ pub struct ProcessSecurity {
     pub created: u64,
 }
 
-/// Pure engine startup gate. High/System/UIAccess is never silently downgraded.
+/// Pure engine startup gate. An elevated (High) engine is allowed: on Windows
+/// most people run as an administrator, often the built-in Administrator whose
+/// processes are always High (owner decision 2026-11-25). System and UIAccess
+/// engines are still refused and never silently downgraded.
 pub fn check_engine(engine: &ProcessSecurity) -> Result<()> {
-    if engine.integrity >= IntegrityLevel::High || engine.ui_access {
+    if engine.integrity >= IntegrityLevel::System || engine.ui_access {
         return Err(DriverError::ElevationRequired);
     }
     if engine.secure_desktop || !engine.interactive {

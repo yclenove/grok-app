@@ -13,6 +13,9 @@ See `docs/llm-wiki/release.md`.
 
 ## [Unreleased]
 
+### Changed
+- Computer Use now works when Windows runs as an administrator, including the built-in Administrator account. It can then also operate elevated windows; System processes stay off limits.
+
 ## [0.2.51-cu.1] - 2026-11-24
 
 > **Highlight:** Preview build with Computer Use: Grok can see and operate apps on your desktop.
