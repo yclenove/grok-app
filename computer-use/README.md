@@ -304,7 +304,7 @@ An app is allowed at one of four levels. Timeout is not a fifth level. The wait 
 | Always allow (`always`) | Until you revoke it. An update that changes the path, content hash, code hash, certificate, product, or build requires approval again. | Yes, in `approvals.json`, mode `0600`. |
 | Deny (`deny`) | This request only. | No. |
 
-The client is asked first, inside the tool call, when it offers form elicitation. The choices are `turn`, `session`, `always`, and `deny`. An `always` answer from elicitation is not stored. Cancel, including a headless client that cancels immediately, is not approval. The local dialog then asks. That dialog is what writes `approvals.json` after you pick Always.
+The local dialog asks. The MCP client is not asked: `gcu mcp` (stdio and HTTP) and `gcu call` never send an elicitation request, so a client cannot approve on your behalf, even when it offers form elicitation. The choices are `turn`, `session`, `always`, and `deny`. The dialog is what writes `approvals.json` after you pick Always.
 
 This build has no WebKit approval window. A desktop falls back to zenity, then kdialog, on Linux; `osascript` on macOS; PowerShell on Windows. The first choice is Deny. Enter in the chat box does not approve. With no display, in CI, or when none of those tools exist, the request is denied. A release build rejects every `GCU_APPROVAL` value and exits 2. That variable exists only in a debug build compiled with `eval-autoapprove`.
 
