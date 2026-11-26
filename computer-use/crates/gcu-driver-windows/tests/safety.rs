@@ -11,7 +11,7 @@ mod common;
 use common::{actions, fixture};
 
 #[test]
-fn engine_token_medium_low_allowed_high_system_uiaccess_refused() {
+fn engine_token_up_to_high_allowed_system_uiaccess_refused() {
     for level in [
         IntegrityLevel::Untrusted,
         IntegrityLevel::Low,
@@ -23,7 +23,7 @@ fn engine_token_medium_low_allowed_high_system_uiaccess_refused() {
             let mut security = medium_security();
             security.integrity = level;
             security.ui_access = ui_access;
-            if level >= IntegrityLevel::High || ui_access {
+            if level >= IntegrityLevel::System || ui_access {
                 assert_eq!(check_engine(&security), Err(DriverError::ElevationRequired));
             } else {
                 assert!(check_engine(&security).is_ok());
@@ -33,9 +33,8 @@ fn engine_token_medium_low_allowed_high_system_uiaccess_refused() {
 }
 
 #[tokio::test]
-async fn startup_elevated_engine_returns_typed_zero_effect_refusal() {
+async fn startup_system_or_uiaccess_engine_returns_typed_zero_effect_refusal() {
     for (level, ui_access) in [
-        (IntegrityLevel::High, false),
         (IntegrityLevel::System, false),
         (IntegrityLevel::Medium, true),
     ] {
@@ -54,6 +53,33 @@ async fn startup_elevated_engine_returns_typed_zero_effect_refusal() {
         assert!(api.state().unwrap().launches.is_empty());
         assert!(api.state().unwrap().cache.is_none());
     }
+}
+
+#[tokio::test]
+async fn elevated_engine_starts_and_reaches_admin_targets_but_not_system() {
+    // Built-in Administrator / "Run as administrator": the engine token is High.
+    let api = Arc::new(FakeWinApi::default());
+    api.update(|s| s.engine.integrity = IntegrityLevel::High);
+    assert!(WindowsDriver::with_api(api.clone()).await.is_ok());
+
+    let mut engine = medium_security();
+    engine.integrity = IntegrityLevel::High;
+    assert!(check_engine(&engine).is_ok());
+    for level in [
+        IntegrityLevel::Low,
+        IntegrityLevel::Medium,
+        IntegrityLevel::High,
+    ] {
+        let mut target = engine.clone();
+        target.integrity = level;
+        assert!(check_target(&engine, &target, true, Some(true)).is_ok());
+    }
+    let mut system = engine.clone();
+    system.integrity = IntegrityLevel::System;
+    assert_eq!(
+        check_target(&engine, &system, false, Some(true)),
+        Err(DriverError::ElevationRequired)
+    );
 }
 
 #[test]

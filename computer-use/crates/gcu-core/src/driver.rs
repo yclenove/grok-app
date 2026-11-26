@@ -369,7 +369,7 @@ pub enum DriverError {
     /// Invalid range, path, or other driver request.
     #[error("invalid driver request")]
     InvalidRequest,
-    /// The target runs at a higher integrity level, or this process is elevated; never escalate.
+    /// The target runs at a higher integrity level, or this process runs as System or with UIAccess; never escalate.
     #[error("elevation required")]
     ElevationRequired,
     /// An OS permission needed for this operation is missing; the Host guides the user.

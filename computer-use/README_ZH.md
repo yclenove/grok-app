@@ -192,7 +192,7 @@ onboarding 修复曾在 macOS 27 Mini 上验证。完整打包 helper 独占 TCC
 
 没有 TCC 提示。驱动读取 UI Automation，并且拒绝抬高自己的完整性级别。
 
-目标的完整性更高时返回 `elevation_required`，说明是 “The target has a higher integrity level.”。这包括提权后的安装程序，以及 `gcu` 为 Medium、设置窗口为 High 的情况。驱动不会提权，也不会申请 UIAccess。UIPI 不会被绕过。安全桌面（UAC、登录、锁屏）会被拒绝。
+`gcu` 可以以管理员身份运行，包括内置 Administrator 账户和“以管理员身份运行”（High 完整性），这时也能操作提权后的窗口。目标的完整性高于 `gcu` 时返回 `elevation_required`，说明是 “The target has a higher integrity level.”。这包括 `gcu` 为 Medium 时的提权安装程序或 High 设置窗口，以及 System 进程。驱动不会提权，也不会申请 UIAccess。UIPI 不会被绕过。安全桌面（UAC、登录、锁屏）会被拒绝。
 
 `native-windows` 使用 monitored Worker 内的 UIA 与 WGC → PrintWindow，
 父进程持有钩子、热键、输入释放和 Job 清理，绝不切到 InProcess。
@@ -436,7 +436,7 @@ App journal/图片清理、Windows 文件 ACL、签名授权匹配和正式引�
 | 允许屏幕录制之后仍然失败 | 重启 helper。macOS 只把这项授予应用于之后启动的进程。辅助功能立即生效。 |
 | 第一次看 egui / AccessKit 窗口时树很短，而且没有截图 | 树是懒发布的，并被标成不完整。在 macOS 27 Mini 上，夹具大约 588 毫秒后从 7 个节点长到 54 个。不完整的树不出图。再读一次可能就完整了。Windows UIA 上也见过同样的懒首次读取。 |
 | `SetValue` 返回不可设置 | Linux 上的 AccessKit 文本框没有实现可编辑文本；macOS 上的 egui 文本框可能报告成功但文字没变。驱动会把值读回来核对。改用 `type_text`。在 Linux 上这需要前台策略。真实的 GTK 和 Qt 应用 **未验证**。 |
-| `elevation_required` | Windows 目标完整性高于 `gcu`，或引擎自身具有被禁止的 High/System 完整性或 UIAccess。`gcu` 不会提权。把目标以非提权方式运行，或自己完成这一步。 |
+| `elevation_required` | Windows 目标完整性高于 `gcu`，或引擎自身以 System 运行或带 UIAccess（两者都被禁止；管理员 / High 引擎可以）。`gcu` 不会提权。把目标以非提权方式运行，以管理员身份启动 `gcu` 的客户端，或自己完成这一步。 |
 | Windows 运行器上前台动作不可用 | 托管运行器的受限令牌从未把合成鼠标送到低级钩子。这是那个环境的结果，不是对有物理鼠标的电脑的承诺。 |
 | macOS 上 Chromium 忽略后台点击 | 在 macOS 27 上测得。驱动不会改走前台点击来掩盖这一点。 |
 | `Computer-use helper rejected the connection` | CLI 和 helper 不是同一份已签名字节，或者套接字不属于这个用户。请登记包含这份 `gcu` 的应用。 |
