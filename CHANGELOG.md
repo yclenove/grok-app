@@ -16,6 +16,28 @@ See `docs/llm-wiki/release.md`.
 ### Changed
 - Computer Use now works when you run Windows as an administrator. This includes the built-in Administrator account and elevated windows; System processes stay off limits.
 
+## [0.1.0-preview.2] - 2026-11-26
+
+> **Highlight:** Computer Use now works in the Windows built-in Administrator account.
+>
+> **中文 · 亮点：** 电脑操作现在可以在 Windows 内置管理员账号下使用。
+
+### Changed
+- Computer Use now works when you run Windows as an administrator. This includes the built-in Administrator account and elevated windows; System processes stay off limits.
+
+### Known issues
+- Unsigned: macOS needs Accessibility and Screen Recording for Grok Computer Use; Windows SmartScreen will warn.
+- On Linux, text fields in AccessKit (egui) apps cannot be filled yet; GTK and Qt apps work.
+- Performance budgets are not yet measured on real hardware for this pre-release.
+
+**中文 · 变更**
+- 以管理员身份运行 Windows 时也能使用电脑操作，包括内置 Administrator 账号和提权窗口；系统进程仍不可操作。
+
+**中文 · 已知问题**
+- 未签名：macOS 需要给 Grok Computer Use 开启辅助功能与屏幕录制权限；Windows SmartScreen 会提示风险。
+- Linux 上暂时无法填写 AccessKit（egui）应用的文本框；GTK、Qt 应用正常。
+- 本预发布尚未在真机上实测性能预算。
+
 ## [0.2.51-cu.1] - 2026-11-24
 
 > **Highlight:** Preview build with Computer Use: Grok can see and operate apps on your desktop.
