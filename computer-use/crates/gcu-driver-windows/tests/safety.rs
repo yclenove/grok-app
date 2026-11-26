@@ -65,7 +65,11 @@ async fn elevated_engine_starts_and_reaches_admin_targets_but_not_system() {
     let mut engine = medium_security();
     engine.integrity = IntegrityLevel::High;
     assert!(check_engine(&engine).is_ok());
-    for level in [IntegrityLevel::Low, IntegrityLevel::Medium, IntegrityLevel::High] {
+    for level in [
+        IntegrityLevel::Low,
+        IntegrityLevel::Medium,
+        IntegrityLevel::High,
+    ] {
         let mut target = engine.clone();
         target.integrity = level;
         assert!(check_target(&engine, &target, true, Some(true)).is_ok());

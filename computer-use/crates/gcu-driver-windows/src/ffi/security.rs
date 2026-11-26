@@ -200,7 +200,8 @@ pub(super) fn security(pid: u32) -> Result<ProcessSecurity> {
     // the reason with an unrelated WTS failure (for example in a System service).
     // An elevated (High) engine is allowed; see `gate::check_engine`.
     // SAFETY: no pointers/handles; current process ID is nonblocking.
-    if pid == unsafe { GetCurrentProcessId() } && (integrity >= IntegrityLevel::System || ui_access) {
+    if pid == unsafe { GetCurrentProcessId() } && (integrity >= IntegrityLevel::System || ui_access)
+    {
         return Err(DriverError::ElevationRequired);
     }
     let mut session_id = 0;
