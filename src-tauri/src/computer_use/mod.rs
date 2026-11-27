@@ -110,6 +110,7 @@ impl ComputerUseHost {
 
     /// Start or stop by the feature switch. The second call in the same phase is a no-op.
     pub async fn set_enabled(&self, enabled: bool) -> Result<(), Error> {
+        self.overlay.set_enabled(enabled);
         let mut inner = self.inner.lock().await;
         if !enabled {
             // Turning off a running host is a Stop and must survive restart. The
