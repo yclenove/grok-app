@@ -36,7 +36,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15
+          # Apple Silicon is cross-compiled on the Intel image: the hosted macOS arm64
+          # pool repeatedly failed to pick jobs up ("not acquired by Runner"), which
+          # blocked whole releases (cu-v0.1.0-preview.2, 4 attempts). The build only
+          # compiles and ad-hoc signs (codesign is arch-neutral); nothing runs the
+          # binary here. Native arm64 tests run on the Mac mini before every push.
+          - os: macos-15-intel
             target: aarch64-apple-darwin
             npm: darwin-arm64
           - os: macos-15-intel

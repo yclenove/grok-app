@@ -695,7 +695,7 @@ const PID_PAST_PID_T: u32 = (i32::MAX as u32).saturating_add(1);
 #[cfg(target_os = "macos")]
 const PID_ABSENT: u32 = 1_000_000_001;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn assert_cdhash(cdhash: &str) {
     assert!(cdhash.len() >= 40, "cdhash {cdhash}");
     assert!(
@@ -710,7 +710,9 @@ fn assert_cdhash(cdhash: &str) {
 /// freshness or a live-image read (a cache would pass). Cargo's test binary is
 /// ad-hoc signed and has a cdhash. No fixture app. A controlled child with a
 /// replaced pathname is NOT_RUN until a Mac is available.
-#[cfg(target_os = "macos")]
+/// Apple Silicon only: the arm64 linker ad-hoc signs every binary, the x86_64
+/// linker does not, so on Intel the unsigned test binary has no cdhash.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn own_process_code_identity_smoke() {
     use super::live::LiveOsFacts;
@@ -757,7 +759,8 @@ fn missing_pid_code_identity_is_none() {
 }
 
 /// `ProcessFacts` for `LiveOsFacts` is the blanket impl. It must forward.
-#[cfg(target_os = "macos")]
+/// Apple Silicon only, for the same reason as `own_process_code_identity_smoke`.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn live_os_facts_as_process_facts_forwards_to_the_live_read() {
     use super::facts::{OsFacts, ProcessFacts};
