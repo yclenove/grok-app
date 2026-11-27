@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import subprocess
 import tarfile
@@ -18,7 +19,15 @@ assets = Path('target/cu-assets')
 assets.mkdir(parents=True, exist_ok=False)
 payload = stage / 'payload'
 exe = payload / ('gcu.exe' if npm.startswith('win32') else 'gcu')
-subprocess.run([str(exe.resolve()), 'version'], check=True)
+# darwin-arm64 is cross-compiled on the Intel macOS image, which cannot execute
+# arm64. There, check the Mach-O architecture instead; native builds still run it.
+if npm == 'darwin-arm64' and platform.machine() != 'arm64':
+    archs = subprocess.run(['lipo', '-archs', str(exe)], check=True, capture_output=True, text=True).stdout.split()
+    if archs != ['arm64']:
+        raise SystemExit(f'expected an arm64 gcu, found {archs}')
+    print(f'cross-compiled {target}: lipo reports {archs}; not executed on {platform.machine()}')
+else:
+    subprocess.run([str(exe.resolve()), 'version'], check=True)
 if npm.startswith('darwin'):
     if exe.read_bytes() != (payload / 'Grok Computer Use.app/Contents/MacOS/gcu').read_bytes():
         raise SystemExit('CLI/helper executable identity differs')
