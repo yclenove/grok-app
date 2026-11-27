@@ -171,7 +171,6 @@ fn map_zbus_error(e: zbus::Error, before_dispatch: bool) -> DriverError {
     }
 }
 
-/// Dispatch an AT-SPI semantic action, either to a live D-Bus bus or in-memory mock source.
 /// Best-effort AT-SPI `Component.GrabFocus` before keyboard text input, so the
 /// keys land in the target field. Returns whether the toolkit accepted it; any
 /// error (no Component, stale handle, timeout) is `false` and never fatal.
@@ -202,6 +201,7 @@ pub async fn grab_focus(conn: Option<&zbus::Connection>, el: &NativeHandle) -> b
     )
 }
 
+/// Dispatch an AT-SPI semantic action, either to a live D-Bus bus or in-memory mock source.
 pub async fn execute_atspi_action(
     conn: Option<&zbus::Connection>,
     fake_source: Option<&FakeSource>,

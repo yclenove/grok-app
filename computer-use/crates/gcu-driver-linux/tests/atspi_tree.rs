@@ -318,7 +318,9 @@ async fn fake_tree_editable_without_text_interface_is_not_settable() {
         .await
         .expect("tree should build");
     let children = &raw_tree.root.as_ref().expect("root").children;
-    assert!(children[0].states.contains(States::EDITABLE | States::SETTABLE));
+    assert!(children[0]
+        .states
+        .contains(States::EDITABLE | States::SETTABLE));
     assert!(children[1].states.contains(States::EDITABLE));
     assert!(!children[1].states.contains(States::SETTABLE));
     assert!(raw_tree.incomplete.is_none(), "{:?}", raw_tree.incomplete);
