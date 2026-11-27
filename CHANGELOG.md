@@ -15,6 +15,7 @@ See `docs/llm-wiki/release.md`.
 
 ### Fixed
 - Turning on Computer Use in the desktop app now works on Windows and Linux.
+- The Computer Use stop panel no longer stays on screen after you turn Computer Use off.
 - Computer Use on Windows no longer stays stopped after a crash.
 - Computer Use can now type into text fields of egui apps on Linux.
 

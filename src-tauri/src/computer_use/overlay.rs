@@ -25,6 +25,9 @@ pub struct Overlay {
     pub safety: Safety,
     frame: Arc<Mutex<Frame>>,
     failed: Arc<AtomicBool>,
+    /// Computer Use switch. While off, nothing is drawn, not even a latched Stop:
+    /// the latch persists and shows again (with Resume) once the user turns it on.
+    enabled: Arc<AtomicBool>,
 }
 #[derive(Clone, Serialize)]
 pub struct Cursor {
@@ -58,6 +61,7 @@ impl Overlay {
             desk: Arc::new(Mutex::new(Desk::default())),
             safety,
             failed: Arc::new(AtomicBool::new(false)),
+            enabled: Arc::new(AtomicBool::new(false)),
             frame: Arc::new(Mutex::new(Frame {
                 phase: Phase::Hidden,
                 message: String::new(),
@@ -73,10 +77,10 @@ impl Overlay {
         tauri::async_runtime::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                if owner.frame().phase == Phase::Hidden
-                    && lock(&owner.desk).snapshot().phase == Phase::Hidden
-                    && !owner.safety.stopped()
-                {
+                let idle = lock(&owner.desk).snapshot().phase == Phase::Hidden
+                    && !owner.safety.stopped();
+                let switched_off = !owner.enabled.load(Ordering::Acquire);
+                if owner.frame().phase == Phase::Hidden && (idle || switched_off) {
                     continue;
                 }
                 let ui_owner = owner.clone();
@@ -158,7 +162,16 @@ impl Overlay {
     pub fn frame(&self) -> Frame {
         lock(&self.frame).clone()
     }
+    /// Follow the Computer Use switch. Off hides the surfaces on the next tick.
+    pub(crate) fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Release);
+    }
     fn render(&self, app: &AppHandle) -> Result<(), String> {
+        if !self.enabled.load(Ordering::Acquire) {
+            hide(app);
+            lock(&self.frame).phase = Phase::Hidden;
+            return Ok(());
+        }
         let snapshot = {
             let mut desk = lock(&self.desk);
             desk.set_stopped(self.safety.stopped());
