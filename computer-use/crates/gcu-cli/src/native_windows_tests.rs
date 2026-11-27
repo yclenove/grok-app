@@ -257,3 +257,30 @@ async fn engine_stop_latch_latches_the_mirror_and_queues_hotkey() {
     assert!(fresh.is_stopped());
     assert_eq!(inbox.try_recv().unwrap(), StopReason::Hotkey);
 }
+
+/// A listener health failure stops this process but writes no durable marker:
+/// a killed or stalled engine must not leave every later launch stopped. The
+/// user's hotkey Stop still persists.
+#[tokio::test]
+async fn listener_failure_stops_in_memory_without_the_durable_marker() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let host = LocalHost::fixture(directory.path());
+    let guard = FakeSafetyApi::default().start(HotkeyConfig::default(), local_latch(&host));
+    guard.disable("fault injection");
+    assert!(host.activity.latched_stop());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!directory.path().join("stopped").exists());
+
+    let directory = tempfile::TempDir::new().unwrap();
+    let host = LocalHost::fixture(directory.path());
+    let guard = FakeSafetyApi::default().start(HotkeyConfig::default(), local_latch(&host));
+    guard.request_stop();
+    assert!(host.activity.latched_stop());
+    for _ in 0..50 {
+        if directory.path().join("stopped").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(directory.path().join("stopped").exists());
+}

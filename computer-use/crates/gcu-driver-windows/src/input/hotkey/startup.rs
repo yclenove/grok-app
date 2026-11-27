@@ -416,6 +416,45 @@ fn late_startup_proofs_cannot_beat_the_next_watchdog_poll_or_reset_a_stage() {
         .contains("hook_proofs timed out after 1000ms"));
 }
 
+/// Records which Host latch path a Stop took.
+#[derive(Default)]
+struct Recording {
+    user: AtomicBool,
+    fail: AtomicBool,
+}
+impl StopLatch for Recording {
+    fn is_stopped(&self) -> bool {
+        false
+    }
+    fn request_stop(&self) {
+        self.user.store(true, Ordering::Release);
+    }
+    fn request_fail_stop(&self) {
+        self.fail.store(true, Ordering::Release);
+    }
+}
+
+/// A listener health failure stops this process but reaches the Host as a
+/// fail-closed Stop (which the CLI keeps in memory); only the user's Stop is durable.
+#[test]
+fn listener_failure_is_a_fail_stop_and_the_hotkey_is_a_user_stop() {
+    let api = FakeSafetyApi::default();
+    let latch = Arc::new(Recording::default());
+    let guard = api.start(Default::default(), latch.clone());
+    assert!(guard.available());
+    guard.disable("fault injection");
+    assert!(guard.is_stopped(), "the failing process still stops");
+    assert!(latch.fail.load(Ordering::Acquire));
+    assert!(!latch.user.load(Ordering::Acquire));
+
+    let api = FakeSafetyApi::default();
+    let latch = Arc::new(Recording::default());
+    let guard = api.start(Default::default(), latch.clone());
+    guard.request_stop();
+    assert!(latch.user.load(Ordering::Acquire));
+    assert!(!latch.fail.load(Ordering::Acquire));
+}
+
 #[test]
 fn listener_failure_revokes_health_and_latches_stop_before_entering_diagnostic_sink() {
     let api = FakeSafetyApi::default();

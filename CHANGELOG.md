@@ -14,6 +14,7 @@ See `docs/llm-wiki/release.md`.
 ## [Unreleased]
 
 ### Fixed
+- Computer Use on Windows no longer stays stopped after a crash.
 - Computer Use can now type into text fields of egui apps on Linux.
 
 ## [0.2.51-cu.2] - 2026-11-27
