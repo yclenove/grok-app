@@ -13,8 +13,25 @@ See `docs/llm-wiki/release.md`.
 
 ## [Unreleased]
 
+## [0.2.51-cu.2] - 2026-11-27
+
+> **Highlight:** Computer Use now works in the Windows built-in Administrator account.
+>
+> **中文 · 亮点：** 电脑操作现在可以在 Windows 内置管理员账号下使用。
+
 ### Changed
 - Computer Use now works when you run Windows as an administrator. This includes the built-in Administrator account and elevated windows; System processes stay off limits.
+
+### Known issues
+- This pre-release is unsigned. macOS Gatekeeper and Windows SmartScreen will warn.
+- On Linux, text fields in AccessKit (egui) apps cannot be filled yet; GTK and Qt apps work.
+
+**中文 · 变更**
+- 以管理员身份运行 Windows 时也能使用电脑操作，包括内置 Administrator 账号和提权窗口；系统进程仍不可操作。
+
+**中文 · 已知问题**
+- 本预发布未签名，macOS Gatekeeper 和 Windows SmartScreen 会提示风险。
+- Linux 上暂时无法填写 AccessKit（egui）应用的文本框；GTK、Qt 应用正常。
 
 ## [0.1.0-preview.3] - 2026-11-26
 
