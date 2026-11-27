@@ -435,7 +435,7 @@ App journal/图片清理、Windows 文件 ACL、签名授权匹配和正式引�
 | `permission_missing` | helper 缺少辅助功能或屏幕录制，或者 Linux 会话缺少 AT-SPI / portal 授予。 |
 | 允许屏幕录制之后仍然失败 | 重启 helper。macOS 只把这项授予应用于之后启动的进程。辅助功能立即生效。 |
 | 第一次看 egui / AccessKit 窗口时树很短，而且没有截图 | 树是懒发布的，并被标成不完整。在 macOS 27 Mini 上，夹具大约 588 毫秒后从 7 个节点长到 54 个。不完整的树不出图。再读一次可能就完整了。Windows UIA 上也见过同样的懒首次读取。 |
-| `SetValue` 返回不可设置 | Linux 上的 AccessKit 文本框没有实现可编辑文本；macOS 上的 egui 文本框可能报告成功但文字没变。驱动会把值读回来核对。改用 `type_text`。在 Linux 上这需要前台策略。真实的 GTK 和 Qt 应用 **未验证**。 |
+| `SetValue` 返回不可设置 | Linux 上的 AccessKit 文本框没有实现可编辑文本；macOS 上的 egui 文本框可能报告成功但文字没变。驱动会把值读回来核对。改用 `type_text`。在 Linux 上它会先通过 AT-SPI 聚焦文本框，再用 XTEST 键入，所以需要前台策略。真实的 GTK 和 Qt 应用 **未验证**。 |
 | `elevation_required` | Windows 目标完整性高于 `gcu`，或引擎自身以 System 运行或带 UIAccess（两者都被禁止；管理员 / High 引擎可以）。`gcu` 不会提权。把目标以非提权方式运行，以管理员身份启动 `gcu` 的客户端，或自己完成这一步。 |
 | Windows 运行器上前台动作不可用 | 托管运行器的受限令牌从未把合成鼠标送到低级钩子。这是那个环境的结果，不是对有物理鼠标的电脑的承诺。 |
 | macOS 上 Chromium 忽略后台点击 | 在 macOS 27 上测得。驱动不会改走前台点击来掩盖这一点。 |

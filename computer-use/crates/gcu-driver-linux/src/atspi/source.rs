@@ -45,6 +45,12 @@ pub trait AtspiSource: Send + Sync {
     ) -> Result<Option<TextExtras>, DriverError>;
     /// Get URL for web/link nodes.
     async fn url(&self, node: &Self::Node) -> Result<Option<String>, DriverError>;
+    /// Whether an editable node takes text through AT-SPI (EditableText or Value).
+    /// AccessKit (egui) marks text fields editable without implementing
+    /// EditableText. The default keeps sources that cannot tell on "settable".
+    async fn text_settable(&self, _node: &Self::Node) -> Result<bool, DriverError> {
+        Ok(true)
+    }
     /// Create a driver-opaque handle for the node.
     fn handle(&self, node: &Self::Node) -> NativeHandle;
 }
@@ -115,6 +121,8 @@ pub struct FakeSource {
     /// Children, role, and geometry are not counted. Tests use this to prove a
     /// scoped tree refusal did not read node content.
     pub content_reads: Arc<AtomicUsize>,
+    /// Node IDs whose editable text has no EditableText/Value interface (AccessKit).
+    pub no_text_interface: Vec<u64>,
 }
 
 impl Default for FakeSource {
@@ -123,6 +131,7 @@ impl Default for FakeSource {
             delay: Duration::ZERO,
             error_on_id: None,
             content_reads: Arc::new(AtomicUsize::new(0)),
+            no_text_interface: Vec::new(),
         }
     }
 }
@@ -200,6 +209,10 @@ impl AtspiSource for FakeSource {
     async fn url(&self, node: &Self::Node) -> Result<Option<String>, DriverError> {
         self.note_content();
         Ok(node.url.clone())
+    }
+
+    async fn text_settable(&self, node: &Self::Node) -> Result<bool, DriverError> {
+        Ok(!self.no_text_interface.contains(&node.id))
     }
 
     fn handle(&self, node: &Self::Node) -> NativeHandle {

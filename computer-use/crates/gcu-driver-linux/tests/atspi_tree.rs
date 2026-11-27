@@ -290,6 +290,40 @@ async fn fake_tree_build_maps_states_and_password() {
     );
 }
 
+/// AccessKit (egui) marks text fields editable without EditableText/Value. Such
+/// a field stays EDITABLE but not SETTABLE, so type_text uses the keyboard route
+/// (focus, then keys) instead of a SetValue that can only fail not_settable.
+#[tokio::test]
+async fn fake_tree_editable_without_text_interface_is_not_settable() {
+    let mut editable = atspi::StateSet::default();
+    editable.insert(atspi::State::Enabled);
+    editable.insert(atspi::State::Editable);
+    let field = |id| FakeNode {
+        id,
+        role: atspi::Role::Entry,
+        states: editable,
+        ..Default::default()
+    };
+    let root = FakeNode {
+        id: 1,
+        role: atspi::Role::Frame,
+        children: vec![field(2), field(3)],
+        ..Default::default()
+    };
+    let source = FakeSource {
+        no_text_interface: vec![3],
+        ..FakeSource::default()
+    };
+    let raw_tree = build_raw_tree(&source, &root, &TreeOpts::default(), &Cancel::default())
+        .await
+        .expect("tree should build");
+    let children = &raw_tree.root.as_ref().expect("root").children;
+    assert!(children[0].states.contains(States::EDITABLE | States::SETTABLE));
+    assert!(children[1].states.contains(States::EDITABLE));
+    assert!(!children[1].states.contains(States::SETTABLE));
+    assert!(raw_tree.incomplete.is_none(), "{:?}", raw_tree.incomplete);
+}
+
 #[tokio::test]
 async fn fake_tree_build_sensitive_terminal_like_marked() {
     let root = FakeNode {

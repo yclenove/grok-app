@@ -207,6 +207,14 @@ async fn perform_action_inner(
             let x = driver
                 .x_server()
                 .ok_or(DriverError::CapabilityUnavailable)?;
+            // Keys land in the focused widget. Move AT-SPI focus to the target
+            // first: AccessKit (egui) fields take no EditableText, so this is
+            // their only route. Best effort; give the toolkit a frame to react.
+            if let Some(focus_el) = focus {
+                if crate::atspi::actions::grab_focus(driver.connection(), focus_el).await {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
             let scope = driver.x11_scope();
             execute_type_text_x11(x, scope.as_ref(), driver.ledger(), xid, text, cancel).await
         }

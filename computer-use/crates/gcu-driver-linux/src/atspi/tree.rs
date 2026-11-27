@@ -206,6 +206,15 @@ impl<S: AtspiSource> Walk<'_, S> {
         let attributes = read!(self.source.attributes(node)).unwrap_or_default();
         let state_set = read!(self.source.states(node)).unwrap_or_default();
         let mut states = map_atspi_states(state_set, atspi_role, &attributes);
+        // Editable but without EditableText/Value: text goes through the keyboard
+        // (TypeText with focus), not SetValue, which would only fail not_settable.
+        // Best effort: a failed interface query keeps the node settable and does
+        // not mark the tree incomplete.
+        if states.contains(States::SETTABLE)
+            && matches!(self.source.text_settable(node).await, Ok(false))
+        {
+            states.remove(States::SETTABLE);
+        }
         if name
             .as_deref()
             .is_some_and(|s| s.to_ascii_lowercase().contains("password"))
