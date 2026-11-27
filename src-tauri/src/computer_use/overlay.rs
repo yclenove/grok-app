@@ -77,8 +77,8 @@ impl Overlay {
         tauri::async_runtime::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                let idle = lock(&owner.desk).snapshot().phase == Phase::Hidden
-                    && !owner.safety.stopped();
+                let idle =
+                    lock(&owner.desk).snapshot().phase == Phase::Hidden && !owner.safety.stopped();
                 let switched_off = !owner.enabled.load(Ordering::Acquire);
                 if owner.frame().phase == Phase::Hidden && (idle || switched_off) {
                     continue;
