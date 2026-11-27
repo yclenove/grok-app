@@ -4,7 +4,7 @@
 Run inside a desktop session (CI: dbus-run-session + xvfb-run + openbox).
 Starts the AT-SPI bus and the fixture, then lists apps, observes, clicks a
 button and a checkbox, sets and types text, and checks the fixture state.
-Text fields are reported, not required: AccessKit lacks AT-SPI EditableText.
+Text fields are required: type_text focuses egui (AccessKit) fields and uses the keyboard.
 Needs `gcu` built with `native-x11,eval-autoapprove` (debug) and gcu-fixture.
 """
 import json, os, re, shutil, subprocess, sys, time
@@ -79,7 +79,10 @@ def index(name):
 
 call("click", {"app": "gcu-fixture", "element_index": index("counter_button")})
 call("click", {"app": "gcu-fixture", "element_index": index("agree_checkbox")})
+# AccessKit (egui) has no AT-SPI EditableText: set_value is not_settable there, and
+# type_text focuses the field over AT-SPI and types with the keyboard instead.
 call("set_value", {"app": "gcu-fixture", "element_index": index("name_field"), "value": "Zhang"})
+call("type_text", {"app": "gcu-fixture", "element_index": index("name_field"), "text": "Zhang"})
 call("type_text", {"app": "gcu-fixture", "element_index": index("multiline_field"), "text": "hello"})
 time.sleep(2)
 final = json.load(open(state))
@@ -87,15 +90,10 @@ gcu.stdin.close()
 time.sleep(1)
 gcu.kill()
 fixture.kill()
-required = {"counter": 1, "checked": True}
+required = {"counter": 1, "checked": True, "text": "Zhang", "multiline": "hello"}
 got = {key: final.get(key) for key in ["counter", "checked", "text", "multiline"]}
 print("fixture state:", got)
-# Known gap: AccessKit (egui) does not implement AT-SPI EditableText, so text
-# fields in egui apps cannot be written on Linux yet (GTK/Qt apps can). Report
-# it without failing until type_text falls back to keyboard input.
-if got["text"] != "Zhang" or got["multiline"] != "hello":
-    print("WARNING: text fields were not written (AccessKit has no AT-SPI EditableText)")
 if any(got[key] != value for key, value in required.items()):
     print(open("/tmp/mcp_gcu.err").read()[-2000:])
     sys.exit(f"fixture state mismatch: expected {required}")
-print("Linux MCP smoke passed (click, toggle, observe)")
+print("Linux MCP smoke passed (click, toggle, type into egui fields, observe)")

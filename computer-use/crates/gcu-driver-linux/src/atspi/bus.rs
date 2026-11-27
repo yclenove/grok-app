@@ -352,6 +352,25 @@ impl AtspiSource for AtspiBus {
         })?
     }
 
+    async fn text_settable(&self, node: &Self::Node) -> Result<bool, DriverError> {
+        tokio::time::timeout(DBUS_CALL_TIMEOUT, async {
+            let proxy = self.accessible_proxy(node).await?;
+            let interfaces = proxy
+                .get_interfaces()
+                .await
+                .map_err(|e| DriverError::Native {
+                    message: e.to_string(),
+                    maybe_executed: false,
+                })?;
+            Ok(interfaces.contains(atspi::Interface::EditableText)
+                || interfaces.contains(atspi::Interface::Value))
+        })
+        .await
+        .map_err(|_| DriverError::Timeout {
+            maybe_executed: false,
+        })?
+    }
+
     async fn value(&self, node: &Self::Node) -> Result<Option<NodeValue>, DriverError> {
         tokio::time::timeout(DBUS_CALL_TIMEOUT, async {
             let dest = bus_dest(&node.destination)?;
