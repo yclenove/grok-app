@@ -102,10 +102,10 @@ script, no HTTP and no resume/approval RPC. The current entry announces consent
 only: P8-03 must assemble trusted session/window binding and full ActionRouter
 preflight before DOM delivery. See the [extension protocol](../tools/browser-extension/README.md#native-wire-protocol-version-1).
 
-App observations and actions ask this trusted Host. When the client advertises
-form elicitation, the Host tries that inside `tools/call` first. An `always`
-answer from elicitation is not stored; only this Host writes `approvals.json`
-(mode 0600) after the user picks always. This build has no WebKit view. A desktop
+App observations and actions ask this trusted Host. The MCP client is never
+asked: `gcu mcp` and `gcu call` open the session host-only, so form elicitation
+is not sent even when the client advertises it. Only this Host writes
+`approvals.json` (mode 0600) after the user picks always. This build has no WebKit view. A desktop
 falls back to zenity, then kdialog, on Linux; macOS uses `osascript`; Windows uses
 a fixed PowerShell prompt. CI, a missing display, and `GCU_ALLOW_FAKE` deny
 instead of opening a window.

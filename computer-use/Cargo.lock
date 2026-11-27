@@ -2109,7 +2109,7 @@ dependencies = [
 
 [[package]]
 name = "gcu-cli"
-version = "0.1.0-preview.2"
+version = "0.1.0-preview.3"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2151,7 +2151,7 @@ dependencies = [
 
 [[package]]
 name = "gcu-core"
-version = "0.1.0-preview.2"
+version = "0.1.0-preview.3"
 dependencies = [
  "async-trait",
  "bitflags 2.13.2",
@@ -2175,7 +2175,7 @@ dependencies = [
 
 [[package]]
 name = "gcu-driver-fake"
-version = "0.1.0-preview.2"
+version = "0.1.0-preview.3"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -2190,7 +2190,7 @@ dependencies = [
 
 [[package]]
 name = "gcu-driver-linux"
-version = "0.1.0-preview.2"
+version = "0.1.0-preview.3"
 dependencies = [
  "ashpd",
  "async-trait",
@@ -2220,7 +2220,7 @@ dependencies = [
 
 [[package]]
 name = "gcu-driver-macos"
-version = "0.1.0-preview.2"
+version = "0.1.0-preview.3"
 dependencies = [
  "accessibility-sys",
  "async-trait",
@@ -2252,7 +2252,7 @@ dependencies = [
 
 [[package]]
 name = "gcu-driver-windows"
-version = "0.1.0-preview.2"
+version = "0.1.0-preview.3"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -2272,7 +2272,7 @@ dependencies = [
 
 [[package]]
 name = "gcu-eval"
-version = "0.1.0-preview.2"
+version = "0.1.0-preview.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -2290,7 +2290,7 @@ dependencies = [
 
 [[package]]
 name = "gcu-fixture"
-version = "0.1.0-preview.2"
+version = "0.1.0-preview.3"
 dependencies = [
  "eframe",
  "serde",
@@ -2300,7 +2300,7 @@ dependencies = [
 
 [[package]]
 name = "gcu-host-api"
-version = "0.1.0-preview.2"
+version = "0.1.0-preview.3"
 dependencies = [
  "async-trait",
  "gcu-protocol",
@@ -2308,7 +2308,7 @@ dependencies = [
 
 [[package]]
 name = "gcu-host-protocol"
-version = "0.1.0-preview.2"
+version = "0.1.0-preview.3"
 dependencies = [
  "gcu-protocol",
  "hmac",
@@ -2326,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "gcu-mcp"
-version = "0.1.0-preview.2"
+version = "0.1.0-preview.3"
 dependencies = [
  "async-trait",
  "axum",
@@ -2347,7 +2347,7 @@ dependencies = [
 
 [[package]]
 name = "gcu-overlay"
-version = "0.1.0-preview.2"
+version = "0.1.0-preview.3"
 dependencies = [
  "gcu-core",
  "gcu-driver-linux",
@@ -2370,7 +2370,7 @@ dependencies = [
 
 [[package]]
 name = "gcu-protocol"
-version = "0.1.0-preview.2"
+version = "0.1.0-preview.3"
 dependencies = [
  "schemars",
  "serde",
@@ -2380,7 +2380,7 @@ dependencies = [
 
 [[package]]
 name = "gcu-script"
-version = "0.1.0-preview.2"
+version = "0.1.0-preview.3"
 dependencies = [
  "gcu-core",
  "gcu-protocol",
@@ -7238,7 +7238,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.1.0-preview.2"
+version = "0.1.0-preview.3"
 dependencies = [
  "anyhow",
  "gcu-host-protocol",

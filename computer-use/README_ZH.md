@@ -286,7 +286,7 @@ gcu will modify files under ~/.grok (MCP config and the Stop hook). Continue? [y
 | 始终允许（`always`） | 到你撤销。路径、内容哈希、代码哈希、证书、产品或 build 有变化时，要重新批准。 | 是，写在 `approvals.json`，模式 `0600`。 |
 | 拒绝（`deny`） | 仅这一次请求。 | 否。 |
 
-客户端如果提供表单 elicitation，会先在工具调用里询问。选项是 `turn`、`session`、`always`、`deny`。elicitation 里的 `always` 不会被保存。取消不是批准，无头客户端立刻取消也一样。然后本地对话框再问。你在那个对话框里选择始终允许之后，才会写入 `approvals.json`。
+由本地对话框询问。不会询问 MCP 客户端：`gcu mcp`（stdio 和 HTTP）与 `gcu call` 都不发送 elicitation 请求，所以即使客户端支持表单 elicitation，也不能替你批准。选项是 `turn`、`session`、`always`、`deny`。你在对话框里选择始终允许之后，才会写入 `approvals.json`。
 
 本构建没有 WebKit 审批窗。有桌面时，Linux 先用 zenity，再试 kdialog；macOS 用 `osascript`；Windows 用 PowerShell。第一项是拒绝。聊天框里的 Enter 不会批准。没有显示器、在 CI 里、或这些工具都不存在时，请求被拒绝。发行构建拒绝任何 `GCU_APPROVAL` 值并以退出码 2 结束。该变量只存在于带 `eval-autoapprove` 的调试构建。
 
