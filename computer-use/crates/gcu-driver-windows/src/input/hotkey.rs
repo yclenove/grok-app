@@ -37,6 +37,13 @@ pub trait StopLatch: Send + Sync + 'static {
     fn is_stopped(&self) -> bool;
     /// Latch synchronously; arrange persistence without blocking the hook thread.
     fn request_stop(&self);
+    /// Fail-closed Stop raised by listener/watchdog health, not by the user.
+    /// Latch for this process like `request_stop`, but a Host may skip
+    /// persistence: a listener hiccup or a killed process must not leave every
+    /// later launch answering stopped_by_user. Default: `request_stop`.
+    fn request_fail_stop(&self) {
+        self.request_stop();
+    }
 }
 #[cfg(windows)]
 pub(crate) struct UnboundStop;
@@ -304,7 +311,7 @@ impl GuardEvents {
             self.heartbeat.invalidate();
             self.hotkey_heartbeat.invalidate();
             if self.armed.load(Ordering::Acquire) {
-                self.request_stop();
+                self.latch_stop(false);
             }
             // A slow diagnostic sink must never delay revocation or Stop.
             #[cfg(test)]
@@ -317,6 +324,11 @@ impl GuardEvents {
     }
     /// The first operation is an atomic local latch, before any Host/worker work.
     pub fn request_stop(&self) {
+        self.latch_stop(true);
+    }
+    /// `user`: the hotkey or an explicit request (durable); otherwise a fail-closed
+    /// health Stop, which the Host latch may keep in memory only.
+    fn latch_stop(&self, user: bool) {
         self.local_stop.store(true, Ordering::SeqCst);
         self.changed.notify_one();
         let signal = self
@@ -327,7 +339,11 @@ impl GuardEvents {
         for signal in signal {
             signal();
         }
-        self.latch.request_stop();
+        if user {
+            self.latch.request_stop();
+        } else {
+            self.latch.request_fail_stop();
+        }
         if self.latch.is_stopped() {
             self.local_stop.store(false, Ordering::SeqCst);
         }

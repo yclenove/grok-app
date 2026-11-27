@@ -109,6 +109,12 @@ impl StopLatch for LocalStopLatch {
                 let _ = activity.persist_stop();
             });
     }
+
+    /// Listener/watchdog health failure: stop this process, but do not write the
+    /// durable marker. Only the user's Stop survives a restart.
+    fn request_fail_stop(&self) {
+        self.activity.latch();
+    }
 }
 
 #[cfg(any(test, all(windows, feature = "native-windows")))]
