@@ -57,6 +57,16 @@ fn stage_engine() {
     if profile == "release" {
         command.arg("--release");
     }
+    // Assemble the platform's native route, as the standalone release does
+    // (release-computer-use.yml). Without it `gcu engine` exits 2 on Windows and
+    // Linux, so the App's Computer Use switch could never start the engine.
+    // Linux leaves out PipeWire (Wayland capture): the App build images do not
+    // install libpipewire; X11 and Wayland input still assemble.
+    if target.contains("windows") {
+        command.args(["--features", "native-windows"]);
+    } else if target.contains("linux") {
+        command.args(["--features", "native-x11,native-wayland"]);
+    }
     let status = command
         .status()
         .unwrap_or_else(|error| panic!("failed to start gcu sidecar build: {error}"));
