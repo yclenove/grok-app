@@ -37,7 +37,10 @@ jobs:
             name: Linux
           - os: windows-2022
             name: Windows
-          - os: macos-15
+          # Intel image: the hosted macOS arm64 pool kept cancelling this job before
+          # it started ("not acquired by Runner"). Native Apple Silicon tests for the
+          # same crates run on the Mac mini in the pre-push check.
+          - os: macos-15-intel
             name: macOS
     runs-on: ${{ matrix.os }}
     name: Computer Use (${{ matrix.name }})
