@@ -1668,7 +1668,7 @@ dependencies = [
 
 [[package]]
 name = "gcu-host-protocol"
-version = "0.1.0-preview.3"
+version = "0.1.0-preview.4"
 dependencies = [
  "gcu-protocol",
  "hmac 0.13.0",
@@ -1686,7 +1686,7 @@ dependencies = [
 
 [[package]]
 name = "gcu-protocol"
-version = "0.1.0-preview.3"
+version = "0.1.0-preview.4"
 dependencies = [
  "schemars 1.2.1",
  "serde",
@@ -1987,7 +1987,7 @@ dependencies = [
 
 [[package]]
 name = "grok-app"
-version = "0.2.51-cu.2"
+version = "0.2.51-cu.3"
 dependencies = [
  "arboard",
  "async-stream",

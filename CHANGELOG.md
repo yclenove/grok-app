@@ -13,11 +13,55 @@ See `docs/llm-wiki/release.md`.
 
 ## [Unreleased]
 
+## [0.2.51-cu.3] - 2026-11-27
+
+> **Highlight:** Computer Use can now be turned on in the desktop app on Windows and Linux.
+>
+> **中文 · 亮点：** Windows 和 Linux 的桌面 App 现在可以开启电脑操作了。
+
 ### Fixed
 - Turning on Computer Use in the desktop app now works on Windows and Linux.
 - The Computer Use stop panel no longer stays on screen after you turn Computer Use off.
 - Computer Use on Windows no longer stays stopped after a crash.
 - Computer Use can now type into text fields of egui apps on Linux.
+
+### Known issues
+- This pre-release is unsigned. macOS Gatekeeper and Windows SmartScreen will warn.
+- On Linux, set_value cannot fill AccessKit (egui) text fields; type_text works.
+
+**中文 · 修复**
+- Windows 和 Linux 的桌面 App 现在可以正常开启电脑操作。
+- 关闭电脑操作后，停止面板不再一直留在屏幕上。
+- Windows 上电脑操作崩溃或被结束后，下次启动不再一直处于停止状态。
+- Linux 上电脑操作现在可以在 egui 应用的文本框里输入文字。
+
+**中文 · 已知问题**
+- 本预发布未签名，macOS Gatekeeper 和 Windows SmartScreen 会提示风险。
+- Linux 上 set_value 仍无法填写 AccessKit（egui）文本框；type_text 可以。
+
+## [0.1.0-preview.4] - 2026-11-27
+
+> **Highlight:** Typing into egui text fields on Linux, and no stuck Stop on Windows.
+>
+> **中文 · 亮点：** Linux 上可以向 egui 文本框输入文字；Windows 上不再卡在停止状态。
+
+### Fixed
+- Computer Use can now type into text fields of egui apps on Linux.
+- Computer Use on Windows no longer stays stopped after a crash.
+
+### Known issues
+- Unsigned: macOS needs Accessibility and Screen Recording for Grok Computer Use; Windows SmartScreen will warn.
+- On Linux, set_value cannot fill AccessKit (egui) text fields; type_text works.
+- Performance budgets are not yet measured on real hardware for this pre-release.
+
+**中文 · 修复**
+- Linux 上电脑操作现在可以在 egui 应用的文本框里输入文字。
+- Windows 上电脑操作崩溃或被结束后，下次启动不再一直处于停止状态。
+
+**中文 · 已知问题**
+- 未签名：macOS 需要给 Grok Computer Use 开启辅助功能与屏幕录制权限；Windows SmartScreen 会提示风险。
+- Linux 上 set_value 仍无法填写 AccessKit（egui）文本框；type_text 可以。
+- 本预发布尚未在真机上实测性能预算。
 
 ## [0.2.51-cu.2] - 2026-11-27
 

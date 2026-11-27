@@ -22,7 +22,7 @@ exclude = ["tools/s11-mailbox-probe"]
 
 [workspace.package]
 edition = "2021"
-version = "0.1.0-preview.3"
+version = "0.1.0-preview.4"
 license = "MIT"
 publish = false
 
